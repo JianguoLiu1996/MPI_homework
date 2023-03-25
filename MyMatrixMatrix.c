@@ -18,15 +18,18 @@ int main(int argc, char *argv[]){
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);      //obtain the rank id
 	MPI_Comm_size(MPI_COMM_WORLD, &size);      //obtain the number of processes
 	
-	if(rank == 0){
-		printf("The size is %d \n", size);
+	if(rank==0){
+		printf("The size is:%d\n", size);
 	}
+
+	//MPI_Barrier(MPI_COMM_WORLD);
 	//start time
-	double local_start, local_end;
-	local_start = MPI_Wtime();
+	//double local_start, local_end;
+	//local_start = MPI_Wtime();
 
 	//make Matrix
 	int ** MatrixA = makeMatrixA(N);
+	/* ===test for MatrixA===
 	if(rank ==0){
 		printf("MatrixA is: \n");
 		for(int i=0; i<N; i++){
@@ -36,7 +39,9 @@ int main(int argc, char *argv[]){
 			printf("\n");
 		}
 	}
+	*/
 	int * Matrixx = makeMatrixx(N);
+	/* ===Test for Matrixx===
 	if(rank ==0 ){
 		printf("Matrixx is:\n ");
 		for(int i=0; i<N; i++){
@@ -44,6 +49,12 @@ int main(int argc, char *argv[]){
 		}
 		printf("\n");
 	}
+	*/
+
+	MPI_Barrier(MPI_COMM_WORLD);
+	//start time
+	double local_start, local_end;
+	local_start = MPI_Wtime();
 
 	//each process calculate the result
 	int * y = (int *)malloc(sizeof(int)*N);
@@ -53,12 +64,15 @@ int main(int argc, char *argv[]){
 		localy[i]=0;
 		for(int j=0; j<N; j++){
 			localy[i] += MatrixA[rank*localN+i][j] * Matrixx[j];
+			/* ===Test for localy===
 			if(rank == 0){
 				printf("%d ", MatrixA[rank*localN+i][j]*Matrixx[j]);
 			}
+			*/
 		}	
-		printf("\n");
+		//printf("\n");
 	}
+	/* ===Test for localy===
 	if(rank ==0){
 		printf("\n process 0 local y is:\n");
 		for(int i=0; i<localN; i++){
@@ -66,8 +80,9 @@ int main(int argc, char *argv[]){
 		}
 		printf("\n");
 	}
+	*/
 	
-	//MPI_Barrier(MPI_COMM_WORLD);
+	MPI_Barrier(MPI_COMM_WORLD);
 	//end time
 	local_end = MPI_Wtime();
 
@@ -84,6 +99,12 @@ int main(int argc, char *argv[]){
 		printf("\n");
 	}
 	
+	// free memory
+	free(MatrixA);
+	free(Matrixx);
+	free(localy);
+	free(y);
+
 	// Print a message from each process
 	MPI_Finalize(); //Finalize MPI
 	
