@@ -4,7 +4,7 @@
 #include <time.h>
 
 //Matrix number N*N
-#define N 1024 
+#define N 16384 
 
 //claim function
 int ** makeMatrixA(int matrixsize);
