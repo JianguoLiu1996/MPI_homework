@@ -1,0 +1,505 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/pc/impls/hmg/hmg.c">Actual source code: hmg.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:55+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petscdm.h.html">&lt;petscdm.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../include/petsc/private/hashmapi.h.html">&lt;petsc/private/hashmapi.h&gt;</A>
+<a name="line3">  3: </a>#include <A href="../../../../../include/petsc/private/matimpl.h.html">&lt;petsc/private/matimpl.h&gt;</A>
+<a name="line4">  4: </a>#include <A href="../../../../../include/petsc/private/pcmgimpl.h.html">&lt;petsc/private/pcmgimpl.h&gt;</A>
+<a name="line5">  5: </a>#include <A href="../../../../../include/petsc/private/pcimpl.h.html">&lt;petsc/private/pcimpl.h&gt;</A>
+
+<a name="line7">  7: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line8">  8: </a>  <a href="../../../../../manualpages/PC/PC.html">PC</a>        innerpc;       <font color="#B22222">/* A MG inner <a href="../../../../../manualpages/PC/PC.html">PC</a> (Hypre or <a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>) to setup interpolations and coarse operators  */</font>
+<a name="line9">  9: </a>  char     *innerpctype;   <font color="#B22222">/* <a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a> or <a href="../../../../../manualpages/PC/PCHYPRE.html">PCHYPRE</a> */</font>
+<a name="line10"> 10: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> reuseinterp;   <font color="#B22222">/* A flag indicates if or not to reuse the interpolations */</font>
+<a name="line11"> 11: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> subcoarsening; <font color="#B22222">/* If or not to use a subspace-based coarsening algorithm */</font>
+<a name="line12"> 12: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> usematmaij;    <font color="#B22222">/* If or not to use MatMAIJ for saving memory */</font>
+<a name="line13"> 13: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  component;     <font color="#B22222">/* Which subspace is used for the subspace-based coarsening algorithm? */</font>
+<a name="line14"> 14: </a>} PC_HMG;
+
+<a name="line16"> 16: </a><strong><font color="#4169E1"><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetFromOptions_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a>, PetscOptionItems *)</font></strong>;
+<a name="line17"> 17: </a><strong><font color="#4169E1"><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCReset_MG(<a href="../../../../../manualpages/PC/PC.html">PC</a>)</font></strong>;
+
+<a name="line19"> 19: </a><strong><font color="#4169E1"><a name="PCHMGExtractSubMatrix_Private"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGExtractSubMatrix_Private(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> pmat, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> *submat, <a href="../../../../../manualpages/Mat/MatReuse.html">MatReuse</a> reuse, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> component, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> blocksize)</font></strong>
+<a name="line20"> 20: </a>{
+<a name="line21"> 21: </a>  <a href="../../../../../manualpages/IS/IS.html">IS</a>       isrow;
+<a name="line22"> 22: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> rstart, rend;
+<a name="line23"> 23: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm;
+
+<a name="line25"> 25: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line26"> 26: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pmat, &amp;comm));
+<a name="line27"> 27: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(component &lt; blocksize, comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"Component %"</font> PetscInt_FMT <font color="#666666">" should be less than block size %"</font> PetscInt_FMT <font color="#666666">" "</font>, component, blocksize);
+<a name="line28"> 28: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRange.html">MatGetOwnershipRange</a>(pmat, &amp;rstart, &amp;rend));
+<a name="line29"> 29: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>((rend - rstart) % blocksize == 0, comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"Block size %"</font> PetscInt_FMT <font color="#666666">" is inconsistent for [%"</font> PetscInt_FMT <font color="#666666">", %"</font> PetscInt_FMT <font color="#666666">") "</font>, blocksize, rstart, rend);
+<a name="line30"> 30: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISCreateStride.html">ISCreateStride</a>(comm, (rend - rstart) / blocksize, rstart + component, blocksize, &amp;isrow));
+<a name="line31"> 31: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateSubMatrix.html">MatCreateSubMatrix</a>(pmat, isrow, isrow, reuse, submat));
+<a name="line32"> 32: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISDestroy.html">ISDestroy</a>(&amp;isrow));
+<a name="line33"> 33: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line34"> 34: </a>}
+
+<a name="line36"> 36: </a><strong><font color="#4169E1"><a name="PCHMGExpandInterpolation_Private"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGExpandInterpolation_Private(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> subinterp, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> *interp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> blocksize)</font></strong>
+<a name="line37"> 37: </a>{
+<a name="line38"> 38: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           subrstart, subrend, subrowsize, subcolsize, subcstart, subcend, rowsize, colsize;
+<a name="line39"> 39: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           subrow, row, nz, *d_nnz, *o_nnz, i, j, dnz, onz, max_nz, *indices;
+<a name="line40"> 40: </a>  const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    *idx;
+<a name="line41"> 41: </a>  const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *values;
+<a name="line42"> 42: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>           comm;
+
+<a name="line44"> 44: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line45"> 45: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)subinterp, &amp;comm));
+<a name="line46"> 46: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRange.html">MatGetOwnershipRange</a>(subinterp, &amp;subrstart, &amp;subrend));
+<a name="line47"> 47: </a>  subrowsize = subrend - subrstart;
+<a name="line48"> 48: </a>  rowsize    = subrowsize * blocksize;
+<a name="line49"> 49: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCalloc2.html">PetscCalloc2</a>(rowsize, &amp;d_nnz, rowsize, &amp;o_nnz));
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRangeColumn.html">MatGetOwnershipRangeColumn</a>(subinterp, &amp;subcstart, &amp;subcend));
+<a name="line51"> 51: </a>  subcolsize = subcend - subcstart;
+<a name="line52"> 52: </a>  colsize    = subcolsize * blocksize;
+<a name="line53"> 53: </a>  max_nz     = 0;
+<a name="line54"> 54: </a>  <font color="#4169E1">for</font> (subrow = subrstart; subrow &lt; subrend; subrow++) {
+<a name="line55"> 55: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRow.html">MatGetRow</a>(subinterp, subrow, &amp;nz, &amp;idx, NULL));
+<a name="line56"> 56: </a>    <font color="#4169E1">if</font> (max_nz &lt; nz) max_nz = nz;
+<a name="line57"> 57: </a>    dnz = 0;
+<a name="line58"> 58: </a>    onz = 0;
+<a name="line59"> 59: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; nz; i++) {
+<a name="line60"> 60: </a>      <font color="#4169E1">if</font> (idx[i] &gt;= subcstart &amp;&amp; idx[i] &lt; subcend) dnz++;
+<a name="line61"> 61: </a>      <font color="#4169E1">else</font> onz++;
+<a name="line62"> 62: </a>    }
+<a name="line63"> 63: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; blocksize; i++) {
+<a name="line64"> 64: </a>      d_nnz[(subrow - subrstart) * blocksize + i] = dnz;
+<a name="line65"> 65: </a>      o_nnz[(subrow - subrstart) * blocksize + i] = onz;
+<a name="line66"> 66: </a>    }
+<a name="line67"> 67: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatRestoreRow.html">MatRestoreRow</a>(subinterp, subrow, &amp;nz, &amp;idx, NULL));
+<a name="line68"> 68: </a>  }
+<a name="line69"> 69: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateAIJ.html">MatCreateAIJ</a>(comm, rowsize, colsize, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, 0, d_nnz, 0, o_nnz, interp));
+<a name="line70"> 70: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetOption.html">MatSetOption</a>(*interp, <a href="../../../../../manualpages/Mat/MatOption.html">MAT_IGNORE_OFF_PROC_ENTRIES</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line71"> 71: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetOption.html">MatSetOption</a>(*interp, <a href="../../../../../manualpages/Mat/MatOption.html">MAT_IGNORE_ZERO_ENTRIES</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line72"> 72: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetOption.html">MatSetOption</a>(*interp, <a href="../../../../../manualpages/Mat/MatOption.html">MAT_NEW_NONZERO_ALLOCATION_ERR</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line73"> 73: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetFromOptions.html">MatSetFromOptions</a>(*interp));
+
+<a name="line75"> 75: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetUp.html">MatSetUp</a>(*interp));
+<a name="line76"> 76: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree2.html">PetscFree2</a>(d_nnz, o_nnz));
+<a name="line77"> 77: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(max_nz, &amp;indices));
+<a name="line78"> 78: </a>  <font color="#4169E1">for</font> (subrow = subrstart; subrow &lt; subrend; subrow++) {
+<a name="line79"> 79: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRow.html">MatGetRow</a>(subinterp, subrow, &amp;nz, &amp;idx, &amp;values));
+<a name="line80"> 80: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; blocksize; i++) {
+<a name="line81"> 81: </a>      row = subrow * blocksize + i;
+<a name="line82"> 82: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; nz; j++) indices[j] = idx[j] * blocksize + i;
+<a name="line83"> 83: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetValues.html">MatSetValues</a>(*interp, 1, &amp;row, nz, indices, values, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>));
+<a name="line84"> 84: </a>    }
+<a name="line85"> 85: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatRestoreRow.html">MatRestoreRow</a>(subinterp, subrow, &amp;nz, &amp;idx, &amp;values));
+<a name="line86"> 86: </a>  }
+<a name="line87"> 87: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(indices));
+<a name="line88"> 88: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(*interp, <a href="../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line89"> 89: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(*interp, <a href="../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line90"> 90: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line91"> 91: </a>}
+
+<a name="line93"> 93: </a><strong><font color="#4169E1"><a name="PCSetUp_HMG"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line94"> 94: </a>{
+<a name="line95"> 95: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>              PA, submat;
+<a name="line96"> 96: </a>  PC_MG           *mg  = (PC_MG *)pc-&gt;data;
+<a name="line97"> 97: </a>  PC_HMG          *hmg = (PC_HMG *)mg-&gt;innerctx;
+<a name="line98"> 98: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>         comm;
+<a name="line99"> 99: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         level;
+<a name="line100">100: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         num_levels;
+<a name="line101">101: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>             *operators, *interpolations;
+<a name="line102">102: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         blocksize;
+<a name="line103">103: </a>  const char      *prefix;
+<a name="line104">104: </a>  PCMGGalerkinType galerkin;
+
+<a name="line106">106: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line107">107: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, &amp;comm));
+<a name="line108">108: </a>  <font color="#4169E1">if</font> (pc-&gt;setupcalled) {
+<a name="line109">109: </a>    <font color="#4169E1">if</font> (hmg-&gt;reuseinterp) {
+<a name="line110">110: </a>      <font color="#B22222">/* If we did not use Galerkin in the last call or we have a different sparsity pattern now,</font>
+<a name="line111">111: </a><font color="#B22222">      * we have to build from scratch</font>
+<a name="line112">112: </a><font color="#B22222">      * */</font>
+<a name="line113">113: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGGetGalerkin.html">PCMGGetGalerkin</a>(pc, &amp;galerkin));
+<a name="line114">114: </a>      <font color="#4169E1">if</font> (galerkin == <a href="../../../../../manualpages/PC/PCMGalerkinType.html">PC_MG_GALERKIN_NONE</a> || pc-&gt;flag != <a href="../../../../../manualpages/Mat/MatStructure.html">SAME_NONZERO_PATTERN</a>) pc-&gt;setupcalled = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line115">115: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetGalerkin.html">PCMGSetGalerkin</a>(pc, <a href="../../../../../manualpages/PC/PCMGalerkinType.html">PC_MG_GALERKIN_PMAT</a>));
+<a name="line116">116: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_MG(pc));
+<a name="line117">117: </a>      <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line118">118: </a>    } <font color="#4169E1">else</font> {
+<a name="line119">119: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCReset_MG(pc));
+<a name="line120">120: </a>      pc-&gt;setupcalled = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line121">121: </a>    }
+<a name="line122">122: </a>  }
+
+<a name="line124">124: </a>  <font color="#B22222">/* Create an inner <a href="../../../../../manualpages/PC/PC.html">PC</a> (GAMG or HYPRE) */</font>
+<a name="line125">125: </a>  <font color="#4169E1">if</font> (!hmg-&gt;innerpc) {
+<a name="line126">126: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>(comm, &amp;hmg-&gt;innerpc));
+<a name="line127">127: </a>    <font color="#B22222">/* If users do not set an inner pc type, we need to set a default value */</font>
+<a name="line128">128: </a>    <font color="#4169E1">if</font> (!hmg-&gt;innerpctype) {
+<a name="line129">129: </a>      <font color="#B22222">/* If hypre is available, use hypre, otherwise, use gamg */</font>
+<a name="line130">130: </a><font color="#A020F0">#if PETSC_HAVE_HYPRE</font>
+<a name="line131">131: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrallocpy.html">PetscStrallocpy</a>(<a href="../../../../../manualpages/PC/PCHYPRE.html">PCHYPRE</a>, &amp;(hmg-&gt;innerpctype)));
+<a name="line132">132: </a><font color="#A020F0">#else</font>
+<a name="line133">133: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrallocpy.html">PetscStrallocpy</a>(<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>, &amp;(hmg-&gt;innerpctype)));
+<a name="line134">134: </a><font color="#A020F0">#endif</font>
+<a name="line135">135: </a>    }
+<a name="line136">136: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetType.html">PCSetType</a>(hmg-&gt;innerpc, hmg-&gt;innerpctype));
+<a name="line137">137: </a>  }
+<a name="line138">138: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetOperators.html">PCGetOperators</a>(pc, NULL, &amp;PA));
+<a name="line139">139: </a>  <font color="#B22222">/* Users need to correctly set a block size of matrix in order to use subspace coarsening */</font>
+<a name="line140">140: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetBlockSize.html">MatGetBlockSize</a>(PA, &amp;blocksize));
+<a name="line141">141: </a>  <font color="#4169E1">if</font> (blocksize &lt;= 1) hmg-&gt;subcoarsening = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line142">142: </a>  <font color="#B22222">/* Extract a submatrix for constructing subinterpolations */</font>
+<a name="line143">143: </a>  <font color="#4169E1">if</font> (hmg-&gt;subcoarsening) {
+<a name="line144">144: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCHMGExtractSubMatrix_Private(PA, &amp;submat, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, hmg-&gt;component, blocksize));
+<a name="line145">145: </a>    PA = submat;
+<a name="line146">146: </a>  }
+<a name="line147">147: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetOperators.html">PCSetOperators</a>(hmg-&gt;innerpc, PA, PA));
+<a name="line148">148: </a>  <font color="#4169E1">if</font> (hmg-&gt;subcoarsening) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;PA));
+<a name="line149">149: </a>  <font color="#B22222">/* Setup inner <a href="../../../../../manualpages/PC/PC.html">PC</a> correctly. During this step, matrix will be coarsened */</font>
+<a name="line150">150: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetUseAmat.html">PCSetUseAmat</a>(hmg-&gt;innerpc, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line151">151: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetOptionsPrefix.html">PetscObjectGetOptionsPrefix</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, &amp;prefix));
+<a name="line152">152: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectSetOptionsPrefix.html">PetscObjectSetOptionsPrefix</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)hmg-&gt;innerpc, prefix));
+<a name="line153">153: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectAppendOptionsPrefix.html">PetscObjectAppendOptionsPrefix</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)hmg-&gt;innerpc, <font color="#666666">"hmg_inner_"</font>));
+<a name="line154">154: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetFromOptions.html">PCSetFromOptions</a>(hmg-&gt;innerpc));
+<a name="line155">155: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetUp.html">PCSetUp</a>(hmg-&gt;innerpc));
+
+<a name="line157">157: </a>  <font color="#B22222">/* Obtain interpolations IN PLACE. For BoomerAMG, (I,J,data) is reused to avoid memory overhead */</font>
+<a name="line158">158: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetInterpolations.html">PCGetInterpolations</a>(hmg-&gt;innerpc, &amp;num_levels, &amp;interpolations));
+<a name="line159">159: </a>  <font color="#B22222">/* We can reuse the coarse operators when we do the full space coarsening */</font>
+<a name="line160">160: </a>  <font color="#4169E1">if</font> (!hmg-&gt;subcoarsening) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetCoarseOperators.html">PCGetCoarseOperators</a>(hmg-&gt;innerpc, &amp;num_levels, &amp;operators));
+
+<a name="line162">162: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCDestroy.html">PCDestroy</a>(&amp;hmg-&gt;innerpc));
+<a name="line163">163: </a>  hmg-&gt;innerpc = NULL;
+<a name="line164">164: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCMGSetLevels_MG(pc, num_levels, NULL));
+<a name="line165">165: </a>  <font color="#B22222">/* Set coarse matrices and interpolations to <a href="../../../../../manualpages/PC/PCMG.html">PCMG</a> */</font>
+<a name="line166">166: </a>  <font color="#4169E1">for</font> (level = num_levels - 1; level &gt; 0; level--) {
+<a name="line167">167: </a>    <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> P = NULL, pmat = NULL;
+<a name="line168">168: </a>    <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> b, x, r;
+<a name="line169">169: </a>    <font color="#4169E1">if</font> (hmg-&gt;subcoarsening) {
+<a name="line170">170: </a>      <font color="#4169E1">if</font> (hmg-&gt;usematmaij) {
+<a name="line171">171: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateMAIJ.html">MatCreateMAIJ</a>(interpolations[level - 1], blocksize, &amp;P));
+<a name="line172">172: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;interpolations[level - 1]));
+<a name="line173">173: </a>      } <font color="#4169E1">else</font> {
+<a name="line174">174: </a>        <font color="#B22222">/* Grow interpolation. In the future, we should use MAIJ */</font>
+<a name="line175">175: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCHMGExpandInterpolation_Private(interpolations[level - 1], &amp;P, blocksize));
+<a name="line176">176: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;interpolations[level - 1]));
+<a name="line177">177: </a>      }
+<a name="line178">178: </a>    } <font color="#4169E1">else</font> {
+<a name="line179">179: </a>      P = interpolations[level - 1];
+<a name="line180">180: </a>    }
+<a name="line181">181: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(P, &amp;b, &amp;r));
+<a name="line182">182: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetInterpolation.html">PCMGSetInterpolation</a>(pc, level, P));
+<a name="line183">183: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetRestriction.html">PCMGSetRestriction</a>(pc, level, P));
+<a name="line184">184: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;P));
+<a name="line185">185: </a>    <font color="#B22222">/* We reuse the matrices when we do not do subspace coarsening */</font>
+<a name="line186">186: </a>    <font color="#4169E1">if</font> ((level - 1) &gt;= 0 &amp;&amp; !hmg-&gt;subcoarsening) {
+<a name="line187">187: </a>      pmat = operators[level - 1];
+<a name="line188">188: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetOperators.html">PCMGSetOperators</a>(pc, level - 1, pmat, pmat));
+<a name="line189">189: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;pmat));
+<a name="line190">190: </a>    }
+<a name="line191">191: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetRhs.html">PCMGSetRhs</a>(pc, level - 1, b));
+
+<a name="line193">193: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetR.html">PCMGSetR</a>(pc, level, r));
+<a name="line194">194: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;r));
+
+<a name="line196">196: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(b, &amp;x));
+<a name="line197">197: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetX.html">PCMGSetX</a>(pc, level - 1, x));
+<a name="line198">198: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;x));
+<a name="line199">199: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;b));
+<a name="line200">200: </a>  }
+<a name="line201">201: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(interpolations));
+<a name="line202">202: </a>  <font color="#4169E1">if</font> (!hmg-&gt;subcoarsening) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(operators));
+<a name="line203">203: </a>  <font color="#B22222">/* Turn Galerkin off when we already have coarse operators */</font>
+<a name="line204">204: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCMGSetGalerkin.html">PCMGSetGalerkin</a>(pc, hmg-&gt;subcoarsening ? <a href="../../../../../manualpages/PC/PCMGalerkinType.html">PC_MG_GALERKIN_PMAT</a> : <a href="../../../../../manualpages/PC/PCMGalerkinType.html">PC_MG_GALERKIN_NONE</a>));
+<a name="line205">205: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetDM.html">PCSetDM</a>(pc, NULL));
+<a name="line206">206: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetUseAmat.html">PCSetUseAmat</a>(pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line207">207: </a>  <a href="../../../../../manualpages/Sys/PetscObjectOptionsBegin.html">PetscObjectOptionsBegin</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc);
+<a name="line208">208: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetFromOptions_MG(pc, PetscOptionsObject)); <font color="#B22222">/* should be called in PCSetFromOptions_HMG(), but cannot be called prior to <a href="../../../../../manualpages/PC/PCMGSetLevels.html">PCMGSetLevels</a>() */</font>
+<a name="line209">209: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsEnd.html">PetscOptionsEnd</a>();
+<a name="line210">210: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_MG(pc));
+<a name="line211">211: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line212">212: </a>}
+
+<a name="line214">214: </a><strong><font color="#4169E1"><a name="PCDestroy_HMG"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCDestroy_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line215">215: </a>{
+<a name="line216">216: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line217">217: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line219">219: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line220">220: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCDestroy.html">PCDestroy</a>(&amp;hmg-&gt;innerpc));
+<a name="line221">221: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(hmg-&gt;innerpctype));
+<a name="line222">222: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(hmg));
+<a name="line223">223: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCDestroy_MG(pc));
+
+<a name="line225">225: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetReuseInterpolation_C"</font>, NULL));
+<a name="line226">226: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetUseSubspaceCoarsening_C"</font>, NULL));
+<a name="line227">227: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetInnerPCType_C"</font>, NULL));
+<a name="line228">228: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetCoarseningComponent_C"</font>, NULL));
+<a name="line229">229: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGUseMatMAIJ_C"</font>, NULL));
+<a name="line230">230: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line231">231: </a>}
+
+<a name="line233">233: </a><strong><font color="#4169E1"><a name="PCView_HMG"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCView_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line234">234: </a>{
+<a name="line235">235: </a>  PC_MG    *mg  = (PC_MG *)pc-&gt;data;
+<a name="line236">236: </a>  PC_HMG   *hmg = (PC_HMG *)mg-&gt;innerctx;
+<a name="line237">237: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> iascii;
+
+<a name="line239">239: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line240">240: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line241">241: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line242">242: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">" Reuse interpolation: %s\n"</font>, hmg-&gt;reuseinterp ? <font color="#666666">"true"</font> : <font color="#666666">"false"</font>));
+<a name="line243">243: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">" Use subspace coarsening: %s\n"</font>, hmg-&gt;subcoarsening ? <font color="#666666">"true"</font> : <font color="#666666">"false"</font>));
+<a name="line244">244: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">" Coarsening component: %"</font> PetscInt_FMT <font color="#666666">" \n"</font>, hmg-&gt;component));
+<a name="line245">245: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">" Use MatMAIJ: %s \n"</font>, hmg-&gt;usematmaij ? <font color="#666666">"true"</font> : <font color="#666666">"false"</font>));
+<a name="line246">246: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">" Inner <a href="../../../../../manualpages/PC/PC.html">PC</a> type: %s \n"</font>, hmg-&gt;innerpctype));
+<a name="line247">247: </a>  }
+<a name="line248">248: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCView_MG(pc, viewer));
+<a name="line249">249: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line250">250: </a>}
+
+<a name="line252">252: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_HMG"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetFromOptions_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line253">253: </a>{
+<a name="line254">254: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line255">255: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line257">257: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line258">258: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"HMG"</font>);
+<a name="line259">259: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_hmg_reuse_interpolation"</font>, <font color="#666666">"Reuse the interpolation operators when possible (cheaper, weaker when matrix entries change a lot)"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a>"</font>, hmg-&gt;reuseinterp, &amp;hmg-&gt;reuseinterp, NULL));
+<a name="line260">260: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_hmg_use_subspace_coarsening"</font>, <font color="#666666">"Use the subspace coarsening to compute the interpolations"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a>"</font>, hmg-&gt;subcoarsening, &amp;hmg-&gt;subcoarsening, NULL));
+<a name="line261">261: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_hmg_use_matmaij"</font>, <font color="#666666">"Use MatMAIJ store interpolation for saving memory"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a>"</font>, hmg-&gt;usematmaij, &amp;hmg-&gt;usematmaij, NULL));
+<a name="line262">262: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_hmg_coarsening_component"</font>, <font color="#666666">"Which component is chosen for the subspace-based coarsening algorithm"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCHMGSetCoarseningComponent.html">PCHMGSetCoarseningComponent</a>"</font>, hmg-&gt;component, &amp;hmg-&gt;component, NULL));
+<a name="line263">263: </a>  PetscOptionsHeadEnd();
+<a name="line264">264: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line265">265: </a>}
+
+<a name="line267">267: </a><strong><font color="#4169E1"><a name="PCHMGSetReuseInterpolation_HMG"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGSetReuseInterpolation_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> reuse)</font></strong>
+<a name="line268">268: </a>{
+<a name="line269">269: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line270">270: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line272">272: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line273">273: </a>  hmg-&gt;reuseinterp = reuse;
+<a name="line274">274: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line275">275: </a>}
+
+<a name="line277">277: </a><font color="#B22222">/*@</font>
+<a name="line278">278: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a> - Reuse the interpolation matrices in `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` after changing the matrices numerical values</font>
+
+<a name="line280">280: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line282">282: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line283">283: </a><font color="#B22222">+  pc - the `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` context</font>
+<a name="line284">284: </a><font color="#B22222">-  reuse - `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` indicates that `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` will reuse the interpolations</font>
+
+<a name="line286">286: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line287">287: </a><font color="#B22222">.  -pc_hmg_reuse_interpolation &lt;true | false&gt; - Whether or not to reuse the interpolations. If true, it potentially save the compute time.</font>
+
+<a name="line289">289: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line291">291: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`, `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>`, `<a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetCoarseningComponent.html">PCHMGSetCoarseningComponent</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a>()`</font>
+<a name="line292">292: </a><font color="#B22222">@*/</font>
+<a name="line293">293: </a><strong><font color="#4169E1"><a name="PCHMGSetReuseInterpolation"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> reuse)</font></strong>
+<a name="line294">294: </a>{
+<a name="line295">295: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line297">297: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCHMGSetReuseInterpolation_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, reuse));
+<a name="line298">298: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line299">299: </a>}
+
+<a name="line301">301: </a><strong><font color="#4169E1"><a name="PCHMGSetUseSubspaceCoarsening_HMG"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGSetUseSubspaceCoarsening_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> subspace)</font></strong>
+<a name="line302">302: </a>{
+<a name="line303">303: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line304">304: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line306">306: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line307">307: </a>  hmg-&gt;subcoarsening = subspace;
+<a name="line308">308: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line309">309: </a>}
+
+<a name="line311">311: </a><font color="#B22222">/*@</font>
+<a name="line312">312: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a> - Use subspace coarsening in `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`</font>
+
+<a name="line314">314: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line316">316: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line317">317: </a><font color="#B22222">+  pc - the `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` context</font>
+<a name="line318">318: </a><font color="#B22222">-  reuse - `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` indicates that `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` will use the subspace coarsening</font>
+
+<a name="line320">320: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line321">321: </a><font color="#B22222">.  -pc_hmg_use_subspace_coarsening  &lt;true | false&gt; - Whether or not to use subspace coarsening (that is, coarsen a submatrix).</font>
+
+<a name="line323">323: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line325">325: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`, `<a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetCoarseningComponent.html">PCHMGSetCoarseningComponent</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a>()`</font>
+<a name="line326">326: </a><font color="#B22222">@*/</font>
+<a name="line327">327: </a><strong><font color="#4169E1"><a name="PCHMGSetUseSubspaceCoarsening"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> subspace)</font></strong>
+<a name="line328">328: </a>{
+<a name="line329">329: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line331">331: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCHMGSetUseSubspaceCoarsening_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, subspace));
+<a name="line332">332: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line333">333: </a>}
+
+<a name="line335">335: </a><strong><font color="#4169E1"><a name="PCHMGSetInnerPCType_HMG"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGSetInnerPCType_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/PC/PCType.html">PCType</a> type)</font></strong>
+<a name="line336">336: </a>{
+<a name="line337">337: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line338">338: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line340">340: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line341">341: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrallocpy.html">PetscStrallocpy</a>(type, &amp;(hmg-&gt;innerpctype)));
+<a name="line342">342: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line343">343: </a>}
+
+<a name="line345">345: </a><font color="#B22222">/*@C</font>
+<a name="line346">346: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a> - Set an inner `<a href="../../../../../manualpages/PC/PC.html">PC</a>` type</font>
+
+<a name="line348">348: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line350">350: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line351">351: </a><font color="#B22222">+  pc - the `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` context</font>
+<a name="line352">352: </a><font color="#B22222">-  type - `<a href="../../../../../manualpages/PC/PCHYPRE.html">PCHYPRE</a>` or `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>` coarsening algorithm</font>
+
+<a name="line354">354: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line355">355: </a><font color="#B22222">.  -hmg_inner_pc_type &lt;hypre, gamg&gt; - What method is used to coarsen matrix</font>
+
+<a name="line357">357: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line359">359: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`, `<a href="../../../../../manualpages/PC/PCType.html">PCType</a>`, `<a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetCoarseningComponent.html">PCHMGSetCoarseningComponent</a>()`</font>
+<a name="line360">360: </a><font color="#B22222">@*/</font>
+<a name="line361">361: </a><strong><font color="#4169E1"><a name="PCHMGSetInnerPCType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/PC/PCType.html">PCType</a> type)</font></strong>
+<a name="line362">362: </a>{
+<a name="line363">363: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line365">365: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCHMGSetInnerPCType_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/PC/PCType.html">PCType</a>), (pc, type));
+<a name="line366">366: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line367">367: </a>}
+
+<a name="line369">369: </a><strong><font color="#4169E1"><a name="PCHMGSetCoarseningComponent_HMG"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGSetCoarseningComponent_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> component)</font></strong>
+<a name="line370">370: </a>{
+<a name="line371">371: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line372">372: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line374">374: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line375">375: </a>  hmg-&gt;component = component;
+<a name="line376">376: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line377">377: </a>}
+
+<a name="line379">379: </a><font color="#B22222">/*@</font>
+<a name="line380">380: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCHMGSetCoarseningComponent.html">PCHMGSetCoarseningComponent</a> - Set which component of the PDE is used for the subspace-based coarsening algorithm</font>
+
+<a name="line382">382: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line384">384: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line385">385: </a><font color="#B22222">+  pc - the `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` context</font>
+<a name="line386">386: </a><font color="#B22222">-  component - which component `<a href="../../../../../manualpages/PC/PC.html">PC</a>` will coarsen</font>
+
+<a name="line388">388: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line389">389: </a><font color="#B22222">.  -pc_hmg_coarsening_component &lt;i&gt; - Which component is chosen for the subspace-based coarsening algorithm</font>
+
+<a name="line391">391: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line393">393: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`, `<a href="../../../../../manualpages/PC/PCType.html">PCType</a>`, `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>`, `<a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a>()`</font>
+<a name="line394">394: </a><font color="#B22222">@*/</font>
+<a name="line395">395: </a><strong><font color="#4169E1"><a name="PCHMGSetCoarseningComponent"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCHMGSetCoarseningComponent.html">PCHMGSetCoarseningComponent</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> component)</font></strong>
+<a name="line396">396: </a>{
+<a name="line397">397: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line399">399: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCHMGSetCoarseningComponent_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>), (pc, component));
+<a name="line400">400: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line401">401: </a>}
+
+<a name="line403">403: </a><strong><font color="#4169E1"><a name="PCHMGUseMatMAIJ_HMG"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCHMGUseMatMAIJ_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> usematmaij)</font></strong>
+<a name="line404">404: </a>{
+<a name="line405">405: </a>  PC_MG  *mg  = (PC_MG *)pc-&gt;data;
+<a name="line406">406: </a>  PC_HMG *hmg = (PC_HMG *)mg-&gt;innerctx;
+
+<a name="line408">408: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line409">409: </a>  hmg-&gt;usematmaij = usematmaij;
+<a name="line410">410: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line411">411: </a>}
+
+<a name="line413">413: </a><font color="#B22222">/*@</font>
+<a name="line414">414: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCHMGUseMatMAIJ.html">PCHMGUseMatMAIJ</a> - Set a flag that indicates if or not to use `<a href="../../../../../manualpages/Mat/MATMAIJ.html">MATMAIJ</a>` for the interpolation matrices for saving memory</font>
+
+<a name="line416">416: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line418">418: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line419">419: </a><font color="#B22222">+  pc - the `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>` context</font>
+<a name="line420">420: </a><font color="#B22222">-  usematmaij - `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` (default) to use `<a href="../../../../../manualpages/Mat/MATMAIJ.html">MATMAIJ</a>` for interpolations.</font>
+
+<a name="line422">422: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line423">423: </a><font color="#B22222">.  -pc_hmg_use_matmaij - &lt;true | false &gt;</font>
+
+<a name="line425">425: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line427">427: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`, `<a href="../../../../../manualpages/PC/PCType.html">PCType</a>`, `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>`</font>
+<a name="line428">428: </a><font color="#B22222">@*/</font>
+<a name="line429">429: </a><strong><font color="#4169E1"><a name="PCHMGUseMatMAIJ"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCHMGUseMatMAIJ.html">PCHMGUseMatMAIJ</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> usematmaij)</font></strong>
+<a name="line430">430: </a>{
+<a name="line431">431: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line433">433: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCHMGUseMatMAIJ_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, usematmaij));
+<a name="line434">434: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line435">435: </a>}
+
+<a name="line437">437: </a><font color="#B22222">/*MC</font>
+<a name="line438">438: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a> - For multiple component PDE problems constructs a hierarchy of restriction operators to coarse grid problems using the submatrix of</font>
+<a name="line439">439: </a><font color="#B22222">   a single component with either `<a href="../../../../../manualpages/PC/PCHYPRE.html">PCHYPRE</a>` or `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>`. The same restriction operators are used for each of the components of the PDE with `<a href="../../../../../manualpages/PC/PCMG.html">PCMG</a>`</font>
+<a name="line440">440: </a><font color="#B22222">   resulting in a much more efficient to build and apply preconditioner than using `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>` on the entire system.</font>
+
+<a name="line442">442: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line443">443: </a><font color="#B22222">+  -pc_hmg_reuse_interpolation &lt;true | false&gt; - Whether or not to reuse the interpolations for new matrix values. It can potentially save compute time.</font>
+<a name="line444">444: </a><font color="#B22222">.  -pc_hmg_use_subspace_coarsening  &lt;true | false&gt; - Whether or not to use subspace coarsening (that is, coarsen a submatrix).</font>
+<a name="line445">445: </a><font color="#B22222">.  -hmg_inner_pc_type &lt;hypre, gamg, ...&gt; - What method is used to coarsen matrix</font>
+<a name="line446">446: </a><font color="#B22222">-  -pc_hmg_use_matmaij &lt;true | false&gt; - Whether or not to use `<a href="../../../../../manualpages/Mat/MATMAIJ.html">MATMAIJ</a>` for multicomponent problems for saving memory</font>
+
+<a name="line448">448: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line450">450: </a><font color="#B22222">   Note:</font>
+<a name="line451">451: </a><font color="#B22222">   `<a href="../../../../../manualpages/Mat/MatSetBlockSize.html">MatSetBlockSize</a>()` must be called on the linear system matrix to set the number of components of the PDE.</font>
+
+<a name="line453">453: </a><font color="#B22222">    References:</font>
+<a name="line454">454: </a><font color="#B22222">.   * - Fande Kong, Yaqi Wang, Derek R Gaston, Cody J Permann, Andrew E Slaughter, Alexander D Lindsay, Richard C Martineau, A highly parallel multilevel</font>
+<a name="line455">455: </a><font color="#B22222">    Newton-Krylov-Schwarz method with subspace-based coarsening and partition-based balancing for the multigroup neutron transport equations on</font>
+<a name="line456">456: </a><font color="#B22222">    3D unstructured meshes, arXiv preprint arXiv:1903.03659, 2019</font>
+
+<a name="line458">458: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>()`, `<a href="../../../../../manualpages/PC/PCSetType.html">PCSetType</a>()`, `<a href="../../../../../manualpages/PC/PCType.html">PCType</a>`, `<a href="../../../../../manualpages/PC/PC.html">PC</a>`, `<a href="../../../../../manualpages/PC/PCMG.html">PCMG</a>`, `<a href="../../../../../manualpages/PC/PCHYPRE.html">PCHYPRE</a>`, `<a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>`, `<a href="../../../../../manualpages/PC/PCGetCoarseOperators.html">PCGetCoarseOperators</a>()`, `<a href="../../../../../manualpages/PC/PCGetInterpolations.html">PCGetInterpolations</a>()`,</font>
+<a name="line459">459: </a><font color="#B22222">          `<a href="../../../../../manualpages/PC/PCHMGSetReuseInterpolation.html">PCHMGSetReuseInterpolation</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetUseSubspaceCoarsening.html">PCHMGSetUseSubspaceCoarsening</a>()`, `<a href="../../../../../manualpages/PC/PCHMGSetInnerPCType.html">PCHMGSetInnerPCType</a>()`</font>
+<a name="line460">460: </a><font color="#B22222">M*/</font>
+<a name="line461">461: </a><strong><font color="#4169E1"><a name="PCCreate_HMG"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCCreate_HMG(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line462">462: </a>{
+<a name="line463">463: </a>  PC_HMG *hmg;
+<a name="line464">464: </a>  PC_MG  *mg;
+
+<a name="line466">466: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line467">467: </a>  <font color="#B22222">/* if type was previously mg; must manually destroy it because call to <a href="../../../../../manualpages/PC/PCSetType.html">PCSetType</a>(pc,<a href="../../../../../manualpages/PC/PCMG.html">PCMG</a>) will not destroy it */</font>
+<a name="line468">468: </a>  <a href="../../../../../manualpages/Sys/PetscTryTypeMethod.html">PetscTryTypeMethod</a>(pc, destroy);
+<a name="line469">469: </a>  pc-&gt;data = NULL;
+<a name="line470">470: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc)-&gt;type_name));
+
+<a name="line472">472: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetType.html">PCSetType</a>(pc, <a href="../../../../../manualpages/PC/PCMG.html">PCMG</a>));
+<a name="line473">473: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscObjectChangeTypeName((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <a href="../../../../../manualpages/PC/PCHMG.html">PCHMG</a>));
+<a name="line474">474: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;hmg));
+
+<a name="line476">476: </a>  mg                 = (PC_MG *)pc-&gt;data;
+<a name="line477">477: </a>  mg-&gt;innerctx       = hmg;
+<a name="line478">478: </a>  hmg-&gt;reuseinterp   = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line479">479: </a>  hmg-&gt;subcoarsening = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line480">480: </a>  hmg-&gt;usematmaij    = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line481">481: </a>  hmg-&gt;component     = 0;
+<a name="line482">482: </a>  hmg-&gt;innerpc       = NULL;
+
+<a name="line484">484: </a>  pc-&gt;ops-&gt;setfromoptions = PCSetFromOptions_HMG;
+<a name="line485">485: </a>  pc-&gt;ops-&gt;view           = PCView_HMG;
+<a name="line486">486: </a>  pc-&gt;ops-&gt;destroy        = PCDestroy_HMG;
+<a name="line487">487: </a>  pc-&gt;ops-&gt;setup          = PCSetUp_HMG;
+
+<a name="line489">489: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetReuseInterpolation_C"</font>, PCHMGSetReuseInterpolation_HMG));
+<a name="line490">490: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetUseSubspaceCoarsening_C"</font>, PCHMGSetUseSubspaceCoarsening_HMG));
+<a name="line491">491: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetInnerPCType_C"</font>, PCHMGSetInnerPCType_HMG));
+<a name="line492">492: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGSetCoarseningComponent_C"</font>, PCHMGSetCoarseningComponent_HMG));
+<a name="line493">493: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCHMGUseMatMAIJ_C"</font>, PCHMGUseMatMAIJ_HMG));
+<a name="line494">494: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line495">495: </a>}
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,251 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/dm/impls/da/usfft/matusfft.c">Actual source code: matusfft.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:29+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222">    Provides an implementation of the Unevenly Sampled FFT algorithm as a <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>.</font>
+<a name="line3">  3: </a><font color="#B22222">    Testing examples can be found in ~/src/mat/tests FIX: should these be moved to dm/da/tests?</font>
+<a name="line4">  4: </a><font color="#B22222">*/</font>
+
+<a name="line6">  6: </a>#include <A href="../../../../../include/petsc/private/matimpl.h.html">&lt;petsc/private/matimpl.h&gt;</A>
+<a name="line7">  7: </a>#include <A href="../../../../../include/petscdmda.h.html">&lt;petscdmda.h&gt;</A>
+<a name="line8">  8: </a><font color="#A020F0">#include &lt;fftw3.h&gt;</font>
+
+<a name="line10"> 10: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line11"> 11: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  dim;
+<a name="line12"> 12: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       sampleCoords;
+<a name="line13"> 13: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  dof;
+<a name="line14"> 14: </a>  <a href="../../../../../manualpages/DM/DM.html">DM</a>        freqDA;     <font color="#B22222">/* frequency <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> */</font>
+<a name="line15"> 15: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *freqSizes;  <font color="#B22222">/* sizes of the frequency <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>, one per each dim */</font>
+<a name="line16"> 16: </a>  <a href="../../../../../manualpages/DM/DM.html">DM</a>        resampleDa; <font color="#B22222">/* the Battle-Lemarie interpolant <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> */</font>
+<a name="line17"> 17: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       resample;   <font color="#B22222">/* <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> of samples, one per dof per sample point */</font>
+<a name="line18"> 18: </a>  fftw_plan p_forward, p_backward;
+<a name="line19"> 19: </a>  unsigned  p_flag; <font color="#B22222">/* planner flags, FFTW_ESTIMATE,FFTW_MEASURE, FFTW_PATIENT, FFTW_EXHAUSTIVE */</font>
+<a name="line20"> 20: </a>} Mat_USFFT;
+
+<a name="line22"> 22: </a><strong><font color="#4169E1"><a name="MatApply_USFFT_Private"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatApply_USFFT_Private(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> A, fftw_plan *plan, int direction, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line23"> 23: </a>{
+<a name="line24"> 24: </a><font color="#A020F0">#if 0</font>
+<a name="line25"> 25: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>    *r_array, *y_array;
+<a name="line26"> 26: </a>  Mat_USFFT* = (Mat_USFFT*)(A-&gt;data);
+<a name="line27"> 27: </a><font color="#A020F0">#endif</font>
+
+<a name="line29"> 29: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line30"> 30: </a><font color="#A020F0">#if 0</font>
+<a name="line31"> 31: </a>  <font color="#B22222">/* resample x to usfft-&gt;resample */</font>
+<a name="line32"> 32: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatResample_USFFT_Private(A, x));
+
+<a name="line34"> 34: </a>  <font color="#B22222">/* NB: for now we use outdim for both x and y; this will change once a full USFFT is implemented */</font>
+<a name="line35"> 35: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(usfft-&gt;resample,&amp;r_array));
+<a name="line36"> 36: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(y,&amp;y_array));
+<a name="line37"> 37: </a>  <font color="#4169E1">if</font> (!*plan) { <font color="#B22222">/* create a plan then execute it*/</font>
+<a name="line38"> 38: </a>    <font color="#4169E1">if</font> (usfft-&gt;dof == 1) {
+<a name="line39"> 39: </a><font color="#A020F0">  #if defined(PETSC_DEBUG_USFFT)</font>
+<a name="line40"> 40: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A), <font color="#666666">"direction = %d, usfft-&gt;ndim = %d\n"</font>, direction, usfft-&gt;ndim));
+<a name="line41"> 41: </a>      <font color="#4169E1">for</font> (int ii = 0; ii &lt; usfft-&gt;ndim; ++ii) {
+<a name="line42"> 42: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A), <font color="#666666">"usfft-&gt;outdim[%d] = %d\n"</font>, ii, usfft-&gt;outdim[ii]));
+<a name="line43"> 43: </a>      }
+<a name="line44"> 44: </a><font color="#A020F0">  #endif</font>
+
+<a name="line46"> 46: </a>      <font color="#4169E1">switch</font> (usfft-&gt;dim) {
+<a name="line47"> 47: </a>      <font color="#4169E1">case</font> 1:
+<a name="line48"> 48: </a>        *plan = fftw_plan_dft_1d(usfft-&gt;outdim[0],(fftw_complex*)x_array,(fftw_complex*)y_array,direction,usfft-&gt;p_flag);
+<a name="line49"> 49: </a>        <font color="#4169E1">break</font>;
+<a name="line50"> 50: </a>      <font color="#4169E1">case</font> 2:
+<a name="line51"> 51: </a>        *plan = fftw_plan_dft_2d(usfft-&gt;outdim[0],usfft-&gt;outdim[1],(fftw_complex*)x_array,(fftw_complex*)y_array,direction,usfft-&gt;p_flag);
+<a name="line52"> 52: </a>        <font color="#4169E1">break</font>;
+<a name="line53"> 53: </a>      <font color="#4169E1">case</font> 3:
+<a name="line54"> 54: </a>        *plan = fftw_plan_dft_3d(usfft-&gt;outdim[0],usfft-&gt;outdim[1],usfft-&gt;outdim[2],(fftw_complex*)x_array,(fftw_complex*)y_array,direction,usfft-&gt;p_flag);
+<a name="line55"> 55: </a>        <font color="#4169E1">break</font>;
+<a name="line56"> 56: </a><strong><font color="#FF0000">      default:</font></strong>
+<a name="line57"> 57: </a>        *plan = fftw_plan_dft(usfft-&gt;ndim,usfft-&gt;outdim,(fftw_complex*)x_array,(fftw_complex*)y_array,direction,usfft-&gt;p_flag);
+<a name="line58"> 58: </a>        <font color="#4169E1">break</font>;
+<a name="line59"> 59: </a>      }
+<a name="line60"> 60: </a>      fftw_execute(*plan);
+<a name="line61"> 61: </a>    } <font color="#B22222">/* if (dof == 1) */</font>
+<a name="line62"> 62: </a>    <font color="#4169E1">else</font> { <font color="#B22222">/* if (dof &gt; 1) */</font>
+<a name="line63"> 63: </a>      *plan = fftw_plan_many_dft(<font color="#B22222">/*rank*/</font>usfft-&gt;ndim, <font color="#B22222">/*n*/</font>usfft-&gt;outdim, <font color="#B22222">/*howmany*/</font>usfft-&gt;dof,
+<a name="line64"> 64: </a>                                 (fftw_complex*)x_array, <font color="#B22222">/*nembed*/</font>usfft-&gt;outdim, <font color="#B22222">/*stride*/</font>usfft-&gt;dof, <font color="#B22222">/*dist*/</font>1,
+<a name="line65"> 65: </a>                                 (fftw_complex*)y_array, <font color="#B22222">/*nembed*/</font>usfft-&gt;outdim, <font color="#B22222">/*stride*/</font>usfft-&gt;dof, <font color="#B22222">/*dist*/</font>1,
+<a name="line66"> 66: </a>                                 <font color="#B22222">/*sign*/</font>direction, <font color="#B22222">/*flags*/</font>usfft-&gt;p_flag);
+<a name="line67"> 67: </a>      fftw_execute(*plan);
+<a name="line68"> 68: </a>    } <font color="#B22222">/* if (dof &gt; 1) */</font>
+<a name="line69"> 69: </a>  } <font color="#B22222">/* if (!*plan) */</font>
+<a name="line70"> 70: </a>  <font color="#4169E1">else</font> {  <font color="#B22222">/* if (*plan) */</font>
+<a name="line71"> 71: </a>    <font color="#B22222">/* use existing plan */</font>
+<a name="line72"> 72: </a>    fftw_execute_dft(*plan,(fftw_complex*)x_array,(fftw_complex*)y_array);
+<a name="line73"> 73: </a>  }
+<a name="line74"> 74: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(y,&amp;y_array));
+<a name="line75"> 75: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(x,&amp;x_array));
+<a name="line76"> 76: </a><font color="#A020F0">#endif</font>
+<a name="line77"> 77: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line78"> 78: </a>} <font color="#B22222">/* MatApply_USFFT_Private() */</font>
+
+<a name="line80"> 80: </a><font color="#A020F0">#if 0</font>
+<a name="line81"> 81: </a><strong><font color="#4169E1"><a name="MatUSFFT_ProjectOnBattleLemarie_Private"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatUSFFT_ProjectOnBattleLemarie_Private(<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x,double *r)</font></strong>
+<a name="line82"> 82: </a><font color="#B22222">/* Project onto the Battle-Lemarie function centered around r */</font>
+<a name="line83"> 83: </a>{
+<a name="line84"> 84: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>    *x_array, *y_array;
+
+<a name="line86"> 86: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line87"> 87: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line88"> 88: </a>} <font color="#B22222">/* MatUSFFT_ProjectOnBattleLemarie_Private() */</font>
+
+<a name="line90"> 90: </a><strong><font color="#4169E1"><a name="MatInterpolate_USFFT_Private"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatInterpolate_USFFT_Private(<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line91"> 91: </a>{
+<a name="line92"> 92: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>    *x_array, *y_array;
+
+<a name="line94"> 94: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line95"> 95: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line96"> 96: </a>} <font color="#B22222">/* MatInterpolate_USFFT_Private() */</font>
+
+<a name="line98"> 98: </a><strong><font color="#4169E1"><a name="MatMult_SeqUSFFT"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatMult_SeqUSFFT(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> A,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line99"> 99: </a>{
+<a name="line100">100: </a>  Mat_USFFT      *usfft = (Mat_USFFT*)A-&gt;data;
+
+<a name="line102">102: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line103">103: </a>  <font color="#B22222">/* NB: for now we use outdim for both x and y; this will change once a full USFFT is implemented */</font>
+<a name="line104">104: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatApply_USFFT_Private(A, &amp;usfft-&gt;p_forward, FFTW_FORWARD, x,y));
+<a name="line105">105: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line106">106: </a>}
+
+<a name="line108">108: </a><strong><font color="#4169E1"><a name="MatMultTranspose_SeqUSFFT"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatMultTranspose_SeqUSFFT(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> A,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line109">109: </a>{
+<a name="line110">110: </a>  Mat_USFFT      *usfft = (Mat_USFFT*)A-&gt;data;
+
+<a name="line112">112: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line113">113: </a>  <font color="#B22222">/* NB: for now we use outdim for both x and y; this will change once a full USFFT is implemented */</font>
+<a name="line114">114: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatApply_USFFT_Private(usfft, &amp;usfft-&gt;p_backward, FFTW_BACKWARD, x,y));
+<a name="line115">115: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line116">116: </a>}
+
+<a name="line118">118: </a><strong><font color="#4169E1"><a name="MatDestroy_SeqUSFFT"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatDestroy_SeqUSFFT(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> A)</font></strong>
+<a name="line119">119: </a>{
+<a name="line120">120: </a>  Mat_USFFT      *usfft = (Mat_USFFT*)A-&gt;data;
+
+<a name="line122">122: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line123">123: </a>  fftw_destroy_plan(usfft-&gt;p_forward);
+<a name="line124">124: </a>  fftw_destroy_plan(usfft-&gt;p_backward);
+<a name="line125">125: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(usfft-&gt;indim));
+<a name="line126">126: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(usfft-&gt;outdim));
+<a name="line127">127: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(usfft));
+<a name="line128">128: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscObjectChangeTypeName((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A,0));
+<a name="line129">129: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line130">130: </a>}
+
+<a name="line132">132: </a><font color="#B22222">/*@C</font>
+<a name="line133">133: </a><font color="#B22222">      <a href="../../../../../manualpages/DMDA/MatCreateSeqUSFFT.html">MatCreateSeqUSFFT</a> - Creates a matrix object that provides sequential USFFT</font>
+<a name="line134">134: </a><font color="#B22222">  via the external package FFTW</font>
+
+<a name="line136">136: </a><font color="#B22222">   Collective</font>
+
+<a name="line138">138: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line139">139: </a><font color="#B22222">.   da - geometry of the domain encoded by a `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>`</font>
+
+<a name="line141">141: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line142">142: </a><font color="#B22222">.   A  - the matrix</font>
+
+<a name="line144">144: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line145">145: </a><font color="#B22222">. -mat_usfft_plannerflags - set the FFTW planner flags</font>
+
+<a name="line147">147: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line149">149: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Mat/Mat.html">Mat</a>`, `<a href="../../../../../manualpages/Vec/Vec.html">Vec</a>`, `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>`, `<a href="../../../../../manualpages/DM/DM.html">DM</a>`</font>
+<a name="line150">150: </a><font color="#B22222">@*/</font>
+<a name="line151">151: </a><strong><font color="#4169E1"><a name="MatCreateSeqUSFFT"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a>  <a href="../../../../../manualpages/DMDA/MatCreateSeqUSFFT.html">MatCreateSeqUSFFT</a>(<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> sampleCoords, <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> freqDA, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> *A)</font></strong>
+<a name="line152">152: </a>{
+<a name="line153">153: </a>  Mat_USFFT      *usfft;
+<a name="line154">154: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       m,n,M,N,i;
+<a name="line155">155: </a>  const char     *p_flags[]={<font color="#666666">"FFTW_ESTIMATE"</font>,<font color="#666666">"FFTW_MEASURE"</font>,<font color="#666666">"FFTW_PATIENT"</font>,<font color="#666666">"FFTW_EXHAUSTIVE"</font>};
+<a name="line156">156: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>      flg;
+<a name="line157">157: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       p_flag;
+<a name="line158">158: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       dof, dim, freqSizes[3];
+<a name="line159">159: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>       comm;
+<a name="line160">160: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       size;
+
+<a name="line162">162: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line163">163: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)inda, &amp;comm));
+<a name="line164">164: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm, &amp;size));
+<a name="line165">165: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(size &lt;= 1,comm,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>, <font color="#666666">"Parallel <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> (in) not yet supported by USFFT"</font>);
+<a name="line166">166: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)outda, &amp;comm));
+<a name="line167">167: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm, &amp;size));
+<a name="line168">168: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(size &lt;= 1,comm,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>, <font color="#666666">"Parallel <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> (out) not yet supported by USFFT"</font>);
+<a name="line169">169: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(comm,A));
+<a name="line170">170: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;usfft));
+<a name="line171">171: </a>  (*A)-&gt;data   = (void*)usfft;
+<a name="line172">172: </a>  usfft-&gt;inda  = inda;
+<a name="line173">173: </a>  usfft-&gt;outda = outda;
+<a name="line174">174: </a>  <font color="#B22222">/* inda */</font>
+<a name="line175">175: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(usfft-&gt;inda, &amp;ndim, dim+0, dim+1, dim+2, NULL, NULL, NULL, &amp;dof, NULL, NULL, NULL));
+<a name="line176">176: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(ndim &gt; 0,<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>,<font color="#666666">"ndim %d must be &gt; 0"</font>,ndim);
+<a name="line177">177: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dof &gt; 0,<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>,<font color="#666666">"dof %d must be &gt; 0"</font>,dof);
+<a name="line178">178: </a>  usfft-&gt;ndim   = ndim;
+<a name="line179">179: </a>  usfft-&gt;dof    = dof;
+<a name="line180">180: </a>  usfft-&gt;freqDA = freqDA;
+<a name="line181">181: </a>  <font color="#B22222">/* NB: we reverse the freq and resample <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> sizes, since the <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> ordering (natural on x-y-z, with x varying the fastest)</font>
+<a name="line182">182: </a><font color="#B22222">     is the order opposite of that assumed by FFTW: z varying the fastest */</font>
+<a name="line183">183: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(usfft-&gt;ndim+1,&amp;usfft-&gt;indim));
+<a name="line184">184: </a>  <font color="#4169E1">for</font> (i = usfft-&gt;ndim; i &gt; 0; --i) usfft-&gt;indim[usfft-&gt;ndim-i] = dim[i-1];
+
+<a name="line186">186: </a>  <font color="#B22222">/* outda */</font>
+<a name="line187">187: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(usfft-&gt;outda, &amp;ndim, dim+0, dim+1, dim+2, NULL, NULL, NULL, &amp;dof, NULL, NULL, NULL));
+<a name="line188">188: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(ndim == usfft-&gt;ndim,<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>,<font color="#666666">"in and out <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> dimensions must match: %d != %d"</font>,usfft-&gt;ndim, ndim);
+<a name="line189">189: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dof == usfft-&gt;dof,<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>,<font color="#666666">"in and out <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> dof must match: %d != %d"</font>,usfft-&gt;dof, dof);
+<a name="line190">190: </a>  <font color="#B22222">/* Store output dimensions */</font>
+<a name="line191">191: </a>  <font color="#B22222">/* NB: we reverse the <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> dimensions, since the <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> ordering (natural on x-y-z, with x varying the fastest)</font>
+<a name="line192">192: </a><font color="#B22222">     is the order opposite of that assumed by FFTW: z varying the fastest */</font>
+<a name="line193">193: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(usfft-&gt;ndim+1,&amp;usfft-&gt;outdim));
+<a name="line194">194: </a>  <font color="#4169E1">for</font> (i = usfft-&gt;ndim; i &gt; 0; --i) usfft-&gt;outdim[usfft-&gt;ndim-i] = dim[i-1];
+
+<a name="line196">196: </a>  <font color="#B22222">/* TODO: Use the new form of <a href="../../../../../manualpages/DMDA/DMDACreate.html">DMDACreate</a>() */</font>
+<a name="line197">197: </a><font color="#A020F0">  #if 0</font>
+<a name="line198">198: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DMDA/DMDACreate.html">DMDACreate</a>(comm,usfft-&gt;dim, DMDA_NONPERIODIC, <a href="../../../../../manualpages/DMDA/DMDAStencilType.html">DMDA_STENCIL_STAR</a>, usfft-&gt;freqSizes[0], usfft-&gt;freqSizes[1], usfft-&gt;freqSizes[2],
+<a name="line199">199: </a>                       <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, dof, 0, NULL, NULL, NULL,  0, &amp;(usfft-&gt;resampleDA)));
+<a name="line200">200: </a><font color="#A020F0">  #endif</font>
+<a name="line201">201: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(DMDAGetVec(usfft-&gt;resampleDA, usfft-&gt;resample));
+
+<a name="line203">203: </a>  <font color="#B22222">/* CONTINUE: Need to build the connectivity "Sieve" attaching sample points to the resample points they are close to */</font>
+
+<a name="line205">205: </a>  <font color="#B22222">/* CONTINUE: recalculate matrix sizes based on the connectivity "Sieve" */</font>
+<a name="line206">206: </a>  <font color="#B22222">/* mat sizes */</font>
+<a name="line207">207: </a>  m = 1; n = 1;
+<a name="line208">208: </a>  <font color="#4169E1">for</font> (i=0; i&lt;usfft-&gt;ndim; i++) {
+<a name="line209">209: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(usfft-&gt;indim[i] &gt; 0,<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>,<font color="#666666">"indim[%d]=%d must be &gt; 0"</font>,i,usfft-&gt;indim[i]);
+<a name="line210">210: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(usfft-&gt;outdim[i] &gt; 0,<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>,<font color="#666666">"outdim[%d]=%d must be &gt; 0"</font>,i,usfft-&gt;outdim[i]);
+<a name="line211">211: </a>    n *= usfft-&gt;indim[i];
+<a name="line212">212: </a>    m *= usfft-&gt;outdim[i];
+<a name="line213">213: </a>  }
+<a name="line214">214: </a>  N        = n*usfft-&gt;dof;
+<a name="line215">215: </a>  M        = m*usfft-&gt;dof;
+<a name="line216">216: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetSizes.html">MatSetSizes</a>(*A,M,N,M,N)); <font color="#B22222">/* "in size" is the number of columns, "out size" is the number of rows" */</font>
+<a name="line217">217: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscObjectChangeTypeName((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)*A,MATSEQUSFFT));
+<a name="line218">218: </a>  usfft-&gt;m = m; usfft-&gt;n = n; usfft-&gt;M = M; usfft-&gt;N = N;
+<a name="line219">219: </a>  <font color="#B22222">/* FFTW */</font>
+<a name="line220">220: </a>  usfft-&gt;p_forward  = 0;
+<a name="line221">221: </a>  usfft-&gt;p_backward = 0;
+<a name="line222">222: </a>  usfft-&gt;p_flag     = FFTW_ESTIMATE;
+<a name="line223">223: </a>  <font color="#B22222">/* set <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> ops */</font>
+<a name="line224">224: </a>  (*A)-&gt;ops-&gt;mult          = MatMult_SeqUSFFT;
+<a name="line225">225: </a>  (*A)-&gt;ops-&gt;multtranspose = MatMultTranspose_SeqUSFFT;
+<a name="line226">226: </a>  (*A)-&gt;assembled          = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line227">227: </a>  (*A)-&gt;ops-&gt;destroy       = MatDestroy_SeqUSFFT;
+<a name="line228">228: </a>  <font color="#B22222">/* get runtime options */</font>
+<a name="line229">229: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsBegin.html">PetscOptionsBegin</a>(((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)(*A))-&gt;comm,((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)(*A))-&gt;prefix,<font color="#666666">"USFFT Options"</font>,<font color="#666666">"<a href="../../../../../manualpages/Mat/Mat.html">Mat</a>"</font>);
+<a name="line230">230: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEList.html">PetscOptionsEList</a>(<font color="#666666">"-mat_usfft_fftw_plannerflags"</font>,<font color="#666666">"Planner Flags"</font>,<font color="#666666">"None"</font>,p_flags,4,p_flags[0],&amp;p_flag,&amp;flg));
+<a name="line231">231: </a>  <font color="#4169E1">if</font> (flg) usfft-&gt;p_flag = (unsigned)p_flag;
+<a name="line232">232: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsEnd.html">PetscOptionsEnd</a>();
+<a name="line233">233: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line234">234: </a>} <font color="#B22222">/* <a href="../../../../../manualpages/DMDA/MatCreateSeqUSFFT.html">MatCreateSeqUSFFT</a>() */</font>
+
+<a name="line236">236: </a><font color="#A020F0">#endif</font>
+</pre>
+</body>
+
+</html>

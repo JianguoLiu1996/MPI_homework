@@ -1,0 +1,294 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/ksp/tutorials/ex61f.F90">Actual source code: ex61f.F90</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:45+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>!
+<a name="line2">  2: </a>!        Demonstrates having each OpenMP thread manage its own PETSc objects and solves
+<a name="line3">  3: </a>!           - each thread is ONLY allowed to access objects that IT created
+<a name="line4">  4: </a>!                  that is, threads cannot shared objects
+<a name="line5">  5: </a>!
+<a name="line6">  6: </a>!        Run with <font color="#666666">"export OMP_NUM_THREADS=16 ./ex61f"</font>
+<a name="line7">  7: </a>!           to use 16 independent threads
+<a name="line8">  8: </a>!
+<a name="line9">  9: </a>!        ./configure --with-threadsafety --with-openmp
+<a name="line10"> 10: </a>!
+<a name="line11"> 11: </a>         module ex61fmodule
+<a name="line12"> 12: </a>         implicit none
+<a name="line13"> 13: </a>         contains
+<a name="line14"> 14: </a>         subroutine split_indices(total,num_pieces,ibeg,iend)
+<a name="line15"> 15: </a>           implicit none
+
+<a name="line17"> 17: </a>           integer :: total
+<a name="line18"> 18: </a>           integer :: num_pieces
+<a name="line19"> 19: </a>           integer :: ibeg(num_pieces), iend(num_pieces)
+<a name="line20"> 20: </a>           integer :: itmp1, itmp2, ioffset, i
+
+<a name="line22"> 22: </a>           itmp1 = total/num_pieces
+<a name="line23"> 23: </a>           itmp2 = mod(total,num_pieces)
+<a name="line24"> 24: </a>           ioffset = 0
+<a name="line25"> 25: </a>           <font color="#4169E1">do</font> i=1,itmp2
+<a name="line26"> 26: </a>              ibeg(i) = ioffset + 1
+<a name="line27"> 27: </a>              iend(i) = ioffset + (itmp1+1)
+<a name="line28"> 28: </a>              ioffset = iend(i)
+<a name="line29"> 29: </a>           enddo
+<a name="line30"> 30: </a>           <font color="#4169E1">do</font> i=itmp2+1,num_pieces
+<a name="line31"> 31: </a>              ibeg(i) = ioffset + 1
+<a name="line32"> 32: </a>              <font color="#4169E1">if</font> (ibeg(i) &gt; total) then
+<a name="line33"> 33: </a>                 iend(i) = ibeg(i) - 1
+<a name="line34"> 34: </a>              <font color="#4169E1">else</font>
+<a name="line35"> 35: </a>                 iend(i) = ioffset + itmp1
+<a name="line36"> 36: </a>                 ioffset = iend(i)
+<a name="line37"> 37: </a>              endif
+<a name="line38"> 38: </a>           enddo
+
+<a name="line40"> 40: </a>         end subroutine split_indices
+<a name="line41"> 41: </a>       end module ex61fmodule
+
+<a name="line43"> 43: </a>      program tpetsc
+
+<a name="line45"> 45: </a>#include <A href="../../../../include/petsc/finclude/petsc.h.html">&lt;petsc/finclude/petsc.h&gt;</A>
+<a name="line46"> 46: </a>      use ex61fmodule
+<a name="line47"> 47: </a>      use petsc
+<a name="line48"> 48: </a>      implicit none
+<a name="line49"> 49: </a>!     ----------------------------
+<a name="line50"> 50: </a>!     test concurrent petsc solver
+<a name="line51"> 51: </a>!     ----------------------------
+
+<a name="line53"> 53: </a>      integer, parameter :: NCASES=100
+<a name="line54"> 54: </a>      integer, parameter :: MAXTHREADS=64
+<a name="line55"> 55: </a>      real(8), parameter :: tol = 1.0d-6
+
+<a name="line57"> 57: </a>      integer, dimension(MAXTHREADS) :: ibeg,iend
+
+<a name="line59"> 59: </a>!$   integer, external :: omp_get_num_threads
+
+<a name="line61"> 61: </a>      <a href="../../../../manualpages/Mat/Mat.html">Mat</a>, target :: Mcol_f_mat(MAXTHREADS)
+<a name="line62"> 62: </a>      <a href="../../../../manualpages/Vec/Vec.html">Vec</a>, target :: Mcol_f_vecb(MAXTHREADS)
+<a name="line63"> 63: </a>      <a href="../../../../manualpages/Vec/Vec.html">Vec</a>, target :: Mcol_f_vecx(MAXTHREADS)
+<a name="line64"> 64: </a>      <a href="../../../../manualpages/KSP/KSP.html">KSP</a>, target :: Mcol_f_ksp(MAXTHREADS)
+<a name="line65"> 65: </a>      <a href="../../../../manualpages/PC/PC.html">PC</a>,  target :: MPC(MAXTHREADS)
+
+<a name="line67"> 67: </a>      <a href="../../../../manualpages/Mat/Mat.html">Mat</a>, pointer :: col_f_mat
+<a name="line68"> 68: </a>      <a href="../../../../manualpages/Vec/Vec.html">Vec</a>, pointer :: col_f_vecb
+<a name="line69"> 69: </a>      <a href="../../../../manualpages/Vec/Vec.html">Vec</a>, pointer :: col_f_vecx
+<a name="line70"> 70: </a>      <a href="../../../../manualpages/KSP/KSP.html">KSP</a>, pointer :: col_f_ksp
+<a name="line71"> 71: </a>      <a href="../../../../manualpages/PC/PC.html">PC</a>, pointer :: pc
+
+<a name="line73"> 73: </a>      <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> :: ith, nthreads
+<a name="line74"> 74: </a>      <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+
+<a name="line76"> 76: </a>      integer, parameter :: nz_per_row = 9
+<a name="line77"> 77: </a>      integer, parameter :: n =100
+<a name="line78"> 78: </a>      integer :: i,j,ij,ij2,ii,jj,nz,ip, dx,dy,icase
+<a name="line79"> 79: </a>      integer, allocatable :: ilist(:),jlist(:)
+<a name="line80"> 80: </a>      <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> :: aij
+<a name="line81"> 81: </a>      <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>, allocatable :: alist(:)
+<a name="line82"> 82: </a>      logical :: isvalid_ii, isvalid_jj, is_diag
+
+<a name="line84"> 84: </a>      <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nrow
+<a name="line85"> 85: </a>      <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> ncol
+<a name="line86"> 86: </a>      <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>, allocatable :: x(:), b(:)
+<a name="line87"> 87: </a>      real(8) :: err(NCASES)
+
+<a name="line89"> 89: </a>      integer :: t1,t2,count_rate
+<a name="line90"> 90: </a>      real :: ttime
+
+<a name="line92"> 92: </a>      <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>(ierr))
+
+<a name="line94"> 94: </a>      allocate(ilist(n*n*nz_per_row),jlist(n*n*nz_per_row),alist(n*n*nz_per_row))
+<a name="line95"> 95: </a>      allocate(x(0:(n*n-1)),b(0:(n*n-1)))
+<a name="line96"> 96: </a>      nrow = n*n
+<a name="line97"> 97: </a>      ncol = nrow
+
+<a name="line99"> 99: </a>      nthreads = 1
+<a name="line100">100: </a>!$omp parallel
+<a name="line101">101: </a>!$omp master
+<a name="line102">102: </a>!$      nthreads = omp_get_num_threads()
+<a name="line103">103: </a>!$omp end master
+<a name="line104">104: </a>!$omp end parallel
+<a name="line105">105: </a>      print*,'nthreads = ', nthreads,' NCASES = ', NCASES
+
+<a name="line107">107: </a>      call split_indices(NCASES,nthreads,ibeg,iend)
+
+<a name="line109">109: </a>!$omp parallel <font color="#4169E1">do</font>                                                        &amp;
+<a name="line110">110: </a>!$omp private(ith,ierr)                                                  &amp;
+<a name="line111">111: </a>!$omp private(col_f_mat,col_f_vecb,col_f_vecx,col_f_ksp)
+<a name="line112">112: </a>      <font color="#4169E1">do</font> ith=1,nthreads
+<a name="line113">113: </a>         col_f_mat =&gt; Mcol_f_mat(ith)
+<a name="line114">114: </a>         col_f_vecb =&gt; Mcol_f_vecb(ith)
+<a name="line115">115: </a>         col_f_vecx =&gt; Mcol_f_vecx(ith)
+<a name="line116">116: </a>         col_f_ksp =&gt; Mcol_f_ksp(ith)
+
+<a name="line118">118: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Mat/MatCreateSeqAIJ.html">MatCreateSeqAIJ</a>( <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, nrow,ncol, nz_per_row,PETSC_NULL_INTEGER, col_f_mat, ierr))
+<a name="line119">119: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecCreateSeqWithArray.html">VecCreateSeqWithArray</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,1,nrow,PETSC_NULL_SCALAR, col_f_vecb, ierr))
+<a name="line120">120: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(col_f_vecb, col_f_vecx,ierr))
+<a name="line121">121: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPCreate.html">KSPCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, col_f_ksp,ierr))
+<a name="line122">122: </a>       enddo
+
+<a name="line124">124: </a>!      -----------------------
+<a name="line125">125: </a>!      setup sparsity pattern
+<a name="line126">126: </a>!      -----------------------
+<a name="line127">127: </a>       nz = 0
+<a name="line128">128: </a>       <font color="#4169E1">do</font> j=1,n
+<a name="line129">129: </a>       <font color="#4169E1">do</font> i=1,n
+<a name="line130">130: </a>        ij = i + (j-1)*n
+<a name="line131">131: </a>        <font color="#4169E1">do</font> dx=-1,1
+<a name="line132">132: </a>        <font color="#4169E1">do</font> dy=-1,1
+<a name="line133">133: </a>          ii = i + dx
+<a name="line134">134: </a>          jj = j + dy
+
+<a name="line136">136: </a>          ij2 = ii + (jj-1)*n
+<a name="line137">137: </a>          isvalid_ii = (1 &lt;= ii).and.(ii &lt;= n)
+<a name="line138">138: </a>          isvalid_jj = (1 &lt;= jj).and.(jj &lt;= n)
+<a name="line139">139: </a>          <font color="#4169E1">if</font> (isvalid_ii.and.isvalid_jj) then
+<a name="line140">140: </a>             is_diag = (ij .eq. ij2)
+<a name="line141">141: </a>             nz = nz + 1
+<a name="line142">142: </a>             ilist(nz) = ij
+<a name="line143">143: </a>             jlist(nz) = ij2
+<a name="line144">144: </a>             <font color="#4169E1">if</font> (is_diag) then
+<a name="line145">145: </a>               aij = 4.0
+<a name="line146">146: </a>             <font color="#4169E1">else</font>
+<a name="line147">147: </a>               aij = -1.0
+<a name="line148">148: </a>             endif
+<a name="line149">149: </a>             alist(nz) = aij
+<a name="line150">150: </a>           endif
+<a name="line151">151: </a>          enddo
+<a name="line152">152: </a>          enddo
+<a name="line153">153: </a>         enddo
+<a name="line154">154: </a>         enddo
+
+<a name="line156">156: </a>       print*,'nz = ', nz
+
+<a name="line158">158: </a>!      ----------------------------------
+<a name="line159">159: </a>!      convert from fortran to c indexing
+<a name="line160">160: </a>!      ----------------------------------
+<a name="line161">161: </a>       ilist(1:nz) = ilist(1:nz) - 1
+<a name="line162">162: </a>       jlist(1:nz) = jlist(1:nz) - 1
+
+<a name="line164">164: </a>!      --------------
+<a name="line165">165: </a>!      setup matrices
+<a name="line166">166: </a>!      --------------
+<a name="line167">167: </a>       call system_clock(t1,count_rate)
+
+<a name="line169">169: </a>!$omp  parallel <font color="#4169E1">do</font>                                                      &amp;
+<a name="line170">170: </a>!$omp&amp; private(ith,icase,ip,i,j,ii,jj,aij,ierr,x,b)                      &amp;
+<a name="line171">171: </a>!$omp&amp; private(col_f_mat,col_f_vecb,col_f_vecx,col_f_ksp,pc)
+<a name="line172">172: </a>       <font color="#4169E1">do</font> ith=1,nthreads
+<a name="line173">173: </a>         col_f_mat =&gt; Mcol_f_mat(ith)
+<a name="line174">174: </a>         col_f_vecb =&gt; Mcol_f_vecb(ith)
+<a name="line175">175: </a>         col_f_vecx =&gt; Mcol_f_vecx(ith)
+<a name="line176">176: </a>         col_f_ksp =&gt; Mcol_f_ksp(ith)
+<a name="line177">177: </a>         pc =&gt; MPC(ith)
+
+<a name="line179">179: </a>        <font color="#4169E1">do</font> icase=ibeg(ith),iend(ith)
+
+<a name="line181">181: </a>         <font color="#4169E1">do</font> ip=1,nz
+<a name="line182">182: </a>           ii = ilist(ip)
+<a name="line183">183: </a>           jj = jlist(ip)
+<a name="line184">184: </a>           aij = alist(ip)
+<a name="line185">185: </a>           <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Mat/MatSetValue.html">MatSetValue</a>(col_f_mat,ii,jj,aij,<a href="../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>,ierr))
+<a name="line186">186: </a>         enddo
+<a name="line187">187: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(col_f_mat,<a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line188">188: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(col_f_mat,<a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line189">189: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPSetOperators.html">KSPSetOperators</a>(col_f_ksp,col_f_mat,col_f_mat,ierr))
+
+<a name="line191">191: </a>         ! set linear solver
+<a name="line192">192: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPGetPC.html">KSPGetPC</a>(col_f_ksp,pc,ierr))
+<a name="line193">193: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/PC/PCSetType.html">PCSetType</a>(pc,<a href="../../../../manualpages/PC/PCLU.html">PCLU</a>,ierr))
+
+<a name="line195">195: </a>         ! associate petsc vector with allocated array
+<a name="line196">196: </a>         x(:) = 1
+<a name="line197">197: </a>!$omp    critical
+<a name="line198">198: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecPlaceArray.html">VecPlaceArray</a>(col_f_vecx,x,ierr))
+<a name="line199">199: </a>!$omp    end critical
+
+<a name="line201">201: </a>         b(:) = 0
+<a name="line202">202: </a>         <font color="#4169E1">do</font> ip=1,nz
+<a name="line203">203: </a>           i = ilist(ip)
+<a name="line204">204: </a>           j = jlist(ip)
+<a name="line205">205: </a>           aij = alist(ip)
+<a name="line206">206: </a>           b(i) = b(i) + aij*x(j)
+<a name="line207">207: </a>         enddo
+<a name="line208">208: </a>         x = 0
+<a name="line209">209: </a>!$omp    critical
+<a name="line210">210: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecPlaceArray.html">VecPlaceArray</a>(col_f_vecb,b,ierr))
+<a name="line211">211: </a>!$omp    end critical
+
+<a name="line213">213: </a>!  -----------------------------------------------------------
+<a name="line214">214: </a>!  key test, need to solve multiple linear systems in parallel
+<a name="line215">215: </a>!  -----------------------------------------------------------
+<a name="line216">216: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPSetFromOptions.html">KSPSetFromOptions</a>(col_f_ksp,ierr))
+
+<a name="line218">218: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPSetUp.html">KSPSetUp</a>(col_f_ksp,ierr))
+<a name="line219">219: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(col_f_ksp,col_f_vecb,col_f_vecx,ierr))
+
+<a name="line221">221: </a>!        ------------
+<a name="line222">222: </a>!        check answer
+<a name="line223">223: </a>!        ------------
+<a name="line224">224: </a>         err(icase) = maxval(abs(x(:)-1))
+
+<a name="line226">226: </a>!$omp    critical
+<a name="line227">227: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecResetArray.html">VecResetArray</a>(col_f_vecx,ierr))
+<a name="line228">228: </a>!$omp    end critical
+
+<a name="line230">230: </a>!$omp    critical
+<a name="line231">231: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecResetArray.html">VecResetArray</a>(col_f_vecb,ierr))
+<a name="line232">232: </a>!$omp    end critical
+
+<a name="line234">234: </a>       enddo
+<a name="line235">235: </a>       enddo
+
+<a name="line237">237: </a>!$omp parallel <font color="#4169E1">do</font>                                                        &amp;
+<a name="line238">238: </a>!$omp private(ith,ierr)                                                  &amp;
+<a name="line239">239: </a>!$omp private(col_f_mat,col_f_vecb,col_f_vecx,col_f_ksp)
+<a name="line240">240: </a>      <font color="#4169E1">do</font> ith=1,nthreads
+<a name="line241">241: </a>         col_f_mat =&gt; Mcol_f_mat(ith)
+<a name="line242">242: </a>         col_f_vecb =&gt; Mcol_f_vecb(ith)
+<a name="line243">243: </a>         col_f_vecx =&gt; Mcol_f_vecx(ith)
+<a name="line244">244: </a>         col_f_ksp =&gt; Mcol_f_ksp(ith)
+
+<a name="line246">246: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(col_f_mat, ierr))
+<a name="line247">247: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(col_f_vecb, ierr))
+<a name="line248">248: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(col_f_vecx,ierr))
+
+<a name="line250">250: </a>         <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/KSP/KSPDestroy.html">KSPDestroy</a>(col_f_ksp,ierr))
+
+<a name="line252">252: </a>       enddo
+
+<a name="line254">254: </a>       call system_clock(t2,count_rate)
+<a name="line255">255: </a>       ttime = real(t2-t1)/real(count_rate)
+<a name="line256">256: </a>       write(*,*) 'total time is ',ttime
+
+<a name="line258">258: </a>       write(*,*) 'maxval(err) ', maxval(err)
+<a name="line259">259: </a>       <font color="#4169E1">do</font> icase=1,NCASES
+<a name="line260">260: </a>        <font color="#4169E1">if</font> (err(icase) &gt; tol) then
+<a name="line261">261: </a>         write(*,*) 'icase,err(icase) ',icase,err(icase)
+<a name="line262">262: </a>        endif
+<a name="line263">263: </a>       enddo
+
+<a name="line265">265: </a>       deallocate(ilist,jlist,alist)
+<a name="line266">266: </a>       deallocate(x,b)
+<a name="line267">267: </a>       <a href="../../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a>(ierr))
+<a name="line268">268: </a>       end program tpetsc
+
+<a name="line270">270: </a>!<font color="#B22222">/*TEST</font>
+<a name="line271">271: </a><font color="#B22222">!</font>
+<a name="line272">272: </a><font color="#B22222">!   build:</font>
+<a name="line273">273: </a><font color="#B22222">!      requires: double !complex !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line274">274: </a><font color="#B22222">!</font>
+<a name="line275">275: </a><font color="#B22222">!   test:</font>
+<a name="line276">276: </a><font color="#B22222">!      output_file: output/ex61f_1.out</font>
+<a name="line277">277: </a><font color="#B22222">!      TODO: Need to determine how to test OpenMP code</font>
+<a name="line278">278: </a><font color="#B22222">!</font>
+<a name="line279">279: </a><font color="#B22222">!TEST*/</font>
+</pre>
+</body>
+
+</html>

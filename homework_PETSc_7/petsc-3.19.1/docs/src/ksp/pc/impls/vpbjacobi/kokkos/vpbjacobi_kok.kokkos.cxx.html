@@ -1,0 +1,167 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/pc/impls/vpbjacobi/kokkos/vpbjacobi_kok.kokkos.cxx">Actual source code: vpbjacobi_kok.kokkos.cxx</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:20:02+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../../include/petscvec_kokkos.hpp.html">&lt;petscvec_kokkos.hpp&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../vec/vec/impls/seq/kokkos/veckokkosimpl.hpp.html">&lt;../src/vec/vec/impls/seq/kokkos/veckokkosimpl.hpp&gt;</A>
+<a name="line3">  3: </a>#include <A href="../../../../../../include/petscdevice.h.html">&lt;petscdevice.h&gt;</A>
+<a name="line4">  4: </a>#include <A href="../vpbjacobi.h.html">&lt;../src/ksp/pc/impls/vpbjacobi/vpbjacobi.h&gt;</A>
+
+<a name="line6">  6: </a><font color="#B22222">/* A class that manages helper arrays assisting parallel <a href="../../../../../../manualpages/PC/PCApply.html">PCApply</a>() with Kokkos */</font>
+<a name="line7">  7: </a><font color="#4169E1"><a name="PC_VPBJacobi_Kokkos"></a>struct PC_VPBJacobi_Kokkos </font>{
+<a name="line8">  8: </a>  <font color="#B22222">/* Cache the old sizes to check if we need realloc */</font>
+<a name="line9">  9: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> n;       <font color="#B22222">/* number of rows of the local matrix */</font>
+<a name="line10"> 10: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nblocks; <font color="#B22222">/* number of point blocks */</font>
+<a name="line11"> 11: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nsize;   <font color="#B22222">/* sum of sizes of the point blocks */</font>
+
+<a name="line13"> 13: </a>  <font color="#B22222">/* Helper arrays that are pre-computed on host and then copied to device.</font>
+<a name="line14"> 14: </a><font color="#B22222">    bs:     [nblocks+1], "csr" version of bsizes[]</font>
+<a name="line15"> 15: </a><font color="#B22222">    bs2:    [nblocks+1], "csr" version of squares of bsizes[]</font>
+<a name="line16"> 16: </a><font color="#B22222">    matIdx: [n], row i of the local matrix belongs to the matIdx_d[i] block</font>
+<a name="line17"> 17: </a><font color="#B22222">  */</font>
+<a name="line18"> 18: </a>  PetscIntKokkosDualView    bs_dual, bs2_dual, matIdx_dual;
+<a name="line19"> 19: </a>  PetscScalarKokkosDualView diag_dual;
+
+<a name="line21"> 21: </a>  PC_VPBJacobi_Kokkos(<a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> n, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nblocks, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nsize, const <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *bsizes, MatScalar *diag_ptr_h) :
+<a name="line22"> 22: </a>    n(n), nblocks(nblocks), nsize(nsize), bs_dual(<font color="#666666">"bs_dual"</font>, nblocks + 1), bs2_dual(<font color="#666666">"bs2_dual"</font>, nblocks + 1), matIdx_dual(<font color="#666666">"matIdx_dual"</font>, n)
+<a name="line23"> 23: </a>  {
+<a name="line24"> 24: </a>    PetscScalarKokkosViewHost diag_h(diag_ptr_h, nsize);
+
+<a name="line26"> 26: </a>    auto diag_d = Kokkos::create_mirror_view(DefaultMemorySpace(), diag_h);
+<a name="line27"> 27: </a>    diag_dual   = PetscScalarKokkosDualView(diag_d, diag_h);
+<a name="line28"> 28: </a>    <a href="../../../../../../manualpages/Sys/PetscCallVoid.html">PetscCallVoid</a>(UpdateOffsetsOnDevice(bsizes, diag_ptr_h));
+<a name="line29"> 29: </a>  }
+
+<a name="line31"> 31: </a>  <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> UpdateOffsetsOnDevice(const <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *bsizes, MatScalar *diag_ptr_h)
+<a name="line32"> 32: </a>  {
+<a name="line33"> 33: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line34"> 34: </a>    <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(diag_dual.view_host().data() == diag_ptr_h, <a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Host pointer has changed since last call"</font>);
+<a name="line35"> 35: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ComputeOffsetsOnHost(bsizes));
+
+<a name="line37"> 37: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(bs_dual.modify_host());
+<a name="line38"> 38: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(bs2_dual.modify_host());
+<a name="line39"> 39: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(matIdx_dual.modify_host());
+<a name="line40"> 40: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(diag_dual.modify_host());
+
+<a name="line42"> 42: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(bs_dual.sync_device());
+<a name="line43"> 43: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(bs2_dual.sync_device());
+<a name="line44"> 44: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(matIdx_dual.sync_device());
+<a name="line45"> 45: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(diag_dual.sync_device());
+<a name="line46"> 46: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscLogCpuToGpu(<font color="#4169E1">sizeof</font>(<a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>) * (2 * nblocks + 2 + n) + <font color="#4169E1">sizeof</font>(MatScalar) * nsize));
+<a name="line47"> 47: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line48"> 48: </a>  }
+
+<a name="line50"> 50: </a><strong><font color="#FF0000">private:</font></strong>
+<a name="line51"> 51: </a>  <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ComputeOffsetsOnHost(const <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *bsizes)
+<a name="line52"> 52: </a>  {
+<a name="line53"> 53: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *bs_h     = bs_dual.view_host().data();
+<a name="line54"> 54: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *bs2_h    = bs2_dual.view_host().data();
+<a name="line55"> 55: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *matIdx_h = matIdx_dual.view_host().data();
+
+<a name="line57"> 57: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line58"> 58: </a>    bs_h[0] = bs2_h[0] = 0;
+<a name="line59"> 59: </a>    <font color="#4169E1">for</font> (<a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> i = 0; i &lt; nblocks; i++) {
+<a name="line60"> 60: </a>      bs_h[i + 1]  = bs_h[i] + bsizes[i];
+<a name="line61"> 61: </a>      bs2_h[i + 1] = bs2_h[i] + bsizes[i] * bsizes[i];
+<a name="line62"> 62: </a>      <font color="#4169E1">for</font> (<a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> j = 0; j &lt; bsizes[i]; j++) matIdx_h[bs_h[i] + j] = i;
+<a name="line63"> 63: </a>    }
+<a name="line64"> 64: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line65"> 65: </a>  }
+<a name="line66"> 66: </a>};
+
+<a name="line68"> 68: </a>template &lt;<a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> transpose&gt;
+<a name="line69"> 69: </a><strong><font color="#4169E1"><a name="PCApplyOrTranspose_VPBJacobi_Kokkos"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCApplyOrTranspose_VPBJacobi_Kokkos(<a href="../../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line70"> 70: </a>{
+<a name="line71"> 71: </a>  PC_VPBJacobi              *jac   = (PC_VPBJacobi *)pc-&gt;data;
+<a name="line72"> 72: </a>  PC_VPBJacobi_Kokkos       *pckok = static_cast&lt;PC_VPBJacobi_Kokkos *&gt;(jac-&gt;spptr);
+<a name="line73"> 73: </a>  ConstPetscScalarKokkosView xv;
+<a name="line74"> 74: </a>  PetscScalarKokkosView      yv;
+<a name="line75"> 75: </a>  PetscScalarKokkosView      diag   = pckok-&gt;diag_dual.view_device();
+<a name="line76"> 76: </a>  PetscIntKokkosView         bs     = pckok-&gt;bs_dual.view_device();
+<a name="line77"> 77: </a>  PetscIntKokkosView         bs2    = pckok-&gt;bs2_dual.view_device();
+<a name="line78"> 78: </a>  PetscIntKokkosView         matIdx = pckok-&gt;matIdx_dual.view_device();
+<a name="line79"> 79: </a>  const char                *label  = transpose ? <font color="#666666">"PCApplyTranspose_VPBJacobi_Kokkos"</font> : <font color="#666666">"PCApply_VPBJacobi_Kokkos"</font>;
+
+<a name="line81"> 81: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line82"> 82: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscLogGpuTimeBegin.html">PetscLogGpuTimeBegin</a>());
+<a name="line83"> 83: </a>  VecErrorIfNotKokkos(x);
+<a name="line84"> 84: </a>  VecErrorIfNotKokkos(y);
+<a name="line85"> 85: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(x, &amp;xv));
+<a name="line86"> 86: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(y, &amp;yv));
+<a name="line87"> 87: </a>  <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(Kokkos::parallel_for(
+<a name="line88"> 88: </a>    label, pckok-&gt;n, KOKKOS_LAMBDA(<a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> row) {
+<a name="line89"> 89: </a>      const <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *Ap, *xp;
+<a name="line90"> 90: </a>      <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *yp;
+<a name="line91"> 91: </a>      <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i, j, k, m;
+
+<a name="line93"> 93: </a>      k  = matIdx(row);                             <font color="#B22222">/* k-th block/matrix */</font>
+<a name="line94"> 94: </a>      m  = bs(k + 1) - bs(k);                       <font color="#B22222">/* block size of the k-th block */</font>
+<a name="line95"> 95: </a>      i  = row - bs(k);                             <font color="#B22222">/* i-th row of the block */</font>
+<a name="line96"> 96: </a>      Ap = &amp;diag(bs2(k) + i * (transpose ? m : 1)); <font color="#B22222">/* Ap points to the first entry of i-th row/column */</font>
+<a name="line97"> 97: </a>      xp = &amp;xv(bs(k));
+<a name="line98"> 98: </a>      yp = &amp;yv(bs(k));
+
+<a name="line100">100: </a>      yp[i] = 0.0;
+<a name="line101">101: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; m; j++) {
+<a name="line102">102: </a>        yp[i] += Ap[0] * xp[j];
+<a name="line103">103: </a>        Ap += transpose ? 1 : m;
+<a name="line104">104: </a>      }
+<a name="line105">105: </a>    }));
+<a name="line106">106: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(x, &amp;xv));
+<a name="line107">107: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(y, &amp;yv));
+<a name="line108">108: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscLogGpuFlops.html">PetscLogGpuFlops</a>(pckok-&gt;nsize * 2)); <font color="#B22222">/* FMA on entries in all blocks */</font>
+<a name="line109">109: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscLogGpuTimeEnd.html">PetscLogGpuTimeEnd</a>());
+<a name="line110">110: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line111">111: </a>}
+
+<a name="line113">113: </a><strong><font color="#4169E1"><a name="PCDestroy_VPBJacobi_Kokkos"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCDestroy_VPBJacobi_Kokkos(<a href="../../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line114">114: </a>{
+<a name="line115">115: </a>  PC_VPBJacobi *jac = (PC_VPBJacobi *)pc-&gt;data;
+
+<a name="line117">117: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line118">118: </a>  <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(delete static_cast&lt;PC_VPBJacobi_Kokkos *&gt;(jac-&gt;spptr));
+<a name="line119">119: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCDestroy_VPBJacobi(pc));
+<a name="line120">120: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line121">121: </a>}
+
+<a name="line123">123: </a><strong><font color="#4169E1"><a name="PCSetUp_VPBJacobi_Kokkos"></a>PETSC_INTERN <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_VPBJacobi_Kokkos(<a href="../../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line124">124: </a>{
+<a name="line125">125: </a>  PC_VPBJacobi        *jac   = (PC_VPBJacobi *)pc-&gt;data;
+<a name="line126">126: </a>  PC_VPBJacobi_Kokkos *pckok = static_cast&lt;PC_VPBJacobi_Kokkos *&gt;(jac-&gt;spptr);
+<a name="line127">127: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>             i, n, nblocks, nsize = 0;
+<a name="line128">128: </a>  const <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>      *bsizes;
+
+<a name="line130">130: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line131">131: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_VPBJacobi_Host(pc)); <font color="#B22222">/* Compute the inverse on host now. Might worth doing it on device directly */</font>
+<a name="line132">132: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatGetVariableBlockSizes.html">MatGetVariableBlockSizes</a>(pc-&gt;pmat, &amp;nblocks, &amp;bsizes));
+<a name="line133">133: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nblocks; i++) nsize += bsizes[i] * bsizes[i];
+<a name="line134">134: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatGetLocalSize.html">MatGetLocalSize</a>(pc-&gt;pmat, &amp;n, NULL));
+
+<a name="line136">136: </a>  <font color="#B22222">/* If one calls <a href="../../../../../../manualpages/Mat/MatSetVariableBlockSizes.html">MatSetVariableBlockSizes</a>() multiple times and sizes have been changed (is it allowed?), we delete the old and rebuild anyway */</font>
+<a name="line137">137: </a>  <font color="#4169E1">if</font> (pckok &amp;&amp; (pckok-&gt;n != n || pckok-&gt;nblocks != nblocks || pckok-&gt;nsize != nsize)) {
+<a name="line138">138: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(delete pckok);
+<a name="line139">139: </a>    pckok = nullptr;
+<a name="line140">140: </a>  }
+
+<a name="line142">142: </a>  <font color="#4169E1">if</font> (!pckok) { <font color="#B22222">/* allocate the struct along with the helper arrays from the scratch */</font>
+<a name="line143">143: </a>    <a href="../../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(jac-&gt;spptr = new PC_VPBJacobi_Kokkos(n, nblocks, nsize, bsizes, jac-&gt;diag));
+<a name="line144">144: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* update the value only */</font>
+<a name="line145">145: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(pckok-&gt;UpdateOffsetsOnDevice(bsizes, jac-&gt;diag));
+<a name="line146">146: </a>  }
+
+<a name="line148">148: </a>  pc-&gt;ops-&gt;apply          = PCApplyOrTranspose_VPBJacobi_Kokkos&lt;<a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>&gt;;
+<a name="line149">149: </a>  pc-&gt;ops-&gt;applytranspose = PCApplyOrTranspose_VPBJacobi_Kokkos&lt;<a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>&gt;;
+<a name="line150">150: </a>  pc-&gt;ops-&gt;destroy        = PCDestroy_VPBJacobi_Kokkos;
+<a name="line151">151: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line152">152: </a>}
+</pre>
+</body>
+
+</html>

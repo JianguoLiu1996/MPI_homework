@@ -1,0 +1,983 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/tao/unconstrained/impls/nls/nls.c">Actual source code: nls.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:29+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsctaolinesearch.h.html">&lt;petsctaolinesearch.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="nlsimpl.h.html">&lt;../src/tao/unconstrained/impls/nls/nlsimpl.h&gt;</A>
+
+<a name="line4">  4: </a>#include <A href="../../../../../include/petscksp.h.html">&lt;petscksp.h&gt;</A>
+
+<a name="line6">  6: </a><strong><font color="#228B22">#define NLS_INIT_CONSTANT      0</font></strong>
+<a name="line7">  7: </a><strong><font color="#228B22">#define NLS_INIT_DIRECTION     1</font></strong>
+<a name="line8">  8: </a><strong><font color="#228B22">#define NLS_INIT_INTERPOLATION 2</font></strong>
+<a name="line9">  9: </a><strong><font color="#228B22">#define NLS_INIT_TYPES         3</font></strong>
+
+<a name="line11"> 11: </a><strong><font color="#228B22">#define NLS_UPDATE_STEP          0</font></strong>
+<a name="line12"> 12: </a><strong><font color="#228B22">#define NLS_UPDATE_REDUCTION     1</font></strong>
+<a name="line13"> 13: </a><strong><font color="#228B22">#define NLS_UPDATE_INTERPOLATION 2</font></strong>
+<a name="line14"> 14: </a><strong><font color="#228B22">#define NLS_UPDATE_TYPES         3</font></strong>
+
+<a name="line16"> 16: </a>static const char *NLS_INIT[64] = {<font color="#666666">"constant"</font>, <font color="#666666">"direction"</font>, <font color="#666666">"interpolation"</font>};
+
+<a name="line18"> 18: </a>static const char *NLS_UPDATE[64] = {<font color="#666666">"step"</font>, <font color="#666666">"reduction"</font>, <font color="#666666">"interpolation"</font>};
+
+<a name="line20"> 20: </a><font color="#B22222">/*</font>
+<a name="line21"> 21: </a><font color="#B22222"> Implements Newton's Method with a line search approach for solving</font>
+<a name="line22"> 22: </a><font color="#B22222"> unconstrained minimization problems.  A More'-Thuente line search</font>
+<a name="line23"> 23: </a><font color="#B22222"> is used to guarantee that the bfgs preconditioner remains positive</font>
+<a name="line24"> 24: </a><font color="#B22222"> definite.</font>
+
+<a name="line26"> 26: </a><font color="#B22222"> The method can shift the Hessian matrix.  The shifting procedure is</font>
+<a name="line27"> 27: </a><font color="#B22222"> adapted from the PATH algorithm for solving complementarity</font>
+<a name="line28"> 28: </a><font color="#B22222"> problems.</font>
+
+<a name="line30"> 30: </a><font color="#B22222"> The linear system solve should be done with a conjugate gradient</font>
+<a name="line31"> 31: </a><font color="#B22222"> method, although any method can be used.</font>
+<a name="line32"> 32: </a><font color="#B22222">*/</font>
+
+<a name="line34"> 34: </a><strong><font color="#228B22">#define NLS_NEWTON   0</font></strong>
+<a name="line35"> 35: </a><strong><font color="#228B22">#define NLS_BFGS     1</font></strong>
+<a name="line36"> 36: </a><strong><font color="#228B22">#define NLS_GRADIENT 2</font></strong>
+
+<a name="line38"> 38: </a><strong><font color="#4169E1"><a name="TaoSolve_NLS"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoSolve_NLS(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line39"> 39: </a>{
+<a name="line40"> 40: </a>  TAO_NLS                     *nlsP = (TAO_NLS *)tao-&gt;data;
+<a name="line41"> 41: </a>  <a href="../../../../../manualpages/KSP/KSPType.html">KSPType</a>                      ksp_type;
+<a name="line42"> 42: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>                    is_nash, is_stcg, is_gltr, is_bfgs, is_jacobi, is_symmetric, sym_set;
+<a name="line43"> 43: </a>  <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSPConvergedReason</a>           ksp_reason;
+<a name="line44"> 44: </a>  <a href="../../../../../manualpages/PC/PC.html">PC</a>                           pc;
+<a name="line45"> 45: </a>  <a href="../../../../../manualpages/Tao/TaoLineSearchConvergedReason.html">TaoLineSearchConvergedReason</a> ls_reason;
+
+<a name="line47"> 47: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> fmin, ftrial, f_full, prered, actred, kappa, sigma;
+<a name="line48"> 48: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> tau, tau_1, tau_2, tau_max, tau_min, max_radius;
+<a name="line49"> 49: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> f, fold, gdx, gnorm, pert;
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> step   = 1.0;
+<a name="line51"> 51: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> norm_d = 0.0, e_min;
+
+<a name="line53"> 53: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> stepType;
+<a name="line54"> 54: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bfgsUpdates = 0;
+<a name="line55"> 55: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> n, N, kspits;
+<a name="line56"> 56: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> needH = 1;
+
+<a name="line58"> 58: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> i_max = 5;
+<a name="line59"> 59: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> j_max = 1;
+<a name="line60"> 60: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> i, j;
+
+<a name="line62"> 62: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line63"> 63: </a>  <font color="#4169E1">if</font> (tao-&gt;XL || tao-&gt;XU || tao-&gt;ops-&gt;computebounds) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(tao, <font color="#666666">"WARNING: Variable bounds have been set but will be ignored by nls algorithm\n"</font>));
+
+<a name="line65"> 65: </a>  <font color="#B22222">/* Initialized variables */</font>
+<a name="line66"> 66: </a>  pert = nlsP-&gt;sval;
+
+<a name="line68"> 68: </a>  <font color="#B22222">/* Number of times ksp stopped because of these reasons */</font>
+<a name="line69"> 69: </a>  nlsP-&gt;ksp_atol = 0;
+<a name="line70"> 70: </a>  nlsP-&gt;ksp_rtol = 0;
+<a name="line71"> 71: </a>  nlsP-&gt;ksp_dtol = 0;
+<a name="line72"> 72: </a>  nlsP-&gt;ksp_ctol = 0;
+<a name="line73"> 73: </a>  nlsP-&gt;ksp_negc = 0;
+<a name="line74"> 74: </a>  nlsP-&gt;ksp_iter = 0;
+<a name="line75"> 75: </a>  nlsP-&gt;ksp_othr = 0;
+
+<a name="line77"> 77: </a>  <font color="#B22222">/* Initialize trust-region radius when using nash, stcg, or gltr</font>
+<a name="line78"> 78: </a><font color="#B22222">     Command automatically ignored for other methods</font>
+<a name="line79"> 79: </a><font color="#B22222">     Will be reset during the first iteration</font>
+<a name="line80"> 80: </a><font color="#B22222">  */</font>
+<a name="line81"> 81: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetType.html">KSPGetType</a>(tao-&gt;ksp, &amp;ksp_type));
+<a name="line82"> 82: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrcmp.html">PetscStrcmp</a>(ksp_type, <a href="../../../../../manualpages/KSP/KSPNASH.html">KSPNASH</a>, &amp;is_nash));
+<a name="line83"> 83: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrcmp.html">PetscStrcmp</a>(ksp_type, <a href="../../../../../manualpages/KSP/KSPSTCG.html">KSPSTCG</a>, &amp;is_stcg));
+<a name="line84"> 84: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrcmp.html">PetscStrcmp</a>(ksp_type, <a href="../../../../../manualpages/KSP/KSPGLTR.html">KSPGLTR</a>, &amp;is_gltr));
+
+<a name="line86"> 86: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGSetRadius.html">KSPCGSetRadius</a>(tao-&gt;ksp, nlsP-&gt;max_radius));
+
+<a name="line88"> 88: </a>  <font color="#4169E1">if</font> (is_nash || is_stcg || is_gltr) {
+<a name="line89"> 89: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(tao-&gt;trust0 &gt;= 0.0, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Initial radius negative"</font>);
+<a name="line90"> 90: </a>    tao-&gt;trust = tao-&gt;trust0;
+<a name="line91"> 91: </a>    tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;min_radius);
+<a name="line92"> 92: </a>    tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, nlsP-&gt;max_radius);
+<a name="line93"> 93: </a>  }
+
+<a name="line95"> 95: </a>  <font color="#B22222">/* Check convergence criteria */</font>
+<a name="line96"> 96: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeObjectiveAndGradient.html">TaoComputeObjectiveAndGradient</a>(tao, tao-&gt;solution, &amp;f, tao-&gt;gradient));
+<a name="line97"> 97: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoGradientNorm.html">TaoGradientNorm</a>(tao, tao-&gt;gradient, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;gnorm));
+<a name="line98"> 98: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!PetscIsInfOrNanReal(f) &amp;&amp; !PetscIsInfOrNanReal(gnorm), <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>, <font color="#666666">"User provided compute function generated Inf or NaN"</font>);
+
+<a name="line100">100: </a>  tao-&gt;reason = <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_CONTINUE_ITERATING</a>;
+<a name="line101">101: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TaoLogConvergenceHistory(tao, f, gnorm, 0.0, tao-&gt;ksp_its));
+<a name="line102">102: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoMonitor.html">TaoMonitor</a>(tao, tao-&gt;niter, f, gnorm, 0.0, step));
+<a name="line103">103: </a>  <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(tao, convergencetest, tao-&gt;cnvP);
+<a name="line104">104: </a>  <font color="#4169E1">if</font> (tao-&gt;reason != <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_CONTINUE_ITERATING</a>) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+
+<a name="line106">106: </a>  <font color="#B22222">/* Allocate the vectors needed for the BFGS approximation */</font>
+<a name="line107">107: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetPC.html">KSPGetPC</a>(tao-&gt;ksp, &amp;pc));
+<a name="line108">108: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <a href="../../../../../manualpages/PC/PCLMVM.html">PCLMVM</a>, &amp;is_bfgs));
+<a name="line109">109: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>, &amp;is_jacobi));
+<a name="line110">110: </a>  <font color="#4169E1">if</font> (is_bfgs) {
+<a name="line111">111: </a>    nlsP-&gt;bfgs_pre = pc;
+<a name="line112">112: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCLMVMGetMatLMVM.html">PCLMVMGetMatLMVM</a>(nlsP-&gt;bfgs_pre, &amp;nlsP-&gt;M));
+<a name="line113">113: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(tao-&gt;solution, &amp;n));
+<a name="line114">114: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(tao-&gt;solution, &amp;N));
+<a name="line115">115: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetSizes.html">MatSetSizes</a>(nlsP-&gt;M, n, n, N, N));
+<a name="line116">116: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMAllocate.html">MatLMVMAllocate</a>(nlsP-&gt;M, tao-&gt;solution, tao-&gt;gradient));
+<a name="line117">117: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatIsSymmetricKnown.html">MatIsSymmetricKnown</a>(nlsP-&gt;M, &amp;sym_set, &amp;is_symmetric));
+<a name="line118">118: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sym_set &amp;&amp; is_symmetric, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"LMVM matrix in the LMVM preconditioner must be symmetric."</font>);
+<a name="line119">119: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (is_jacobi) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>(pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+
+<a name="line121">121: </a>  <font color="#B22222">/* Initialize trust-region radius.  The initialization is only performed</font>
+<a name="line122">122: </a><font color="#B22222">     when we are using Nash, Steihaug-Toint or the Generalized Lanczos method. */</font>
+<a name="line123">123: </a>  <font color="#4169E1">if</font> (is_nash || is_stcg || is_gltr) {
+<a name="line124">124: </a>    <font color="#4169E1">switch</font> (nlsP-&gt;init_type) {
+<a name="line125">125: </a>    <font color="#4169E1">case</font> NLS_INIT_CONSTANT:
+<a name="line126">126: </a>      <font color="#B22222">/* Use the initial radius specified */</font>
+<a name="line127">127: </a>      <font color="#4169E1">break</font>;
+
+<a name="line129">129: </a>    <font color="#4169E1">case</font> NLS_INIT_INTERPOLATION:
+<a name="line130">130: </a>      <font color="#B22222">/* Use the initial radius specified */</font>
+<a name="line131">131: </a>      max_radius = 0.0;
+
+<a name="line133">133: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; j_max; ++j) {
+<a name="line134">134: </a>        fmin  = f;
+<a name="line135">135: </a>        sigma = 0.0;
+
+<a name="line137">137: </a>        <font color="#4169E1">if</font> (needH) {
+<a name="line138">138: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeHessian.html">TaoComputeHessian</a>(tao, tao-&gt;solution, tao-&gt;hessian, tao-&gt;hessian_pre));
+<a name="line139">139: </a>          needH = 0;
+<a name="line140">140: </a>        }
+
+<a name="line142">142: </a>        <font color="#4169E1">for</font> (i = 0; i &lt; i_max; ++i) {
+<a name="line143">143: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(tao-&gt;solution, nlsP-&gt;W));
+<a name="line144">144: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(nlsP-&gt;W, -tao-&gt;trust / gnorm, tao-&gt;gradient));
+<a name="line145">145: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeObjective.html">TaoComputeObjective</a>(tao, nlsP-&gt;W, &amp;ftrial));
+<a name="line146">146: </a>          <font color="#4169E1">if</font> (PetscIsInfOrNanReal(ftrial)) {
+<a name="line147">147: </a>            tau = nlsP-&gt;gamma1_i;
+<a name="line148">148: </a>          } <font color="#4169E1">else</font> {
+<a name="line149">149: </a>            <font color="#4169E1">if</font> (ftrial &lt; fmin) {
+<a name="line150">150: </a>              fmin  = ftrial;
+<a name="line151">151: </a>              sigma = -tao-&gt;trust / gnorm;
+<a name="line152">152: </a>            }
+
+<a name="line154">154: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMult.html">MatMult</a>(tao-&gt;hessian, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line155">155: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDot.html">VecDot</a>(tao-&gt;gradient, nlsP-&gt;D, &amp;prered));
+
+<a name="line157">157: </a>            prered = tao-&gt;trust * (gnorm - 0.5 * tao-&gt;trust * prered / (gnorm * gnorm));
+<a name="line158">158: </a>            actred = f - ftrial;
+<a name="line159">159: </a>            <font color="#4169E1">if</font> ((PetscAbsScalar(actred) &lt;= nlsP-&gt;epsilon) &amp;&amp; (PetscAbsScalar(prered) &lt;= nlsP-&gt;epsilon)) {
+<a name="line160">160: </a>              kappa = 1.0;
+<a name="line161">161: </a>            } <font color="#4169E1">else</font> {
+<a name="line162">162: </a>              kappa = actred / prered;
+<a name="line163">163: </a>            }
+
+<a name="line165">165: </a>            tau_1   = nlsP-&gt;theta_i * gnorm * tao-&gt;trust / (nlsP-&gt;theta_i * gnorm * tao-&gt;trust + (1.0 - nlsP-&gt;theta_i) * prered - actred);
+<a name="line166">166: </a>            tau_2   = nlsP-&gt;theta_i * gnorm * tao-&gt;trust / (nlsP-&gt;theta_i * gnorm * tao-&gt;trust - (1.0 + nlsP-&gt;theta_i) * prered + actred);
+<a name="line167">167: </a>            tau_min = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tau_1, tau_2);
+<a name="line168">168: </a>            tau_max = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tau_1, tau_2);
+
+<a name="line170">170: </a>            <font color="#4169E1">if</font> (PetscAbsScalar(kappa - (<a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>)1.0) &lt;= nlsP-&gt;mu1_i) {
+<a name="line171">171: </a>              <font color="#B22222">/* Great agreement */</font>
+<a name="line172">172: </a>              max_radius = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(max_radius, tao-&gt;trust);
+
+<a name="line174">174: </a>              <font color="#4169E1">if</font> (tau_max &lt; 1.0) {
+<a name="line175">175: </a>                tau = nlsP-&gt;gamma3_i;
+<a name="line176">176: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &gt; nlsP-&gt;gamma4_i) {
+<a name="line177">177: </a>                tau = nlsP-&gt;gamma4_i;
+<a name="line178">178: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_1 &gt;= 1.0 &amp;&amp; tau_1 &lt;= nlsP-&gt;gamma4_i &amp;&amp; tau_2 &lt; 1.0) {
+<a name="line179">179: </a>                tau = tau_1;
+<a name="line180">180: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_2 &gt;= 1.0 &amp;&amp; tau_2 &lt;= nlsP-&gt;gamma4_i &amp;&amp; tau_1 &lt; 1.0) {
+<a name="line181">181: </a>                tau = tau_2;
+<a name="line182">182: </a>              } <font color="#4169E1">else</font> {
+<a name="line183">183: </a>                tau = tau_max;
+<a name="line184">184: </a>              }
+<a name="line185">185: </a>            } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (PetscAbsScalar(kappa - (<a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>)1.0) &lt;= nlsP-&gt;mu2_i) {
+<a name="line186">186: </a>              <font color="#B22222">/* Good agreement */</font>
+<a name="line187">187: </a>              max_radius = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(max_radius, tao-&gt;trust);
+
+<a name="line189">189: </a>              <font color="#4169E1">if</font> (tau_max &lt; nlsP-&gt;gamma2_i) {
+<a name="line190">190: </a>                tau = nlsP-&gt;gamma2_i;
+<a name="line191">191: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &gt; nlsP-&gt;gamma3_i) {
+<a name="line192">192: </a>                tau = nlsP-&gt;gamma3_i;
+<a name="line193">193: </a>              } <font color="#4169E1">else</font> {
+<a name="line194">194: </a>                tau = tau_max;
+<a name="line195">195: </a>              }
+<a name="line196">196: </a>            } <font color="#4169E1">else</font> {
+<a name="line197">197: </a>              <font color="#B22222">/* Not good agreement */</font>
+<a name="line198">198: </a>              <font color="#4169E1">if</font> (tau_min &gt; 1.0) {
+<a name="line199">199: </a>                tau = nlsP-&gt;gamma2_i;
+<a name="line200">200: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &lt; nlsP-&gt;gamma1_i) {
+<a name="line201">201: </a>                tau = nlsP-&gt;gamma1_i;
+<a name="line202">202: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((tau_min &lt; nlsP-&gt;gamma1_i) &amp;&amp; (tau_max &gt;= 1.0)) {
+<a name="line203">203: </a>                tau = nlsP-&gt;gamma1_i;
+<a name="line204">204: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((tau_1 &gt;= nlsP-&gt;gamma1_i) &amp;&amp; (tau_1 &lt; 1.0) &amp;&amp; ((tau_2 &lt; nlsP-&gt;gamma1_i) || (tau_2 &gt;= 1.0))) {
+<a name="line205">205: </a>                tau = tau_1;
+<a name="line206">206: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((tau_2 &gt;= nlsP-&gt;gamma1_i) &amp;&amp; (tau_2 &lt; 1.0) &amp;&amp; ((tau_1 &lt; nlsP-&gt;gamma1_i) || (tau_2 &gt;= 1.0))) {
+<a name="line207">207: </a>                tau = tau_2;
+<a name="line208">208: </a>              } <font color="#4169E1">else</font> {
+<a name="line209">209: </a>                tau = tau_max;
+<a name="line210">210: </a>              }
+<a name="line211">211: </a>            }
+<a name="line212">212: </a>          }
+<a name="line213">213: </a>          tao-&gt;trust = tau * tao-&gt;trust;
+<a name="line214">214: </a>        }
+
+<a name="line216">216: </a>        <font color="#4169E1">if</font> (fmin &lt; f) {
+<a name="line217">217: </a>          f = fmin;
+<a name="line218">218: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(tao-&gt;solution, sigma, tao-&gt;gradient));
+<a name="line219">219: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeGradient.html">TaoComputeGradient</a>(tao, tao-&gt;solution, tao-&gt;gradient));
+
+<a name="line221">221: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoGradientNorm.html">TaoGradientNorm</a>(tao, tao-&gt;gradient, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;gnorm));
+<a name="line222">222: </a>          <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!PetscIsInfOrNanReal(gnorm), <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>, <font color="#666666">"User provided compute gradient generated Inf or NaN"</font>);
+<a name="line223">223: </a>          needH = 1;
+
+<a name="line225">225: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TaoLogConvergenceHistory(tao, f, gnorm, 0.0, tao-&gt;ksp_its));
+<a name="line226">226: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoMonitor.html">TaoMonitor</a>(tao, tao-&gt;niter, f, gnorm, 0.0, step));
+<a name="line227">227: </a>          <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(tao, convergencetest, tao-&gt;cnvP);
+<a name="line228">228: </a>          <font color="#4169E1">if</font> (tao-&gt;reason != <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_CONTINUE_ITERATING</a>) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line229">229: </a>        }
+<a name="line230">230: </a>      }
+<a name="line231">231: </a>      tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, max_radius);
+
+<a name="line233">233: </a>      <font color="#B22222">/* Modify the radius if it is too large or small */</font>
+<a name="line234">234: </a>      tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;min_radius);
+<a name="line235">235: </a>      tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, nlsP-&gt;max_radius);
+<a name="line236">236: </a>      <font color="#4169E1">break</font>;
+
+<a name="line238">238: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line239">239: </a>      <font color="#B22222">/* Norm of the first direction will initialize radius */</font>
+<a name="line240">240: </a>      tao-&gt;trust = 0.0;
+<a name="line241">241: </a>      <font color="#4169E1">break</font>;
+<a name="line242">242: </a>    }
+<a name="line243">243: </a>  }
+
+<a name="line245">245: </a>  <font color="#B22222">/* Set counter for gradient/reset steps*/</font>
+<a name="line246">246: </a>  nlsP-&gt;newt = 0;
+<a name="line247">247: </a>  nlsP-&gt;bfgs = 0;
+<a name="line248">248: </a>  nlsP-&gt;grad = 0;
+
+<a name="line250">250: </a>  <font color="#B22222">/* Have not converged; continue with Newton method */</font>
+<a name="line251">251: </a>  <font color="#4169E1">while</font> (tao-&gt;reason == <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_CONTINUE_ITERATING</a>) {
+<a name="line252">252: </a>    <font color="#B22222">/* Call general purpose update function */</font>
+<a name="line253">253: </a>    <a href="../../../../../manualpages/Sys/PetscTryTypeMethod.html">PetscTryTypeMethod</a>(tao, update, tao-&gt;niter, tao-&gt;user_update);
+<a name="line254">254: </a>    ++tao-&gt;niter;
+<a name="line255">255: </a>    tao-&gt;ksp_its = 0;
+
+<a name="line257">257: </a>    <font color="#B22222">/* Compute the Hessian */</font>
+<a name="line258">258: </a>    <font color="#4169E1">if</font> (needH) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeHessian.html">TaoComputeHessian</a>(tao, tao-&gt;solution, tao-&gt;hessian, tao-&gt;hessian_pre));
+
+<a name="line260">260: </a>    <font color="#B22222">/* Shift the Hessian matrix */</font>
+<a name="line261">261: </a>    <font color="#4169E1">if</font> (pert &gt; 0) {
+<a name="line262">262: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShift.html">MatShift</a>(tao-&gt;hessian, pert));
+<a name="line263">263: </a>      <font color="#4169E1">if</font> (tao-&gt;hessian != tao-&gt;hessian_pre) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShift.html">MatShift</a>(tao-&gt;hessian_pre, pert));
+<a name="line264">264: </a>    }
+
+<a name="line266">266: </a>    <font color="#4169E1">if</font> (nlsP-&gt;bfgs_pre) {
+<a name="line267">267: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMUpdate.html">MatLMVMUpdate</a>(nlsP-&gt;M, tao-&gt;solution, tao-&gt;gradient));
+<a name="line268">268: </a>      ++bfgsUpdates;
+<a name="line269">269: </a>    }
+
+<a name="line271">271: </a>    <font color="#B22222">/* Solve the Newton system of equations */</font>
+<a name="line272">272: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetOperators.html">KSPSetOperators</a>(tao-&gt;ksp, tao-&gt;hessian, tao-&gt;hessian_pre));
+<a name="line273">273: </a>    <font color="#4169E1">if</font> (is_nash || is_stcg || is_gltr) {
+<a name="line274">274: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGSetRadius.html">KSPCGSetRadius</a>(tao-&gt;ksp, nlsP-&gt;max_radius));
+<a name="line275">275: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(tao-&gt;ksp, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line276">276: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetIterationNumber.html">KSPGetIterationNumber</a>(tao-&gt;ksp, &amp;kspits));
+<a name="line277">277: </a>      tao-&gt;ksp_its += kspits;
+<a name="line278">278: </a>      tao-&gt;ksp_tot_its += kspits;
+<a name="line279">279: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGGetNormD.html">KSPCGGetNormD</a>(tao-&gt;ksp, &amp;norm_d));
+
+<a name="line281">281: </a>      <font color="#4169E1">if</font> (0.0 == tao-&gt;trust) {
+<a name="line282">282: </a>        <font color="#B22222">/* Radius was uninitialized; use the norm of the direction */</font>
+<a name="line283">283: </a>        <font color="#4169E1">if</font> (norm_d &gt; 0.0) {
+<a name="line284">284: </a>          tao-&gt;trust = norm_d;
+
+<a name="line286">286: </a>          <font color="#B22222">/* Modify the radius if it is too large or small */</font>
+<a name="line287">287: </a>          tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;min_radius);
+<a name="line288">288: </a>          tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, nlsP-&gt;max_radius);
+<a name="line289">289: </a>        } <font color="#4169E1">else</font> {
+<a name="line290">290: </a>          <font color="#B22222">/* The direction was bad; set radius to default value and re-solve</font>
+<a name="line291">291: </a><font color="#B22222">             the trust-region subproblem to get a direction */</font>
+<a name="line292">292: </a>          tao-&gt;trust = tao-&gt;trust0;
+
+<a name="line294">294: </a>          <font color="#B22222">/* Modify the radius if it is too large or small */</font>
+<a name="line295">295: </a>          tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;min_radius);
+<a name="line296">296: </a>          tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, nlsP-&gt;max_radius);
+
+<a name="line298">298: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGSetRadius.html">KSPCGSetRadius</a>(tao-&gt;ksp, nlsP-&gt;max_radius));
+<a name="line299">299: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(tao-&gt;ksp, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line300">300: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetIterationNumber.html">KSPGetIterationNumber</a>(tao-&gt;ksp, &amp;kspits));
+<a name="line301">301: </a>          tao-&gt;ksp_its += kspits;
+<a name="line302">302: </a>          tao-&gt;ksp_tot_its += kspits;
+<a name="line303">303: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGGetNormD.html">KSPCGGetNormD</a>(tao-&gt;ksp, &amp;norm_d));
+
+<a name="line305">305: </a>          <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(norm_d != 0.0, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Initial direction zero"</font>);
+<a name="line306">306: </a>        }
+<a name="line307">307: </a>      }
+<a name="line308">308: </a>    } <font color="#4169E1">else</font> {
+<a name="line309">309: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(tao-&gt;ksp, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line310">310: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetIterationNumber.html">KSPGetIterationNumber</a>(tao-&gt;ksp, &amp;kspits));
+<a name="line311">311: </a>      tao-&gt;ksp_its += kspits;
+<a name="line312">312: </a>      tao-&gt;ksp_tot_its += kspits;
+<a name="line313">313: </a>    }
+<a name="line314">314: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(nlsP-&gt;D, -1.0));
+<a name="line315">315: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetConvergedReason.html">KSPGetConvergedReason</a>(tao-&gt;ksp, &amp;ksp_reason));
+<a name="line316">316: </a>    <font color="#4169E1">if</font> ((<a href="../../../../../manualpages/KSP/KSP_DIVERGED_INDEFINITE_PC.html">KSP_DIVERGED_INDEFINITE_PC</a> == ksp_reason) &amp;&amp; (nlsP-&gt;bfgs_pre)) {
+<a name="line317">317: </a>      <font color="#B22222">/* Preconditioner is numerically indefinite; reset the</font>
+<a name="line318">318: </a><font color="#B22222">         approximate if using BFGS preconditioning. */</font>
+<a name="line319">319: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMReset.html">MatLMVMReset</a>(nlsP-&gt;M, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line320">320: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMUpdate.html">MatLMVMUpdate</a>(nlsP-&gt;M, tao-&gt;solution, tao-&gt;gradient));
+<a name="line321">321: </a>      bfgsUpdates = 1;
+<a name="line322">322: </a>    }
+
+<a name="line324">324: </a>    <font color="#4169E1">if</font> (<a href="../../../../../manualpages/KSP/KSP_CONVERGED_ATOL.html">KSP_CONVERGED_ATOL</a> == ksp_reason) {
+<a name="line325">325: </a>      ++nlsP-&gt;ksp_atol;
+<a name="line326">326: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (<a href="../../../../../manualpages/KSP/KSP_CONVERGED_RTOL.html">KSP_CONVERGED_RTOL</a> == ksp_reason) {
+<a name="line327">327: </a>      ++nlsP-&gt;ksp_rtol;
+<a name="line328">328: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (<a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_CONVERGED_STEP_LENGTH</a> == ksp_reason) {
+<a name="line329">329: </a>      ++nlsP-&gt;ksp_ctol;
+<a name="line330">330: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (<a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_CONVERGED_NEG_CURVE</a> == ksp_reason) {
+<a name="line331">331: </a>      ++nlsP-&gt;ksp_negc;
+<a name="line332">332: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (<a href="../../../../../manualpages/KSP/KSP_DIVERGED_DTOL.html">KSP_DIVERGED_DTOL</a> == ksp_reason) {
+<a name="line333">333: </a>      ++nlsP-&gt;ksp_dtol;
+<a name="line334">334: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (<a href="../../../../../manualpages/KSP/KSP_DIVERGED_ITS.html">KSP_DIVERGED_ITS</a> == ksp_reason) {
+<a name="line335">335: </a>      ++nlsP-&gt;ksp_iter;
+<a name="line336">336: </a>    } <font color="#4169E1">else</font> {
+<a name="line337">337: </a>      ++nlsP-&gt;ksp_othr;
+<a name="line338">338: </a>    }
+
+<a name="line340">340: </a>    <font color="#B22222">/* Check for success (descent direction) */</font>
+<a name="line341">341: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDot.html">VecDot</a>(nlsP-&gt;D, tao-&gt;gradient, &amp;gdx));
+<a name="line342">342: </a>    <font color="#4169E1">if</font> ((gdx &gt;= 0.0) || PetscIsInfOrNanReal(gdx)) {
+<a name="line343">343: </a>      <font color="#B22222">/* Newton step is not descent or direction produced Inf or NaN</font>
+<a name="line344">344: </a><font color="#B22222">         Update the perturbation for next time */</font>
+<a name="line345">345: </a>      <font color="#4169E1">if</font> (pert &lt;= 0.0) {
+<a name="line346">346: </a>        <font color="#B22222">/* Initialize the perturbation */</font>
+<a name="line347">347: </a>        pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;imax, <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;imin, nlsP-&gt;imfac * gnorm));
+<a name="line348">348: </a>        <font color="#4169E1">if</font> (is_gltr) {
+<a name="line349">349: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGLTRGetMinEig.html">KSPGLTRGetMinEig</a>(tao-&gt;ksp, &amp;e_min));
+<a name="line350">350: </a>          pert = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(pert, -e_min);
+<a name="line351">351: </a>        }
+<a name="line352">352: </a>      } <font color="#4169E1">else</font> {
+<a name="line353">353: </a>        <font color="#B22222">/* Increase the perturbation */</font>
+<a name="line354">354: </a>        pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;pmax, <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;pgfac * pert, nlsP-&gt;pmgfac * gnorm));
+<a name="line355">355: </a>      }
+
+<a name="line357">357: </a>      <font color="#4169E1">if</font> (!nlsP-&gt;bfgs_pre) {
+<a name="line358">358: </a>        <font color="#B22222">/* We don't have the bfgs matrix around and updated</font>
+<a name="line359">359: </a><font color="#B22222">           Must use gradient direction in this case */</font>
+<a name="line360">360: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(tao-&gt;gradient, nlsP-&gt;D));
+<a name="line361">361: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(nlsP-&gt;D, -1.0));
+<a name="line362">362: </a>        ++nlsP-&gt;grad;
+<a name="line363">363: </a>        stepType = NLS_GRADIENT;
+<a name="line364">364: </a>      } <font color="#4169E1">else</font> {
+<a name="line365">365: </a>        <font color="#B22222">/* Attempt to use the BFGS direction */</font>
+<a name="line366">366: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSolve.html">MatSolve</a>(nlsP-&gt;M, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line367">367: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(nlsP-&gt;D, -1.0));
+
+<a name="line369">369: </a>        <font color="#B22222">/* Check for success (descent direction) */</font>
+<a name="line370">370: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDot.html">VecDot</a>(tao-&gt;gradient, nlsP-&gt;D, &amp;gdx));
+<a name="line371">371: </a>        <font color="#4169E1">if</font> ((gdx &gt;= 0) || PetscIsInfOrNanReal(gdx)) {
+<a name="line372">372: </a>          <font color="#B22222">/* BFGS direction is not descent or direction produced not a number</font>
+<a name="line373">373: </a><font color="#B22222">             We can assert bfgsUpdates &gt; 1 in this case because</font>
+<a name="line374">374: </a><font color="#B22222">             the first solve produces the scaled gradient direction,</font>
+<a name="line375">375: </a><font color="#B22222">             which is guaranteed to be descent */</font>
+
+<a name="line377">377: </a>          <font color="#B22222">/* Use steepest descent direction (scaled) */</font>
+<a name="line378">378: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMReset.html">MatLMVMReset</a>(nlsP-&gt;M, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line379">379: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMUpdate.html">MatLMVMUpdate</a>(nlsP-&gt;M, tao-&gt;solution, tao-&gt;gradient));
+<a name="line380">380: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSolve.html">MatSolve</a>(nlsP-&gt;M, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line381">381: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(nlsP-&gt;D, -1.0));
+
+<a name="line383">383: </a>          bfgsUpdates = 1;
+<a name="line384">384: </a>          ++nlsP-&gt;grad;
+<a name="line385">385: </a>          stepType = NLS_GRADIENT;
+<a name="line386">386: </a>        } <font color="#4169E1">else</font> {
+<a name="line387">387: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMGetUpdateCount.html">MatLMVMGetUpdateCount</a>(nlsP-&gt;M, &amp;bfgsUpdates));
+<a name="line388">388: </a>          <font color="#4169E1">if</font> (1 == bfgsUpdates) {
+<a name="line389">389: </a>            <font color="#B22222">/* The first BFGS direction is always the scaled gradient */</font>
+<a name="line390">390: </a>            ++nlsP-&gt;grad;
+<a name="line391">391: </a>            stepType = NLS_GRADIENT;
+<a name="line392">392: </a>          } <font color="#4169E1">else</font> {
+<a name="line393">393: </a>            ++nlsP-&gt;bfgs;
+<a name="line394">394: </a>            stepType = NLS_BFGS;
+<a name="line395">395: </a>          }
+<a name="line396">396: </a>        }
+<a name="line397">397: </a>      }
+<a name="line398">398: </a>    } <font color="#4169E1">else</font> {
+<a name="line399">399: </a>      <font color="#B22222">/* Computed Newton step is descent */</font>
+<a name="line400">400: </a>      <font color="#4169E1">switch</font> (ksp_reason) {
+<a name="line401">401: </a>      <font color="#4169E1">case</font> <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_DIVERGED_NANORINF</a>:
+<a name="line402">402: </a>      <font color="#4169E1">case</font> <a href="../../../../../manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html">KSP_DIVERGED_BREAKDOWN</a>:
+<a name="line403">403: </a>      <font color="#4169E1">case</font> <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_DIVERGED_INDEFINITE_MAT</a>:
+<a name="line404">404: </a>      <font color="#4169E1">case</font> <a href="../../../../../manualpages/KSP/KSP_DIVERGED_INDEFINITE_PC.html">KSP_DIVERGED_INDEFINITE_PC</a>:
+<a name="line405">405: </a>      <font color="#4169E1">case</font> <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_CONVERGED_NEG_CURVE</a>:
+<a name="line406">406: </a>        <font color="#B22222">/* Matrix or preconditioner is indefinite; increase perturbation */</font>
+<a name="line407">407: </a>        <font color="#4169E1">if</font> (pert &lt;= 0.0) {
+<a name="line408">408: </a>          <font color="#B22222">/* Initialize the perturbation */</font>
+<a name="line409">409: </a>          pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;imax, <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;imin, nlsP-&gt;imfac * gnorm));
+<a name="line410">410: </a>          <font color="#4169E1">if</font> (is_gltr) {
+<a name="line411">411: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGLTRGetMinEig.html">KSPGLTRGetMinEig</a>(tao-&gt;ksp, &amp;e_min));
+<a name="line412">412: </a>            pert = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(pert, -e_min);
+<a name="line413">413: </a>          }
+<a name="line414">414: </a>        } <font color="#4169E1">else</font> {
+<a name="line415">415: </a>          <font color="#B22222">/* Increase the perturbation */</font>
+<a name="line416">416: </a>          pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;pmax, <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;pgfac * pert, nlsP-&gt;pmgfac * gnorm));
+<a name="line417">417: </a>        }
+<a name="line418">418: </a>        <font color="#4169E1">break</font>;
+
+<a name="line420">420: </a><strong><font color="#FF0000">      default:</font></strong>
+<a name="line421">421: </a>        <font color="#B22222">/* Newton step computation is good; decrease perturbation */</font>
+<a name="line422">422: </a>        pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;psfac * pert, nlsP-&gt;pmsfac * gnorm);
+<a name="line423">423: </a>        <font color="#4169E1">if</font> (pert &lt; nlsP-&gt;pmin) pert = 0.0;
+<a name="line424">424: </a>        <font color="#4169E1">break</font>;
+<a name="line425">425: </a>      }
+
+<a name="line427">427: </a>      ++nlsP-&gt;newt;
+<a name="line428">428: </a>      stepType = NLS_NEWTON;
+<a name="line429">429: </a>    }
+
+<a name="line431">431: </a>    <font color="#B22222">/* Perform the linesearch */</font>
+<a name="line432">432: </a>    fold = f;
+<a name="line433">433: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(tao-&gt;solution, nlsP-&gt;Xold));
+<a name="line434">434: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(tao-&gt;gradient, nlsP-&gt;Gold));
+
+<a name="line436">436: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchApply.html">TaoLineSearchApply</a>(tao-&gt;linesearch, tao-&gt;solution, &amp;f, tao-&gt;gradient, nlsP-&gt;D, &amp;step, &amp;ls_reason));
+<a name="line437">437: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoAddLineSearchCounts.html">TaoAddLineSearchCounts</a>(tao));
+
+<a name="line439">439: </a>    <font color="#4169E1">while</font> (ls_reason != <a href="../../../../../manualpages/Tao/TaoLineSearchConvergedReason.html">TAOLINESEARCH_SUCCESS</a> &amp;&amp; ls_reason != <a href="../../../../../manualpages/Tao/TaoLineSearchConvergedReason.html">TAOLINESEARCH_SUCCESS_USER</a> &amp;&amp; stepType != NLS_GRADIENT) { <font color="#B22222">/* Linesearch failed */</font>
+<a name="line440">440: </a>      f = fold;
+<a name="line441">441: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(nlsP-&gt;Xold, tao-&gt;solution));
+<a name="line442">442: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(nlsP-&gt;Gold, tao-&gt;gradient));
+
+<a name="line444">444: </a>      <font color="#4169E1">switch</font> (stepType) {
+<a name="line445">445: </a>      <font color="#4169E1">case</font> NLS_NEWTON:
+<a name="line446">446: </a>        <font color="#B22222">/* Failed to obtain acceptable iterate with Newton 1step</font>
+<a name="line447">447: </a><font color="#B22222">           Update the perturbation for next time */</font>
+<a name="line448">448: </a>        <font color="#4169E1">if</font> (pert &lt;= 0.0) {
+<a name="line449">449: </a>          <font color="#B22222">/* Initialize the perturbation */</font>
+<a name="line450">450: </a>          pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;imax, <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;imin, nlsP-&gt;imfac * gnorm));
+<a name="line451">451: </a>          <font color="#4169E1">if</font> (is_gltr) {
+<a name="line452">452: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGLTRGetMinEig.html">KSPGLTRGetMinEig</a>(tao-&gt;ksp, &amp;e_min));
+<a name="line453">453: </a>            pert = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(pert, -e_min);
+<a name="line454">454: </a>          }
+<a name="line455">455: </a>        } <font color="#4169E1">else</font> {
+<a name="line456">456: </a>          <font color="#B22222">/* Increase the perturbation */</font>
+<a name="line457">457: </a>          pert = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nlsP-&gt;pmax, <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;pgfac * pert, nlsP-&gt;pmgfac * gnorm));
+<a name="line458">458: </a>        }
+
+<a name="line460">460: </a>        <font color="#4169E1">if</font> (!nlsP-&gt;bfgs_pre) {
+<a name="line461">461: </a>          <font color="#B22222">/* We don't have the bfgs matrix around and being updated</font>
+<a name="line462">462: </a><font color="#B22222">             Must use gradient direction in this case */</font>
+<a name="line463">463: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(tao-&gt;gradient, nlsP-&gt;D));
+<a name="line464">464: </a>          ++nlsP-&gt;grad;
+<a name="line465">465: </a>          stepType = NLS_GRADIENT;
+<a name="line466">466: </a>        } <font color="#4169E1">else</font> {
+<a name="line467">467: </a>          <font color="#B22222">/* Attempt to use the BFGS direction */</font>
+<a name="line468">468: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSolve.html">MatSolve</a>(nlsP-&gt;M, tao-&gt;gradient, nlsP-&gt;D));
+<a name="line469">469: </a>          <font color="#B22222">/* Check for success (descent direction) */</font>
+<a name="line470">470: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDot.html">VecDot</a>(tao-&gt;solution, nlsP-&gt;D, &amp;gdx));
+<a name="line471">471: </a>          <font color="#4169E1">if</font> ((gdx &lt;= 0) || PetscIsInfOrNanReal(gdx)) {
+<a name="line472">472: </a>            <font color="#B22222">/* BFGS direction is not descent or direction produced not a number</font>
+<a name="line473">473: </a><font color="#B22222">               We can assert bfgsUpdates &gt; 1 in this case</font>
+<a name="line474">474: </a><font color="#B22222">               Use steepest descent direction (scaled) */</font>
+<a name="line475">475: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMReset.html">MatLMVMReset</a>(nlsP-&gt;M, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line476">476: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMUpdate.html">MatLMVMUpdate</a>(nlsP-&gt;M, tao-&gt;solution, tao-&gt;gradient));
+<a name="line477">477: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSolve.html">MatSolve</a>(nlsP-&gt;M, tao-&gt;gradient, nlsP-&gt;D));
+
+<a name="line479">479: </a>            bfgsUpdates = 1;
+<a name="line480">480: </a>            ++nlsP-&gt;grad;
+<a name="line481">481: </a>            stepType = NLS_GRADIENT;
+<a name="line482">482: </a>          } <font color="#4169E1">else</font> {
+<a name="line483">483: </a>            <font color="#4169E1">if</font> (1 == bfgsUpdates) {
+<a name="line484">484: </a>              <font color="#B22222">/* The first BFGS direction is always the scaled gradient */</font>
+<a name="line485">485: </a>              ++nlsP-&gt;grad;
+<a name="line486">486: </a>              stepType = NLS_GRADIENT;
+<a name="line487">487: </a>            } <font color="#4169E1">else</font> {
+<a name="line488">488: </a>              ++nlsP-&gt;bfgs;
+<a name="line489">489: </a>              stepType = NLS_BFGS;
+<a name="line490">490: </a>            }
+<a name="line491">491: </a>          }
+<a name="line492">492: </a>        }
+<a name="line493">493: </a>        <font color="#4169E1">break</font>;
+
+<a name="line495">495: </a>      <font color="#4169E1">case</font> NLS_BFGS:
+<a name="line496">496: </a>        <font color="#B22222">/* Can only enter if pc_type == NLS_PC_BFGS</font>
+<a name="line497">497: </a><font color="#B22222">           Failed to obtain acceptable iterate with BFGS step</font>
+<a name="line498">498: </a><font color="#B22222">           Attempt to use the scaled gradient direction */</font>
+<a name="line499">499: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMReset.html">MatLMVMReset</a>(nlsP-&gt;M, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line500">500: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/MatLMVMUpdate.html">MatLMVMUpdate</a>(nlsP-&gt;M, tao-&gt;solution, tao-&gt;gradient));
+<a name="line501">501: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSolve.html">MatSolve</a>(nlsP-&gt;M, tao-&gt;gradient, nlsP-&gt;D));
+
+<a name="line503">503: </a>        bfgsUpdates = 1;
+<a name="line504">504: </a>        ++nlsP-&gt;grad;
+<a name="line505">505: </a>        stepType = NLS_GRADIENT;
+<a name="line506">506: </a>        <font color="#4169E1">break</font>;
+<a name="line507">507: </a>      }
+<a name="line508">508: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(nlsP-&gt;D, -1.0));
+
+<a name="line510">510: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchApply.html">TaoLineSearchApply</a>(tao-&gt;linesearch, tao-&gt;solution, &amp;f, tao-&gt;gradient, nlsP-&gt;D, &amp;step, &amp;ls_reason));
+<a name="line511">511: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchGetFullStepObjective.html">TaoLineSearchGetFullStepObjective</a>(tao-&gt;linesearch, &amp;f_full));
+<a name="line512">512: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoAddLineSearchCounts.html">TaoAddLineSearchCounts</a>(tao));
+<a name="line513">513: </a>    }
+
+<a name="line515">515: </a>    <font color="#4169E1">if</font> (ls_reason != <a href="../../../../../manualpages/Tao/TaoLineSearchConvergedReason.html">TAOLINESEARCH_SUCCESS</a> &amp;&amp; ls_reason != <a href="../../../../../manualpages/Tao/TaoLineSearchConvergedReason.html">TAOLINESEARCH_SUCCESS_USER</a>) {
+<a name="line516">516: </a>      <font color="#B22222">/* Failed to find an improving point */</font>
+<a name="line517">517: </a>      f = fold;
+<a name="line518">518: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(nlsP-&gt;Xold, tao-&gt;solution));
+<a name="line519">519: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(nlsP-&gt;Gold, tao-&gt;gradient));
+<a name="line520">520: </a>      step        = 0.0;
+<a name="line521">521: </a>      tao-&gt;reason = <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_DIVERGED_LS_FAILURE</a>;
+<a name="line522">522: </a>      <font color="#4169E1">break</font>;
+<a name="line523">523: </a>    }
+
+<a name="line525">525: </a>    <font color="#B22222">/* Update trust region radius */</font>
+<a name="line526">526: </a>    <font color="#4169E1">if</font> (is_nash || is_stcg || is_gltr) {
+<a name="line527">527: </a>      <font color="#4169E1">switch</font> (nlsP-&gt;update_type) {
+<a name="line528">528: </a>      <font color="#4169E1">case</font> NLS_UPDATE_STEP:
+<a name="line529">529: </a>        <font color="#4169E1">if</font> (stepType == NLS_NEWTON) {
+<a name="line530">530: </a>          <font color="#4169E1">if</font> (step &lt; nlsP-&gt;nu1) {
+<a name="line531">531: </a>            <font color="#B22222">/* Very bad step taken; reduce radius */</font>
+<a name="line532">532: </a>            tao-&gt;trust = nlsP-&gt;omega1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line533">533: </a>          } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (step &lt; nlsP-&gt;nu2) {
+<a name="line534">534: </a>            <font color="#B22222">/* Reasonably bad step taken; reduce radius */</font>
+<a name="line535">535: </a>            tao-&gt;trust = nlsP-&gt;omega2 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line536">536: </a>          } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (step &lt; nlsP-&gt;nu3) {
+<a name="line537">537: </a>            <font color="#B22222">/*  Reasonable step was taken; leave radius alone */</font>
+<a name="line538">538: </a>            <font color="#4169E1">if</font> (nlsP-&gt;omega3 &lt; 1.0) {
+<a name="line539">539: </a>              tao-&gt;trust = nlsP-&gt;omega3 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line540">540: </a>            } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nlsP-&gt;omega3 &gt; 1.0) {
+<a name="line541">541: </a>              tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;omega3 * norm_d, tao-&gt;trust);
+<a name="line542">542: </a>            }
+<a name="line543">543: </a>          } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (step &lt; nlsP-&gt;nu4) {
+<a name="line544">544: </a>            <font color="#B22222">/*  Full step taken; increase the radius */</font>
+<a name="line545">545: </a>            tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;omega4 * norm_d, tao-&gt;trust);
+<a name="line546">546: </a>          } <font color="#4169E1">else</font> {
+<a name="line547">547: </a>            <font color="#B22222">/*  More than full step taken; increase the radius */</font>
+<a name="line548">548: </a>            tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;omega5 * norm_d, tao-&gt;trust);
+<a name="line549">549: </a>          }
+<a name="line550">550: </a>        } <font color="#4169E1">else</font> {
+<a name="line551">551: </a>          <font color="#B22222">/*  Newton step was not good; reduce the radius */</font>
+<a name="line552">552: </a>          tao-&gt;trust = nlsP-&gt;omega1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line553">553: </a>        }
+<a name="line554">554: </a>        <font color="#4169E1">break</font>;
+
+<a name="line556">556: </a>      <font color="#4169E1">case</font> NLS_UPDATE_REDUCTION:
+<a name="line557">557: </a>        <font color="#4169E1">if</font> (stepType == NLS_NEWTON) {
+<a name="line558">558: </a>          <font color="#B22222">/*  Get predicted reduction */</font>
+
+<a name="line560">560: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGGetObjFcn.html">KSPCGGetObjFcn</a>(tao-&gt;ksp, &amp;prered));
+<a name="line561">561: </a>          <font color="#4169E1">if</font> (prered &gt;= 0.0) {
+<a name="line562">562: </a>            <font color="#B22222">/*  The predicted reduction has the wrong sign.  This cannot */</font>
+<a name="line563">563: </a>            <font color="#B22222">/*  happen in infinite precision arithmetic.  Step should */</font>
+<a name="line564">564: </a>            <font color="#B22222">/*  be rejected! */</font>
+<a name="line565">565: </a>            tao-&gt;trust = nlsP-&gt;alpha1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line566">566: </a>          } <font color="#4169E1">else</font> {
+<a name="line567">567: </a>            <font color="#4169E1">if</font> (PetscIsInfOrNanReal(f_full)) {
+<a name="line568">568: </a>              tao-&gt;trust = nlsP-&gt;alpha1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line569">569: </a>            } <font color="#4169E1">else</font> {
+<a name="line570">570: </a>              <font color="#B22222">/*  Compute and actual reduction */</font>
+<a name="line571">571: </a>              actred = fold - f_full;
+<a name="line572">572: </a>              prered = -prered;
+<a name="line573">573: </a>              <font color="#4169E1">if</font> ((PetscAbsScalar(actred) &lt;= nlsP-&gt;epsilon) &amp;&amp; (PetscAbsScalar(prered) &lt;= nlsP-&gt;epsilon)) {
+<a name="line574">574: </a>                kappa = 1.0;
+<a name="line575">575: </a>              } <font color="#4169E1">else</font> {
+<a name="line576">576: </a>                kappa = actred / prered;
+<a name="line577">577: </a>              }
+
+<a name="line579">579: </a>              <font color="#B22222">/*  Accept of reject the step and update radius */</font>
+<a name="line580">580: </a>              <font color="#4169E1">if</font> (kappa &lt; nlsP-&gt;eta1) {
+<a name="line581">581: </a>                <font color="#B22222">/*  Very bad step */</font>
+<a name="line582">582: </a>                tao-&gt;trust = nlsP-&gt;alpha1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line583">583: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (kappa &lt; nlsP-&gt;eta2) {
+<a name="line584">584: </a>                <font color="#B22222">/*  Marginal bad step */</font>
+<a name="line585">585: </a>                tao-&gt;trust = nlsP-&gt;alpha2 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line586">586: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (kappa &lt; nlsP-&gt;eta3) {
+<a name="line587">587: </a>                <font color="#B22222">/*  Reasonable step */</font>
+<a name="line588">588: </a>                <font color="#4169E1">if</font> (nlsP-&gt;alpha3 &lt; 1.0) {
+<a name="line589">589: </a>                  tao-&gt;trust = nlsP-&gt;alpha3 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line590">590: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nlsP-&gt;alpha3 &gt; 1.0) {
+<a name="line591">591: </a>                  tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;alpha3 * norm_d, tao-&gt;trust);
+<a name="line592">592: </a>                }
+<a name="line593">593: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (kappa &lt; nlsP-&gt;eta4) {
+<a name="line594">594: </a>                <font color="#B22222">/*  Good step */</font>
+<a name="line595">595: </a>                tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;alpha4 * norm_d, tao-&gt;trust);
+<a name="line596">596: </a>              } <font color="#4169E1">else</font> {
+<a name="line597">597: </a>                <font color="#B22222">/*  Very good step */</font>
+<a name="line598">598: </a>                tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(nlsP-&gt;alpha5 * norm_d, tao-&gt;trust);
+<a name="line599">599: </a>              }
+<a name="line600">600: </a>            }
+<a name="line601">601: </a>          }
+<a name="line602">602: </a>        } <font color="#4169E1">else</font> {
+<a name="line603">603: </a>          <font color="#B22222">/*  Newton step was not good; reduce the radius */</font>
+<a name="line604">604: </a>          tao-&gt;trust = nlsP-&gt;alpha1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line605">605: </a>        }
+<a name="line606">606: </a>        <font color="#4169E1">break</font>;
+
+<a name="line608">608: </a><strong><font color="#FF0000">      default:</font></strong>
+<a name="line609">609: </a>        <font color="#4169E1">if</font> (stepType == NLS_NEWTON) {
+<a name="line610">610: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCGGetObjFcn.html">KSPCGGetObjFcn</a>(tao-&gt;ksp, &amp;prered));
+<a name="line611">611: </a>          <font color="#4169E1">if</font> (prered &gt;= 0.0) {
+<a name="line612">612: </a>            <font color="#B22222">/*  The predicted reduction has the wrong sign.  This cannot */</font>
+<a name="line613">613: </a>            <font color="#B22222">/*  happen in infinite precision arithmetic.  Step should */</font>
+<a name="line614">614: </a>            <font color="#B22222">/*  be rejected! */</font>
+<a name="line615">615: </a>            tao-&gt;trust = nlsP-&gt;gamma1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line616">616: </a>          } <font color="#4169E1">else</font> {
+<a name="line617">617: </a>            <font color="#4169E1">if</font> (PetscIsInfOrNanReal(f_full)) {
+<a name="line618">618: </a>              tao-&gt;trust = nlsP-&gt;gamma1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line619">619: </a>            } <font color="#4169E1">else</font> {
+<a name="line620">620: </a>              actred = fold - f_full;
+<a name="line621">621: </a>              prered = -prered;
+<a name="line622">622: </a>              <font color="#4169E1">if</font> ((PetscAbsScalar(actred) &lt;= nlsP-&gt;epsilon) &amp;&amp; (PetscAbsScalar(prered) &lt;= nlsP-&gt;epsilon)) {
+<a name="line623">623: </a>                kappa = 1.0;
+<a name="line624">624: </a>              } <font color="#4169E1">else</font> {
+<a name="line625">625: </a>                kappa = actred / prered;
+<a name="line626">626: </a>              }
+
+<a name="line628">628: </a>              tau_1   = nlsP-&gt;theta * gdx / (nlsP-&gt;theta * gdx - (1.0 - nlsP-&gt;theta) * prered + actred);
+<a name="line629">629: </a>              tau_2   = nlsP-&gt;theta * gdx / (nlsP-&gt;theta * gdx + (1.0 + nlsP-&gt;theta) * prered - actred);
+<a name="line630">630: </a>              tau_min = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tau_1, tau_2);
+<a name="line631">631: </a>              tau_max = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tau_1, tau_2);
+
+<a name="line633">633: </a>              <font color="#4169E1">if</font> (kappa &gt;= 1.0 - nlsP-&gt;mu1) {
+<a name="line634">634: </a>                <font color="#B22222">/*  Great agreement */</font>
+<a name="line635">635: </a>                <font color="#4169E1">if</font> (tau_max &lt; 1.0) {
+<a name="line636">636: </a>                  tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;gamma3 * norm_d);
+<a name="line637">637: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &gt; nlsP-&gt;gamma4) {
+<a name="line638">638: </a>                  tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;gamma4 * norm_d);
+<a name="line639">639: </a>                } <font color="#4169E1">else</font> {
+<a name="line640">640: </a>                  tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, tau_max * norm_d);
+<a name="line641">641: </a>                }
+<a name="line642">642: </a>              } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (kappa &gt;= 1.0 - nlsP-&gt;mu2) {
+<a name="line643">643: </a>                <font color="#B22222">/*  Good agreement */</font>
+
+<a name="line645">645: </a>                <font color="#4169E1">if</font> (tau_max &lt; nlsP-&gt;gamma2) {
+<a name="line646">646: </a>                  tao-&gt;trust = nlsP-&gt;gamma2 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line647">647: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &gt; nlsP-&gt;gamma3) {
+<a name="line648">648: </a>                  tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, nlsP-&gt;gamma3 * norm_d);
+<a name="line649">649: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &lt; 1.0) {
+<a name="line650">650: </a>                  tao-&gt;trust = tau_max * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line651">651: </a>                } <font color="#4169E1">else</font> {
+<a name="line652">652: </a>                  tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(tao-&gt;trust, tau_max * norm_d);
+<a name="line653">653: </a>                }
+<a name="line654">654: </a>              } <font color="#4169E1">else</font> {
+<a name="line655">655: </a>                <font color="#B22222">/*  Not good agreement */</font>
+<a name="line656">656: </a>                <font color="#4169E1">if</font> (tau_min &gt; 1.0) {
+<a name="line657">657: </a>                  tao-&gt;trust = nlsP-&gt;gamma2 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line658">658: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tau_max &lt; nlsP-&gt;gamma1) {
+<a name="line659">659: </a>                  tao-&gt;trust = nlsP-&gt;gamma1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line660">660: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((tau_min &lt; nlsP-&gt;gamma1) &amp;&amp; (tau_max &gt;= 1.0)) {
+<a name="line661">661: </a>                  tao-&gt;trust = nlsP-&gt;gamma1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line662">662: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((tau_1 &gt;= nlsP-&gt;gamma1) &amp;&amp; (tau_1 &lt; 1.0) &amp;&amp; ((tau_2 &lt; nlsP-&gt;gamma1) || (tau_2 &gt;= 1.0))) {
+<a name="line663">663: </a>                  tao-&gt;trust = tau_1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line664">664: </a>                } <font color="#4169E1">else</font> <font color="#4169E1">if</font> ((tau_2 &gt;= nlsP-&gt;gamma1) &amp;&amp; (tau_2 &lt; 1.0) &amp;&amp; ((tau_1 &lt; nlsP-&gt;gamma1) || (tau_2 &gt;= 1.0))) {
+<a name="line665">665: </a>                  tao-&gt;trust = tau_2 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line666">666: </a>                } <font color="#4169E1">else</font> {
+<a name="line667">667: </a>                  tao-&gt;trust = tau_max * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, norm_d);
+<a name="line668">668: </a>                }
+<a name="line669">669: </a>              }
+<a name="line670">670: </a>            }
+<a name="line671">671: </a>          }
+<a name="line672">672: </a>        } <font color="#4169E1">else</font> {
+<a name="line673">673: </a>          <font color="#B22222">/*  Newton step was not good; reduce the radius */</font>
+<a name="line674">674: </a>          tao-&gt;trust = nlsP-&gt;gamma1 * <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(norm_d, tao-&gt;trust);
+<a name="line675">675: </a>        }
+<a name="line676">676: </a>        <font color="#4169E1">break</font>;
+<a name="line677">677: </a>      }
+
+<a name="line679">679: </a>      <font color="#B22222">/*  The radius may have been increased; modify if it is too large */</font>
+<a name="line680">680: </a>      tao-&gt;trust = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(tao-&gt;trust, nlsP-&gt;max_radius);
+<a name="line681">681: </a>    }
+
+<a name="line683">683: </a>    <font color="#B22222">/*  Check for termination */</font>
+<a name="line684">684: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoGradientNorm.html">TaoGradientNorm</a>(tao, tao-&gt;gradient, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;gnorm));
+<a name="line685">685: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!PetscIsInfOrNanReal(f) &amp;&amp; !PetscIsInfOrNanReal(gnorm), <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>, <font color="#666666">"User provided compute function generated Not-a-Number"</font>);
+<a name="line686">686: </a>    needH = 1;
+<a name="line687">687: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TaoLogConvergenceHistory(tao, f, gnorm, 0.0, tao-&gt;ksp_its));
+<a name="line688">688: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoMonitor.html">TaoMonitor</a>(tao, tao-&gt;niter, f, gnorm, 0.0, step));
+<a name="line689">689: </a>    <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(tao, convergencetest, tao-&gt;cnvP);
+<a name="line690">690: </a>  }
+<a name="line691">691: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line692">692: </a>}
+
+<a name="line694">694: </a><font color="#B22222">/* ---------------------------------------------------------- */</font>
+<a name="line695">695: </a><strong><font color="#4169E1"><a name="TaoSetUp_NLS"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoSetUp_NLS(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line696">696: </a>{
+<a name="line697">697: </a>  TAO_NLS *nlsP = (TAO_NLS *)tao-&gt;data;
+
+<a name="line699">699: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line700">700: </a>  <font color="#4169E1">if</font> (!tao-&gt;gradient) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;tao-&gt;gradient));
+<a name="line701">701: </a>  <font color="#4169E1">if</font> (!tao-&gt;stepdirection) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;tao-&gt;stepdirection));
+<a name="line702">702: </a>  <font color="#4169E1">if</font> (!nlsP-&gt;W) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;nlsP-&gt;W));
+<a name="line703">703: </a>  <font color="#4169E1">if</font> (!nlsP-&gt;D) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;nlsP-&gt;D));
+<a name="line704">704: </a>  <font color="#4169E1">if</font> (!nlsP-&gt;Xold) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;nlsP-&gt;Xold));
+<a name="line705">705: </a>  <font color="#4169E1">if</font> (!nlsP-&gt;Gold) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;nlsP-&gt;Gold));
+<a name="line706">706: </a>  nlsP-&gt;M        = NULL;
+<a name="line707">707: </a>  nlsP-&gt;bfgs_pre = NULL;
+<a name="line708">708: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line709">709: </a>}
+
+<a name="line711">711: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+<a name="line712">712: </a><strong><font color="#4169E1"><a name="TaoDestroy_NLS"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoDestroy_NLS(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line713">713: </a>{
+<a name="line714">714: </a>  TAO_NLS *nlsP = (TAO_NLS *)tao-&gt;data;
+
+<a name="line716">716: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line717">717: </a>  <font color="#4169E1">if</font> (tao-&gt;setupcalled) {
+<a name="line718">718: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;nlsP-&gt;D));
+<a name="line719">719: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;nlsP-&gt;W));
+<a name="line720">720: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;nlsP-&gt;Xold));
+<a name="line721">721: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;nlsP-&gt;Gold));
+<a name="line722">722: </a>  }
+<a name="line723">723: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPDestroy.html">KSPDestroy</a>(&amp;tao-&gt;ksp));
+<a name="line724">724: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(tao-&gt;data));
+<a name="line725">725: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line726">726: </a>}
+
+<a name="line728">728: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+<a name="line729">729: </a><strong><font color="#4169E1"><a name="TaoSetFromOptions_NLS"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoSetFromOptions_NLS(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line730">730: </a>{
+<a name="line731">731: </a>  TAO_NLS *nlsP = (TAO_NLS *)tao-&gt;data;
+
+<a name="line733">733: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line734">734: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"Newton line search method for unconstrained optimization"</font>);
+<a name="line735">735: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEList.html">PetscOptionsEList</a>(<font color="#666666">"-tao_nls_init_type"</font>, <font color="#666666">"radius initialization type"</font>, <font color="#666666">""</font>, NLS_INIT, NLS_INIT_TYPES, NLS_INIT[nlsP-&gt;init_type], &amp;nlsP-&gt;init_type, NULL));
+<a name="line736">736: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEList.html">PetscOptionsEList</a>(<font color="#666666">"-tao_nls_update_type"</font>, <font color="#666666">"radius update type"</font>, <font color="#666666">""</font>, NLS_UPDATE, NLS_UPDATE_TYPES, NLS_UPDATE[nlsP-&gt;update_type], &amp;nlsP-&gt;update_type, NULL));
+<a name="line737">737: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_sval"</font>, <font color="#666666">"perturbation starting value"</font>, <font color="#666666">""</font>, nlsP-&gt;sval, &amp;nlsP-&gt;sval, NULL));
+<a name="line738">738: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_imin"</font>, <font color="#666666">"minimum initial perturbation"</font>, <font color="#666666">""</font>, nlsP-&gt;imin, &amp;nlsP-&gt;imin, NULL));
+<a name="line739">739: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_imax"</font>, <font color="#666666">"maximum initial perturbation"</font>, <font color="#666666">""</font>, nlsP-&gt;imax, &amp;nlsP-&gt;imax, NULL));
+<a name="line740">740: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_imfac"</font>, <font color="#666666">"initial merit factor"</font>, <font color="#666666">""</font>, nlsP-&gt;imfac, &amp;nlsP-&gt;imfac, NULL));
+<a name="line741">741: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_pmin"</font>, <font color="#666666">"minimum perturbation"</font>, <font color="#666666">""</font>, nlsP-&gt;pmin, &amp;nlsP-&gt;pmin, NULL));
+<a name="line742">742: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_pmax"</font>, <font color="#666666">"maximum perturbation"</font>, <font color="#666666">""</font>, nlsP-&gt;pmax, &amp;nlsP-&gt;pmax, NULL));
+<a name="line743">743: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_pgfac"</font>, <font color="#666666">"growth factor"</font>, <font color="#666666">""</font>, nlsP-&gt;pgfac, &amp;nlsP-&gt;pgfac, NULL));
+<a name="line744">744: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_psfac"</font>, <font color="#666666">"shrink factor"</font>, <font color="#666666">""</font>, nlsP-&gt;psfac, &amp;nlsP-&gt;psfac, NULL));
+<a name="line745">745: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_pmgfac"</font>, <font color="#666666">"merit growth factor"</font>, <font color="#666666">""</font>, nlsP-&gt;pmgfac, &amp;nlsP-&gt;pmgfac, NULL));
+<a name="line746">746: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_pmsfac"</font>, <font color="#666666">"merit shrink factor"</font>, <font color="#666666">""</font>, nlsP-&gt;pmsfac, &amp;nlsP-&gt;pmsfac, NULL));
+<a name="line747">747: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_eta1"</font>, <font color="#666666">"poor steplength; reduce radius"</font>, <font color="#666666">""</font>, nlsP-&gt;eta1, &amp;nlsP-&gt;eta1, NULL));
+<a name="line748">748: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_eta2"</font>, <font color="#666666">"reasonable steplength; leave radius alone"</font>, <font color="#666666">""</font>, nlsP-&gt;eta2, &amp;nlsP-&gt;eta2, NULL));
+<a name="line749">749: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_eta3"</font>, <font color="#666666">"good steplength; increase radius"</font>, <font color="#666666">""</font>, nlsP-&gt;eta3, &amp;nlsP-&gt;eta3, NULL));
+<a name="line750">750: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_eta4"</font>, <font color="#666666">"excellent steplength; greatly increase radius"</font>, <font color="#666666">""</font>, nlsP-&gt;eta4, &amp;nlsP-&gt;eta4, NULL));
+<a name="line751">751: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_alpha1"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;alpha1, &amp;nlsP-&gt;alpha1, NULL));
+<a name="line752">752: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_alpha2"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;alpha2, &amp;nlsP-&gt;alpha2, NULL));
+<a name="line753">753: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_alpha3"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;alpha3, &amp;nlsP-&gt;alpha3, NULL));
+<a name="line754">754: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_alpha4"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;alpha4, &amp;nlsP-&gt;alpha4, NULL));
+<a name="line755">755: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_alpha5"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;alpha5, &amp;nlsP-&gt;alpha5, NULL));
+<a name="line756">756: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_nu1"</font>, <font color="#666666">"poor steplength; reduce radius"</font>, <font color="#666666">""</font>, nlsP-&gt;nu1, &amp;nlsP-&gt;nu1, NULL));
+<a name="line757">757: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_nu2"</font>, <font color="#666666">"reasonable steplength; leave radius alone"</font>, <font color="#666666">""</font>, nlsP-&gt;nu2, &amp;nlsP-&gt;nu2, NULL));
+<a name="line758">758: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_nu3"</font>, <font color="#666666">"good steplength; increase radius"</font>, <font color="#666666">""</font>, nlsP-&gt;nu3, &amp;nlsP-&gt;nu3, NULL));
+<a name="line759">759: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_nu4"</font>, <font color="#666666">"excellent steplength; greatly increase radius"</font>, <font color="#666666">""</font>, nlsP-&gt;nu4, &amp;nlsP-&gt;nu4, NULL));
+<a name="line760">760: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_omega1"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;omega1, &amp;nlsP-&gt;omega1, NULL));
+<a name="line761">761: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_omega2"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;omega2, &amp;nlsP-&gt;omega2, NULL));
+<a name="line762">762: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_omega3"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;omega3, &amp;nlsP-&gt;omega3, NULL));
+<a name="line763">763: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_omega4"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;omega4, &amp;nlsP-&gt;omega4, NULL));
+<a name="line764">764: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_omega5"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;omega5, &amp;nlsP-&gt;omega5, NULL));
+<a name="line765">765: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_mu1_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;mu1_i, &amp;nlsP-&gt;mu1_i, NULL));
+<a name="line766">766: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_mu2_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;mu2_i, &amp;nlsP-&gt;mu2_i, NULL));
+<a name="line767">767: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma1_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma1_i, &amp;nlsP-&gt;gamma1_i, NULL));
+<a name="line768">768: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma2_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma2_i, &amp;nlsP-&gt;gamma2_i, NULL));
+<a name="line769">769: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma3_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma3_i, &amp;nlsP-&gt;gamma3_i, NULL));
+<a name="line770">770: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma4_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma4_i, &amp;nlsP-&gt;gamma4_i, NULL));
+<a name="line771">771: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_theta_i"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;theta_i, &amp;nlsP-&gt;theta_i, NULL));
+<a name="line772">772: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_mu1"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;mu1, &amp;nlsP-&gt;mu1, NULL));
+<a name="line773">773: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_mu2"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;mu2, &amp;nlsP-&gt;mu2, NULL));
+<a name="line774">774: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma1"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma1, &amp;nlsP-&gt;gamma1, NULL));
+<a name="line775">775: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma2"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma2, &amp;nlsP-&gt;gamma2, NULL));
+<a name="line776">776: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma3"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma3, &amp;nlsP-&gt;gamma3, NULL));
+<a name="line777">777: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_gamma4"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;gamma4, &amp;nlsP-&gt;gamma4, NULL));
+<a name="line778">778: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_theta"</font>, <font color="#666666">""</font>, <font color="#666666">""</font>, nlsP-&gt;theta, &amp;nlsP-&gt;theta, NULL));
+<a name="line779">779: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_min_radius"</font>, <font color="#666666">"lower bound on initial radius"</font>, <font color="#666666">""</font>, nlsP-&gt;min_radius, &amp;nlsP-&gt;min_radius, NULL));
+<a name="line780">780: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_max_radius"</font>, <font color="#666666">"upper bound on radius"</font>, <font color="#666666">""</font>, nlsP-&gt;max_radius, &amp;nlsP-&gt;max_radius, NULL));
+<a name="line781">781: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_nls_epsilon"</font>, <font color="#666666">"tolerance used when computing actual and predicted reduction"</font>, <font color="#666666">""</font>, nlsP-&gt;epsilon, &amp;nlsP-&gt;epsilon, NULL));
+<a name="line782">782: </a>  PetscOptionsHeadEnd();
+<a name="line783">783: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchSetFromOptions.html">TaoLineSearchSetFromOptions</a>(tao-&gt;linesearch));
+<a name="line784">784: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetFromOptions.html">KSPSetFromOptions</a>(tao-&gt;ksp));
+<a name="line785">785: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line786">786: </a>}
+
+<a name="line788">788: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+<a name="line789">789: </a><strong><font color="#4169E1"><a name="TaoView_NLS"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoView_NLS(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line790">790: </a>{
+<a name="line791">791: </a>  TAO_NLS  *nlsP = (TAO_NLS *)tao-&gt;data;
+<a name="line792">792: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> isascii;
+
+<a name="line794">794: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line795">795: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;isascii));
+<a name="line796">796: </a>  <font color="#4169E1">if</font> (isascii) {
+<a name="line797">797: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPushTab.html">PetscViewerASCIIPushTab</a>(viewer));
+<a name="line798">798: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"Newton steps: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;newt));
+<a name="line799">799: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"BFGS steps: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;bfgs));
+<a name="line800">800: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"Gradient steps: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;grad));
+
+<a name="line802">802: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp atol: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_atol));
+<a name="line803">803: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp rtol: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_rtol));
+<a name="line804">804: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp ctol: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_ctol));
+<a name="line805">805: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp negc: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_negc));
+<a name="line806">806: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp dtol: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_dtol));
+<a name="line807">807: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp iter: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_iter));
+<a name="line808">808: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"nls ksp othr: %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, nlsP-&gt;ksp_othr));
+<a name="line809">809: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPopTab.html">PetscViewerASCIIPopTab</a>(viewer));
+<a name="line810">810: </a>  }
+<a name="line811">811: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line812">812: </a>}
+
+<a name="line814">814: </a><font color="#B22222">/* ---------------------------------------------------------- */</font>
+<a name="line815">815: </a><font color="#B22222">/*MC</font>
+<a name="line816">816: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TAONLS.html">TAONLS</a> - Newton's method with linesearch for unconstrained minimization.</font>
+<a name="line817">817: </a><font color="#B22222">  At each iteration, the Newton line search method solves the symmetric</font>
+<a name="line818">818: </a><font color="#B22222">  system of equations to obtain the step diretion dk:</font>
+<a name="line819">819: </a><font color="#B22222">              Hk dk = -gk</font>
+<a name="line820">820: </a><font color="#B22222">  a More-Thuente line search is applied on the direction dk to approximately</font>
+<a name="line821">821: </a><font color="#B22222">  solve</font>
+<a name="line822">822: </a><font color="#B22222">              min_t f(xk + t d_k)</font>
+
+<a name="line824">824: </a><font color="#B22222">    Options Database Keys:</font>
+<a name="line825">825: </a><font color="#B22222">+ -tao_nls_init_type - "constant","direction","interpolation"</font>
+<a name="line826">826: </a><font color="#B22222">. -tao_nls_update_type - "step","direction","interpolation"</font>
+<a name="line827">827: </a><font color="#B22222">. -tao_nls_sval - perturbation starting value</font>
+<a name="line828">828: </a><font color="#B22222">. -tao_nls_imin - minimum initial perturbation</font>
+<a name="line829">829: </a><font color="#B22222">. -tao_nls_imax - maximum initial perturbation</font>
+<a name="line830">830: </a><font color="#B22222">. -tao_nls_pmin - minimum perturbation</font>
+<a name="line831">831: </a><font color="#B22222">. -tao_nls_pmax - maximum perturbation</font>
+<a name="line832">832: </a><font color="#B22222">. -tao_nls_pgfac - growth factor</font>
+<a name="line833">833: </a><font color="#B22222">. -tao_nls_psfac - shrink factor</font>
+<a name="line834">834: </a><font color="#B22222">. -tao_nls_imfac - initial merit factor</font>
+<a name="line835">835: </a><font color="#B22222">. -tao_nls_pmgfac - merit growth factor</font>
+<a name="line836">836: </a><font color="#B22222">. -tao_nls_pmsfac - merit shrink factor</font>
+<a name="line837">837: </a><font color="#B22222">. -tao_nls_eta1 - poor steplength; reduce radius</font>
+<a name="line838">838: </a><font color="#B22222">. -tao_nls_eta2 - reasonable steplength; leave radius</font>
+<a name="line839">839: </a><font color="#B22222">. -tao_nls_eta3 - good steplength; increase radius</font>
+<a name="line840">840: </a><font color="#B22222">. -tao_nls_eta4 - excellent steplength; greatly increase radius</font>
+<a name="line841">841: </a><font color="#B22222">. -tao_nls_alpha1 - alpha1 reduction</font>
+<a name="line842">842: </a><font color="#B22222">. -tao_nls_alpha2 - alpha2 reduction</font>
+<a name="line843">843: </a><font color="#B22222">. -tao_nls_alpha3 - alpha3 reduction</font>
+<a name="line844">844: </a><font color="#B22222">. -tao_nls_alpha4 - alpha4 reduction</font>
+<a name="line845">845: </a><font color="#B22222">. -tao_nls_alpha - alpha5 reduction</font>
+<a name="line846">846: </a><font color="#B22222">. -tao_nls_mu1 - mu1 interpolation update</font>
+<a name="line847">847: </a><font color="#B22222">. -tao_nls_mu2 - mu2 interpolation update</font>
+<a name="line848">848: </a><font color="#B22222">. -tao_nls_gamma1 - gamma1 interpolation update</font>
+<a name="line849">849: </a><font color="#B22222">. -tao_nls_gamma2 - gamma2 interpolation update</font>
+<a name="line850">850: </a><font color="#B22222">. -tao_nls_gamma3 - gamma3 interpolation update</font>
+<a name="line851">851: </a><font color="#B22222">. -tao_nls_gamma4 - gamma4 interpolation update</font>
+<a name="line852">852: </a><font color="#B22222">. -tao_nls_theta - theta interpolation update</font>
+<a name="line853">853: </a><font color="#B22222">. -tao_nls_omega1 - omega1 step update</font>
+<a name="line854">854: </a><font color="#B22222">. -tao_nls_omega2 - omega2 step update</font>
+<a name="line855">855: </a><font color="#B22222">. -tao_nls_omega3 - omega3 step update</font>
+<a name="line856">856: </a><font color="#B22222">. -tao_nls_omega4 - omega4 step update</font>
+<a name="line857">857: </a><font color="#B22222">. -tao_nls_omega5 - omega5 step update</font>
+<a name="line858">858: </a><font color="#B22222">. -tao_nls_mu1_i -  mu1 interpolation init factor</font>
+<a name="line859">859: </a><font color="#B22222">. -tao_nls_mu2_i -  mu2 interpolation init factor</font>
+<a name="line860">860: </a><font color="#B22222">. -tao_nls_gamma1_i -  gamma1 interpolation init factor</font>
+<a name="line861">861: </a><font color="#B22222">. -tao_nls_gamma2_i -  gamma2 interpolation init factor</font>
+<a name="line862">862: </a><font color="#B22222">. -tao_nls_gamma3_i -  gamma3 interpolation init factor</font>
+<a name="line863">863: </a><font color="#B22222">. -tao_nls_gamma4_i -  gamma4 interpolation init factor</font>
+<a name="line864">864: </a><font color="#B22222">- -tao_nls_theta_i -  theta interpolation init factor</font>
+
+<a name="line866">866: </a><font color="#B22222">  Level: beginner</font>
+<a name="line867">867: </a><font color="#B22222">M*/</font>
+
+<a name="line869">869: </a><strong><font color="#4169E1"><a name="TaoCreate_NLS"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoCreate_NLS(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line870">870: </a>{
+<a name="line871">871: </a>  TAO_NLS    *nlsP;
+<a name="line872">872: </a>  const char *morethuente_type = <a href="../../../../../manualpages/TaoLineSearch/TAOLINESEARCHMT.html">TAOLINESEARCHMT</a>;
+
+<a name="line874">874: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line875">875: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;nlsP));
+
+<a name="line877">877: </a>  tao-&gt;ops-&gt;setup          = TaoSetUp_NLS;
+<a name="line878">878: </a>  tao-&gt;ops-&gt;solve          = TaoSolve_NLS;
+<a name="line879">879: </a>  tao-&gt;ops-&gt;view           = TaoView_NLS;
+<a name="line880">880: </a>  tao-&gt;ops-&gt;setfromoptions = TaoSetFromOptions_NLS;
+<a name="line881">881: </a>  tao-&gt;ops-&gt;destroy        = TaoDestroy_NLS;
+
+<a name="line883">883: </a>  <font color="#B22222">/* Override default settings (unless already changed) */</font>
+<a name="line884">884: </a>  <font color="#4169E1">if</font> (!tao-&gt;max_it_changed) tao-&gt;max_it = 50;
+<a name="line885">885: </a>  <font color="#4169E1">if</font> (!tao-&gt;trust0_changed) tao-&gt;trust0 = 100.0;
+
+<a name="line887">887: </a>  tao-&gt;data = (void *)nlsP;
+
+<a name="line889">889: </a>  nlsP-&gt;sval  = 0.0;
+<a name="line890">890: </a>  nlsP-&gt;imin  = 1.0e-4;
+<a name="line891">891: </a>  nlsP-&gt;imax  = 1.0e+2;
+<a name="line892">892: </a>  nlsP-&gt;imfac = 1.0e-1;
+
+<a name="line894">894: </a>  nlsP-&gt;pmin   = 1.0e-12;
+<a name="line895">895: </a>  nlsP-&gt;pmax   = 1.0e+2;
+<a name="line896">896: </a>  nlsP-&gt;pgfac  = 1.0e+1;
+<a name="line897">897: </a>  nlsP-&gt;psfac  = 4.0e-1;
+<a name="line898">898: </a>  nlsP-&gt;pmgfac = 1.0e-1;
+<a name="line899">899: </a>  nlsP-&gt;pmsfac = 1.0e-1;
+
+<a name="line901">901: </a>  <font color="#B22222">/*  Default values for trust-region radius update based on steplength */</font>
+<a name="line902">902: </a>  nlsP-&gt;nu1 = 0.25;
+<a name="line903">903: </a>  nlsP-&gt;nu2 = 0.50;
+<a name="line904">904: </a>  nlsP-&gt;nu3 = 1.00;
+<a name="line905">905: </a>  nlsP-&gt;nu4 = 1.25;
+
+<a name="line907">907: </a>  nlsP-&gt;omega1 = 0.25;
+<a name="line908">908: </a>  nlsP-&gt;omega2 = 0.50;
+<a name="line909">909: </a>  nlsP-&gt;omega3 = 1.00;
+<a name="line910">910: </a>  nlsP-&gt;omega4 = 2.00;
+<a name="line911">911: </a>  nlsP-&gt;omega5 = 4.00;
+
+<a name="line913">913: </a>  <font color="#B22222">/*  Default values for trust-region radius update based on reduction */</font>
+<a name="line914">914: </a>  nlsP-&gt;eta1 = 1.0e-4;
+<a name="line915">915: </a>  nlsP-&gt;eta2 = 0.25;
+<a name="line916">916: </a>  nlsP-&gt;eta3 = 0.50;
+<a name="line917">917: </a>  nlsP-&gt;eta4 = 0.90;
+
+<a name="line919">919: </a>  nlsP-&gt;alpha1 = 0.25;
+<a name="line920">920: </a>  nlsP-&gt;alpha2 = 0.50;
+<a name="line921">921: </a>  nlsP-&gt;alpha3 = 1.00;
+<a name="line922">922: </a>  nlsP-&gt;alpha4 = 2.00;
+<a name="line923">923: </a>  nlsP-&gt;alpha5 = 4.00;
+
+<a name="line925">925: </a>  <font color="#B22222">/*  Default values for trust-region radius update based on interpolation */</font>
+<a name="line926">926: </a>  nlsP-&gt;mu1 = 0.10;
+<a name="line927">927: </a>  nlsP-&gt;mu2 = 0.50;
+
+<a name="line929">929: </a>  nlsP-&gt;gamma1 = 0.25;
+<a name="line930">930: </a>  nlsP-&gt;gamma2 = 0.50;
+<a name="line931">931: </a>  nlsP-&gt;gamma3 = 2.00;
+<a name="line932">932: </a>  nlsP-&gt;gamma4 = 4.00;
+
+<a name="line934">934: </a>  nlsP-&gt;theta = 0.05;
+
+<a name="line936">936: </a>  <font color="#B22222">/*  Default values for trust region initialization based on interpolation */</font>
+<a name="line937">937: </a>  nlsP-&gt;mu1_i = 0.35;
+<a name="line938">938: </a>  nlsP-&gt;mu2_i = 0.50;
+
+<a name="line940">940: </a>  nlsP-&gt;gamma1_i = 0.0625;
+<a name="line941">941: </a>  nlsP-&gt;gamma2_i = 0.5;
+<a name="line942">942: </a>  nlsP-&gt;gamma3_i = 2.0;
+<a name="line943">943: </a>  nlsP-&gt;gamma4_i = 5.0;
+
+<a name="line945">945: </a>  nlsP-&gt;theta_i = 0.25;
+
+<a name="line947">947: </a>  <font color="#B22222">/*  Remaining parameters */</font>
+<a name="line948">948: </a>  nlsP-&gt;min_radius = 1.0e-10;
+<a name="line949">949: </a>  nlsP-&gt;max_radius = 1.0e10;
+<a name="line950">950: </a>  nlsP-&gt;epsilon    = 1.0e-6;
+
+<a name="line952">952: </a>  nlsP-&gt;init_type   = NLS_INIT_INTERPOLATION;
+<a name="line953">953: </a>  nlsP-&gt;update_type = NLS_UPDATE_STEP;
+
+<a name="line955">955: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchCreate.html">TaoLineSearchCreate</a>(((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao)-&gt;comm, &amp;tao-&gt;linesearch));
+<a name="line956">956: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectIncrementTabLevel.html">PetscObjectIncrementTabLevel</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao-&gt;linesearch, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, 1));
+<a name="line957">957: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchSetType.html">TaoLineSearchSetType</a>(tao-&gt;linesearch, morethuente_type));
+<a name="line958">958: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchUseTaoRoutines.html">TaoLineSearchUseTaoRoutines</a>(tao-&gt;linesearch, tao));
+<a name="line959">959: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TaoLineSearch/TaoLineSearchSetOptionsPrefix.html">TaoLineSearchSetOptionsPrefix</a>(tao-&gt;linesearch, tao-&gt;hdr.prefix));
+
+<a name="line961">961: </a>  <font color="#B22222">/*  Set linear solver to default for symmetric matrices */</font>
+<a name="line962">962: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCreate.html">KSPCreate</a>(((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao)-&gt;comm, &amp;tao-&gt;ksp));
+<a name="line963">963: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectIncrementTabLevel.html">PetscObjectIncrementTabLevel</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao-&gt;ksp, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, 1));
+<a name="line964">964: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetOptionsPrefix.html">KSPSetOptionsPrefix</a>(tao-&gt;ksp, tao-&gt;hdr.prefix));
+<a name="line965">965: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPAppendOptionsPrefix.html">KSPAppendOptionsPrefix</a>(tao-&gt;ksp, <font color="#666666">"tao_nls_"</font>));
+<a name="line966">966: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetType.html">KSPSetType</a>(tao-&gt;ksp, <a href="../../../../../manualpages/KSP/KSPSTCG.html">KSPSTCG</a>));
+<a name="line967">967: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line968">968: </a>}
+</pre>
+</body>
+
+</html>

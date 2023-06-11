@@ -1,0 +1,407 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ts/adapt/impls/dsp/adaptdsp.c">Actual source code: adaptdsp.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:11+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsc/private/tsimpl.h.html">&lt;petsc/private/tsimpl.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../include/petscdm.h.html">&lt;petscdm.h&gt;</A>
+
+<a name="line4">  4: </a>static const char *citation[] = {
+<a name="line5">  5: </a>  <font color="#666666">"@article{Soderlind2003,\n"</font>
+<a name="line6">  6: </a>  <font color="#666666">" author = {S\"{o}derlind, Gustaf},\n"</font>
+<a name="line7">  7: </a>  <font color="#666666">" title = {Digital Filters in Adaptive Time-stepping},\n"</font>
+<a name="line8">  8: </a>  <font color="#666666">" journal = {ACM Transactions on Mathematical Software},\n"</font>
+<a name="line9">  9: </a>  <font color="#666666">" volume = {29},\n"</font>
+<a name="line10"> 10: </a>  <font color="#666666">" number = {1},\n"</font>
+<a name="line11"> 11: </a>  <font color="#666666">" pages = {1--26},\n"</font>
+<a name="line12"> 12: </a>  <font color="#666666">" year = {2003},\n"</font>
+<a name="line13"> 13: </a>  <font color="#666666">" issn = {0098-3500},\n"</font>
+<a name="line14"> 14: </a>  <font color="#666666">" doi = {http://dx.doi.org/10.1145/641876.641877},\n"</font>
+<a name="line15"> 15: </a>  <font color="#666666">"}\n"</font>,
+<a name="line16"> 16: </a>  <font color="#666666">"@article{Soderlind2006,\n"</font>
+<a name="line17"> 17: </a>  <font color="#666666">" author = {Gustaf S\"{o}derlind and Lina Wang},\n"</font>
+<a name="line18"> 18: </a>  <font color="#666666">" title = {Adaptive time-stepping and computational stability},\n"</font>
+<a name="line19"> 19: </a>  <font color="#666666">" journal = {Journal of Computational and Applied Mathematics},\n"</font>
+<a name="line20"> 20: </a>  <font color="#666666">" volume = {185},\n"</font>
+<a name="line21"> 21: </a>  <font color="#666666">" number = {2},\n"</font>
+<a name="line22"> 22: </a>  <font color="#666666">" pages = {225--243},\n"</font>
+<a name="line23"> 23: </a>  <font color="#666666">" year = {2006},\n"</font>
+<a name="line24"> 24: </a>  <font color="#666666">" issn = {0377-0427},\n"</font>
+<a name="line25"> 25: </a>  <font color="#666666">" doi = {http://dx.doi.org/10.1016/j.cam.2005.03.008},\n"</font>
+<a name="line26"> 26: </a>  <font color="#666666">"}\n"</font>,
+<a name="line27"> 27: </a>};
+<a name="line28"> 28: </a>static <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> cited[] = {<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>};
+
+<a name="line30"> 30: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line31"> 31: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kBeta[3];  <font color="#B22222">/* filter parameters */</font>
+<a name="line32"> 32: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> Alpha[2];  <font color="#B22222">/* filter parameters */</font>
+<a name="line33"> 33: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> cerror[3]; <font color="#B22222">/* control error (controller input) history */</font>
+<a name="line34"> 34: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> hratio[3]; <font color="#B22222">/* stepsize ratio (controller output) history */</font>
+<a name="line35"> 35: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> rollback;
+<a name="line36"> 36: </a>} TSAdapt_DSP;
+
+<a name="line38"> 38: </a><strong><font color="#4169E1"><a name="Limiter"></a>static <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> Limiter(<a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> value, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kappa)</font></strong>
+<a name="line39"> 39: </a>{
+<a name="line40"> 40: </a>  <font color="#4169E1">return</font> 1 + kappa * PetscAtanReal((value - 1) / kappa);
+<a name="line41"> 41: </a>}
+
+<a name="line43"> 43: </a><strong><font color="#4169E1"><a name="TSAdaptRestart_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptRestart_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt)</font></strong>
+<a name="line44"> 44: </a>{
+<a name="line45"> 45: </a>  TSAdapt_DSP *dsp = (TSAdapt_DSP *)adapt-&gt;data;
+<a name="line46"> 46: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line47"> 47: </a>  dsp-&gt;cerror[0] = dsp-&gt;hratio[0] = 1.0;
+<a name="line48"> 48: </a>  dsp-&gt;cerror[1] = dsp-&gt;hratio[1] = 1.0;
+<a name="line49"> 49: </a>  dsp-&gt;cerror[2] = dsp-&gt;hratio[2] = 1.0;
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line51"> 51: </a>}
+
+<a name="line53"> 53: </a><strong><font color="#4169E1"><a name="TSAdaptRollBack_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptRollBack_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt)</font></strong>
+<a name="line54"> 54: </a>{
+<a name="line55"> 55: </a>  TSAdapt_DSP *dsp = (TSAdapt_DSP *)adapt-&gt;data;
+<a name="line56"> 56: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line57"> 57: </a>  dsp-&gt;cerror[0] = dsp-&gt;cerror[1];
+<a name="line58"> 58: </a>  dsp-&gt;cerror[1] = dsp-&gt;cerror[2];
+<a name="line59"> 59: </a>  dsp-&gt;cerror[2] = 1.0;
+<a name="line60"> 60: </a>  dsp-&gt;hratio[0] = dsp-&gt;hratio[1];
+<a name="line61"> 61: </a>  dsp-&gt;hratio[1] = dsp-&gt;hratio[2];
+<a name="line62"> 62: </a>  dsp-&gt;hratio[2] = 1.0;
+<a name="line63"> 63: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line64"> 64: </a>}
+
+<a name="line66"> 66: </a><strong><font color="#4169E1"><a name="TSAdaptChoose_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptChoose_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, <a href="../../../../../manualpages/TS/TS.html">TS</a> ts, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> h, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *next_sc, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *next_h, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *accept, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *wlte, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *wltea, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *wlter)</font></strong>
+<a name="line67"> 67: </a>{
+<a name="line68"> 68: </a>  TSAdapt_DSP *dsp   = (TSAdapt_DSP *)adapt-&gt;data;
+<a name="line69"> 69: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     order = <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>;
+<a name="line70"> 70: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>    enorm = -1;
+<a name="line71"> 71: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>    enorma, enormr;
+<a name="line72"> 72: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>    safety = adapt-&gt;safety * (<a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>)0.9;
+<a name="line73"> 73: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>    hnew, hfac = PETSC_INFINITY;
+<a name="line74"> 74: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>    hmin = adapt-&gt;dt_min * (1 + PETSC_SQRT_MACHINE_EPSILON);
+
+<a name="line76"> 76: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line77"> 77: </a>  *next_sc = 0;  <font color="#B22222">/* Reuse the same order scheme */</font>
+<a name="line78"> 78: </a>  *wltea   = -1; <font color="#B22222">/* Weighted absolute local truncation error is not used */</font>
+<a name="line79"> 79: </a>  *wlter   = -1; <font color="#B22222">/* Weighted relative local truncation error is not used */</font>
+
+<a name="line81"> 81: </a>  <font color="#4169E1">if</font> (ts-&gt;ops-&gt;evaluatewlte) {
+<a name="line82"> 82: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TS/TSEvaluateWLTE.html">TSEvaluateWLTE</a>(ts, adapt-&gt;wnormtype, &amp;order, &amp;enorm));
+<a name="line83"> 83: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(enorm &lt; 0 || order &gt;= 1, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Computed error order %"</font> PetscInt_FMT <font color="#666666">" must be positive"</font>, order);
+<a name="line84"> 84: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ts-&gt;ops-&gt;evaluatestep) {
+<a name="line85"> 85: </a>    <a href="../../../../../manualpages/DM/DM.html">DM</a>  dm;
+<a name="line86"> 86: </a>    <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> Y;
+
+<a name="line88"> 88: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(adapt-&gt;candidates.n &gt;= 1, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"No candidate has been registered"</font>);
+<a name="line89"> 89: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(adapt-&gt;candidates.inuse_set, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"The current in-use scheme is not among the %"</font> PetscInt_FMT <font color="#666666">" candidates"</font>, adapt-&gt;candidates.n);
+<a name="line90"> 90: </a>    order = adapt-&gt;candidates.order[0];
+<a name="line91"> 91: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(ts, &amp;dm));
+<a name="line92"> 92: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DM/DMGetGlobalVector.html">DMGetGlobalVector</a>(dm, &amp;Y));
+<a name="line93"> 93: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TS/TSEvaluateStep.html">TSEvaluateStep</a>(ts, order - 1, Y, NULL));
+<a name="line94"> 94: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TS/TSErrorWeightedNorm.html">TSErrorWeightedNorm</a>(ts, ts-&gt;vec_sol, Y, adapt-&gt;wnormtype, &amp;enorm, &amp;enorma, &amp;enormr));
+<a name="line95"> 95: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DM/DMRestoreGlobalVector.html">DMRestoreGlobalVector</a>(dm, &amp;Y));
+<a name="line96"> 96: </a>  }
+<a name="line97"> 97: </a>  <font color="#4169E1">if</font> (enorm &lt; 0) {
+<a name="line98"> 98: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TSAdaptRestart_DSP(adapt));
+<a name="line99"> 99: </a>    *accept = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>; <font color="#B22222">/* Accept the step */</font>
+<a name="line100">100: </a>    *next_h = h;          <font color="#B22222">/* Reuse the old step size */</font>
+<a name="line101">101: </a>    *wlte   = -1;         <font color="#B22222">/* Weighted local truncation error was not evaluated */</font>
+<a name="line102">102: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line103">103: </a>  }
+
+<a name="line105">105: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCitationsRegister.html">PetscCitationsRegister</a>(citation[0], &amp;cited[0]));
+<a name="line106">106: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCitationsRegister.html">PetscCitationsRegister</a>(citation[1], &amp;cited[1]));
+
+<a name="line108">108: </a>  <font color="#B22222">/* Update history after rollback */</font>
+<a name="line109">109: </a>  <font color="#4169E1">if</font> (!ts-&gt;steprollback) dsp-&gt;rollback = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line110">110: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (!dsp-&gt;rollback) {
+<a name="line111">111: </a>    dsp-&gt;rollback = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line112">112: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TSAdaptRollBack_DSP(adapt));
+<a name="line113">113: </a>  }
+<a name="line114">114: </a>  <font color="#B22222">/* Reset history after restart */</font>
+<a name="line115">115: </a>  <font color="#4169E1">if</font> (ts-&gt;steprestart) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TSAdaptRestart_DSP(adapt));
+
+<a name="line117">117: </a>  {
+<a name="line118">118: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> k  = (<a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>)order;
+<a name="line119">119: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> b1 = dsp-&gt;kBeta[0];
+<a name="line120">120: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> b2 = dsp-&gt;kBeta[1];
+<a name="line121">121: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> b3 = dsp-&gt;kBeta[2];
+<a name="line122">122: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> a2 = dsp-&gt;Alpha[0];
+<a name="line123">123: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> a3 = dsp-&gt;Alpha[1];
+
+<a name="line125">125: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> ctr0;
+<a name="line126">126: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> ctr1 = dsp-&gt;cerror[0];
+<a name="line127">127: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> ctr2 = dsp-&gt;cerror[1];
+<a name="line128">128: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> rho0;
+<a name="line129">129: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> rho1 = dsp-&gt;hratio[0];
+<a name="line130">130: </a>    <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> rho2 = dsp-&gt;hratio[1];
+
+<a name="line132">132: </a>    <font color="#B22222">/* Compute the step size ratio */</font>
+<a name="line133">133: </a>    enorm = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(enorm, PETSC_SMALL);
+<a name="line134">134: </a>    ctr0  = PetscPowReal(1 / enorm, 1 / k);
+<a name="line135">135: </a>    rho0  = PetscPowReal(ctr0, b1);
+<a name="line136">136: </a>    rho0 *= PetscPowReal(ctr1, b2);
+<a name="line137">137: </a>    rho0 *= PetscPowReal(ctr2, b3);
+<a name="line138">138: </a>    rho0 *= PetscPowReal(rho1, -a2);
+<a name="line139">139: </a>    rho0 *= PetscPowReal(rho2, -a3);
+<a name="line140">140: </a>    rho0 = Limiter(rho0, 1);
+
+<a name="line142">142: </a>    <font color="#B22222">/* Determine whether the step is accepted or rejected */</font>
+<a name="line143">143: </a>    <font color="#4169E1">if</font> (rho0 &gt;= safety) *accept = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line144">144: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (adapt-&gt;always_accept) *accept = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line145">145: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (h &lt; hmin) *accept = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line146">146: </a>    <font color="#4169E1">else</font> *accept = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line148">148: </a>    <font color="#B22222">/* Update history after accept */</font>
+<a name="line149">149: </a>    <font color="#4169E1">if</font> (*accept) {
+<a name="line150">150: </a>      dsp-&gt;cerror[2] = dsp-&gt;cerror[1];
+<a name="line151">151: </a>      dsp-&gt;cerror[1] = dsp-&gt;cerror[0];
+<a name="line152">152: </a>      dsp-&gt;cerror[0] = ctr0;
+<a name="line153">153: </a>      dsp-&gt;hratio[2] = dsp-&gt;hratio[1];
+<a name="line154">154: </a>      dsp-&gt;hratio[1] = dsp-&gt;hratio[0];
+<a name="line155">155: </a>      dsp-&gt;hratio[0] = rho0;
+<a name="line156">156: </a>      dsp-&gt;rollback  = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line157">157: </a>    }
+
+<a name="line159">159: </a>    hfac = rho0;
+<a name="line160">160: </a>  }
+
+<a name="line162">162: </a>  hnew    = h * <a href="../../../../../manualpages/Sys/PetscClipInterval.html">PetscClipInterval</a>(hfac, adapt-&gt;clip[0], adapt-&gt;clip[1]);
+<a name="line163">163: </a>  *next_h = <a href="../../../../../manualpages/Sys/PetscClipInterval.html">PetscClipInterval</a>(hnew, adapt-&gt;dt_min, adapt-&gt;dt_max);
+<a name="line164">164: </a>  *wlte   = enorm;
+<a name="line165">165: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line166">166: </a>}
+
+<a name="line168">168: </a><strong><font color="#4169E1"><a name="TSAdaptDestroy_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptDestroy_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt)</font></strong>
+<a name="line169">169: </a>{
+<a name="line170">170: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line171">171: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt, <font color="#666666">"TSAdaptDSPSetFilter_C"</font>, NULL));
+<a name="line172">172: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt, <font color="#666666">"TSAdaptDSPSetPID_C"</font>, NULL));
+<a name="line173">173: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(adapt-&gt;data));
+<a name="line174">174: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line175">175: </a>}
+
+<a name="line177">177: </a><strong><font color="#4169E1"><a name="TSAdaptView_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptView_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line178">178: </a>{
+<a name="line179">179: </a>  TSAdapt_DSP *dsp = (TSAdapt_DSP *)adapt-&gt;data;
+<a name="line180">180: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>    iascii;
+
+<a name="line182">182: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line183">183: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line184">184: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line185">185: </a>    double a2 = (double)dsp-&gt;Alpha[0], a3 = (double)dsp-&gt;Alpha[1];
+<a name="line186">186: </a>    double b1 = (double)dsp-&gt;kBeta[0], b2 = (double)dsp-&gt;kBeta[1], b3 = (double)dsp-&gt;kBeta[2];
+<a name="line187">187: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"filter parameters kBeta=[%g,%g,%g] Alpha=[%g,%g]\n"</font>, b1, b2, b3, a2, a3));
+<a name="line188">188: </a>  }
+<a name="line189">189: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line190">190: </a>}
+
+<a name="line192">192: </a><font color="#4169E1"><a name="FilterTab"></a>struct FilterTab </font>{
+<a name="line193">193: </a>  const char *name;
+<a name="line194">194: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>   scale;
+<a name="line195">195: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>   kBeta[3];
+<a name="line196">196: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>   Alpha[2];
+<a name="line197">197: </a>};
+
+<a name="line199">199: </a>static <font color="#4169E1">struct FilterTab</font> filterlist[] = {
+<a name="line200">200: </a>  {<font color="#666666">"basic"</font>,   1,  {1, 0, 0},   {0, 0}   },
+
+<a name="line202">202: </a>  {<font color="#666666">"PI30"</font>,    3,  {1, 0, 0},   {0, 0}   },
+<a name="line203">203: </a>  {<font color="#666666">"PI42"</font>,    5,  {3, -1, 0},  {0, 0}   },
+<a name="line204">204: </a>  {<font color="#666666">"PI33"</font>,    3,  {2, -1, 0},  {0, 0}   },
+<a name="line205">205: </a>  {<font color="#666666">"PI34"</font>,    10, {7, -4, 0},  {0, 0}   },
+
+<a name="line207">207: </a>  {<font color="#666666">"PC11"</font>,    1,  {2, -1, 0},  {-1, 0}  },
+<a name="line208">208: </a>  {<font color="#666666">"PC47"</font>,    10, {11, -7, 0}, {-10, 0} },
+<a name="line209">209: </a>  {<font color="#666666">"PC36"</font>,    10, {9, -6, 0},  {-10, 0} },
+
+<a name="line211">211: </a>  {<font color="#666666">"H0211"</font>,   2,  {1, 1, 0},   {1, 0}   },
+<a name="line212">212: </a>  {<font color="#666666">"H211b"</font>,   4,  {1, 1, 0},   {1, 0}   },
+<a name="line213">213: </a>  {<font color="#666666">"H211PI"</font>,  6,  {1, 1, 0},   {0, 0}   },
+
+<a name="line215">215: </a>  {<font color="#666666">"H0312"</font>,   4,  {1, 2, 1},   {3, 1}   },
+<a name="line216">216: </a>  {<font color="#666666">"H312b"</font>,   8,  {1, 2, 1},   {3, 1}   },
+<a name="line217">217: </a>  {<font color="#666666">"H312PID"</font>, 18, {1, 2, 1},   {0, 0}   },
+
+<a name="line219">219: </a>  {<font color="#666666">"H0321"</font>,   4,  {5, 2, -3},  {-1, -3} },
+<a name="line220">220: </a>  {<font color="#666666">"H321"</font>,    18, {6, 1, -5},  {-15, -3}},
+<a name="line221">221: </a>};
+
+<a name="line223">223: </a><strong><font color="#4169E1"><a name="TSAdaptDSPSetFilter_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptDSPSetFilter_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, const char *name)</font></strong>
+<a name="line224">224: </a>{
+<a name="line225">225: </a>  TSAdapt_DSP      *dsp = (TSAdapt_DSP *)adapt-&gt;data;
+<a name="line226">226: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>          i, count = (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)(<font color="#4169E1">sizeof</font>(filterlist) / <font color="#4169E1">sizeof</font>(filterlist[0]));
+<a name="line227">227: </a>  <font color="#4169E1">struct FilterTab</font> *tab = NULL;
+<a name="line228">228: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>         match;
+
+<a name="line230">230: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line231">231: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; count; i++) {
+<a name="line232">232: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrcasecmp.html">PetscStrcasecmp</a>(name, filterlist[i].name, &amp;match));
+<a name="line233">233: </a>    <font color="#4169E1">if</font> (match) {
+<a name="line234">234: </a>      tab = &amp;filterlist[i];
+<a name="line235">235: </a>      <font color="#4169E1">break</font>;
+<a name="line236">236: </a>    }
+<a name="line237">237: </a>  }
+<a name="line238">238: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(tab, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_UNKNOWN_TYPE</a>, <font color="#666666">"Filter name %s not found"</font>, name);
+<a name="line239">239: </a>  dsp-&gt;kBeta[0] = tab-&gt;kBeta[0] / tab-&gt;scale;
+<a name="line240">240: </a>  dsp-&gt;kBeta[1] = tab-&gt;kBeta[1] / tab-&gt;scale;
+<a name="line241">241: </a>  dsp-&gt;kBeta[2] = tab-&gt;kBeta[2] / tab-&gt;scale;
+<a name="line242">242: </a>  dsp-&gt;Alpha[0] = tab-&gt;Alpha[0] / tab-&gt;scale;
+<a name="line243">243: </a>  dsp-&gt;Alpha[1] = tab-&gt;Alpha[1] / tab-&gt;scale;
+<a name="line244">244: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line245">245: </a>}
+
+<a name="line247">247: </a><strong><font color="#4169E1"><a name="TSAdaptDSPSetPID_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptDSPSetPID_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kkI, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kkP, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kkD)</font></strong>
+<a name="line248">248: </a>{
+<a name="line249">249: </a>  TSAdapt_DSP *dsp = (TSAdapt_DSP *)adapt-&gt;data;
+
+<a name="line251">251: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line252">252: </a>  dsp-&gt;kBeta[0] = kkI + kkP + kkD;
+<a name="line253">253: </a>  dsp-&gt;kBeta[1] = -(kkP + 2 * kkD);
+<a name="line254">254: </a>  dsp-&gt;kBeta[2] = kkD;
+<a name="line255">255: </a>  dsp-&gt;Alpha[0] = 0;
+<a name="line256">256: </a>  dsp-&gt;Alpha[1] = 0;
+<a name="line257">257: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line258">258: </a>}
+
+<a name="line260">260: </a><strong><font color="#4169E1"><a name="TSAdaptSetFromOptions_DSP"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptSetFromOptions_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line261">261: </a>{
+<a name="line262">262: </a>  TSAdapt_DSP *dsp = (TSAdapt_DSP *)adapt-&gt;data;
+<a name="line263">263: </a>  const char  *names[<font color="#4169E1">sizeof</font>(filterlist) / <font color="#4169E1">sizeof</font>(filterlist[0])];
+<a name="line264">264: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     count  = (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)(<font color="#4169E1">sizeof</font>(filterlist) / <font color="#4169E1">sizeof</font>(filterlist[0]));
+<a name="line265">265: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     index  = 2; <font color="#B22222">/* PI42 */</font>
+<a name="line266">266: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>    pid[3] = {1, 0, 0};
+<a name="line267">267: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     i, n;
+<a name="line268">268: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>    set;
+
+<a name="line270">270: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line271">271: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; count; i++) names[i] = filterlist[i].name;
+<a name="line272">272: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"DSP adaptive controller options"</font>);
+
+<a name="line274">274: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEList.html">PetscOptionsEList</a>(<font color="#666666">"-ts_adapt_dsp_filter"</font>, <font color="#666666">"Filter name"</font>, <font color="#666666">"<a href="../../../../../manualpages/TS/TSAdaptDSPSetFilter.html">TSAdaptDSPSetFilter</a>"</font>, names, count, names[index], &amp;index, &amp;set));
+<a name="line275">275: </a>  <font color="#4169E1">if</font> (set) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TS/TSAdaptDSPSetFilter.html">TSAdaptDSPSetFilter</a>(adapt, names[index]));
+
+<a name="line277">277: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsRealArray.html">PetscOptionsRealArray</a>(<font color="#666666">"-ts_adapt_dsp_pid"</font>, <font color="#666666">"PID parameters &lt;kkI,kkP,kkD&gt;"</font>, <font color="#666666">"<a href="../../../../../manualpages/TS/TSAdaptDSPSetPID.html">TSAdaptDSPSetPID</a>"</font>, pid, (n = 3, &amp;n), &amp;set));
+<a name="line278">278: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!set || n, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Must provide at least one value for PID parameters"</font>);
+<a name="line279">279: </a>  <font color="#4169E1">if</font> (set) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/TS/TSAdaptDSPSetPID.html">TSAdaptDSPSetPID</a>(adapt, pid[0], pid[1], pid[2]));
+
+<a name="line281">281: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsRealArray.html">PetscOptionsRealArray</a>(<font color="#666666">"-ts_adapt_dsp_kbeta"</font>, <font color="#666666">"Filter parameters"</font>, <font color="#666666">""</font>, dsp-&gt;kBeta, (n = 3, &amp;n), &amp;set));
+<a name="line282">282: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!set || n, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Must provide at least one value for parameter kbeta"</font>);
+<a name="line283">283: </a>  <font color="#4169E1">if</font> (set)
+<a name="line284">284: </a>    <font color="#4169E1">for</font> (i = n; i &lt; 3; i++) dsp-&gt;kBeta[i] = 0;
+
+<a name="line286">286: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsRealArray.html">PetscOptionsRealArray</a>(<font color="#666666">"-ts_adapt_dsp_alpha"</font>, <font color="#666666">"Filter parameters"</font>, <font color="#666666">""</font>, dsp-&gt;Alpha, (n = 2, &amp;n), &amp;set));
+<a name="line287">287: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!set || n, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Must provide at least one value for parameter alpha"</font>);
+<a name="line288">288: </a>  <font color="#4169E1">if</font> (set)
+<a name="line289">289: </a>    <font color="#4169E1">for</font> (i = n; i &lt; 2; i++) dsp-&gt;Alpha[i] = 0;
+
+<a name="line291">291: </a>  PetscOptionsHeadEnd();
+<a name="line292">292: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line293">293: </a>}
+
+<a name="line295">295: </a><font color="#B22222">/*@C</font>
+<a name="line296">296: </a><font color="#B22222">   <a href="../../../../../manualpages/TS/TSAdaptDSPSetFilter.html">TSAdaptDSPSetFilter</a> - Sets internal parameters corresponding to the named filter</font>
+
+<a name="line298">298: </a><font color="#B22222">   Collective</font>
+
+<a name="line300">300: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line301">301: </a><font color="#B22222">+  adapt - adaptive controller context</font>
+<a name="line302">302: </a><font color="#B22222">-  name - filter name</font>
+
+<a name="line304">304: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line305">305: </a><font color="#B22222">.   -ts_adapt_dsp_filter &lt;name&gt; - Sets predefined controller by name; use -help for a list of available controllers</font>
+
+<a name="line307">307: </a><font color="#B22222">    Filter names:</font>
+<a name="line308">308: </a><font color="#B22222">+  basic - similar to `<a href="../../../../../manualpages/TS/TSADAPTBASIC.html">TSADAPTBASIC</a>` but with different criteria for step rejections.</font>
+<a name="line309">309: </a><font color="#B22222">.  PI30, PI42, PI33, PI34 - PI controllers.</font>
+<a name="line310">310: </a><font color="#B22222">.  PC11, PC47, PC36 - predictive controllers.</font>
+<a name="line311">311: </a><font color="#B22222">.  H0211, H211b, H211PI - digital filters with orders dynamics=2, adaptivity=1, filter=1.</font>
+<a name="line312">312: </a><font color="#B22222">.  H0312, H312b, H312PID - digital filters with orders dynamics=3, adaptivity=1, filter=2.</font>
+<a name="line313">313: </a><font color="#B22222">-  H0321, H321 - digital filters with orders dynamics=3, adaptivity=2, filter=1.</font>
+
+<a name="line315">315: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line317">317: </a><font color="#B22222">   References:</font>
+<a name="line318">318: </a><font color="#B22222">.  * - http://dx.doi.org/10.1145/641876.641877</font>
+
+<a name="line320">320: </a><font color="#B22222">.seealso: [](chapter_ts), `<a href="../../../../../manualpages/TS/TS.html">TS</a>`, `<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a>`, `<a href="../../../../../manualpages/TS/TSGetAdapt.html">TSGetAdapt</a>()`, `<a href="../../../../../manualpages/TS/TSAdaptDSPSetPID.html">TSAdaptDSPSetPID</a>()`</font>
+<a name="line321">321: </a><font color="#B22222">@*/</font>
+<a name="line322">322: </a><strong><font color="#4169E1"><a name="TSAdaptDSPSetFilter"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/TS/TSAdaptDSPSetFilter.html">TSAdaptDSPSetFilter</a>(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, const char *name)</font></strong>
+<a name="line323">323: </a>{
+<a name="line324">324: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line327">327: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(adapt, <font color="#666666">"TSAdaptDSPSetFilter_C"</font>, (<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a>, const char *), (adapt, name));
+<a name="line328">328: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line329">329: </a>}
+
+<a name="line331">331: </a><font color="#B22222">/*@</font>
+<a name="line332">332: </a><font color="#B22222">   <a href="../../../../../manualpages/TS/TSAdaptDSPSetPID.html">TSAdaptDSPSetPID</a> - Set the PID controller parameters</font>
+
+<a name="line334">334: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line335">335: </a><font color="#B22222">+  adapt - adaptive controller context</font>
+<a name="line336">336: </a><font color="#B22222">.  kkI - Integral parameter</font>
+<a name="line337">337: </a><font color="#B22222">.  kkP - Proportional parameter</font>
+<a name="line338">338: </a><font color="#B22222">-  kkD - Derivative parameter</font>
+
+<a name="line340">340: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line341">341: </a><font color="#B22222">.   -ts_adapt_dsp_pid &lt;kkI,kkP,kkD&gt; - Sets PID controller parameters</font>
+
+<a name="line343">343: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line345">345: </a><font color="#B22222">   References:</font>
+<a name="line346">346: </a><font color="#B22222">.  * - http://dx.doi.org/10.1016/j.cam.2005.03.008</font>
+
+<a name="line348">348: </a><font color="#B22222">.seealso: [](chapter_ts), `<a href="../../../../../manualpages/TS/TS.html">TS</a>`, `<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a>`, `<a href="../../../../../manualpages/TS/TSGetAdapt.html">TSGetAdapt</a>()`, `<a href="../../../../../manualpages/TS/TSAdaptDSPSetFilter.html">TSAdaptDSPSetFilter</a>()`</font>
+<a name="line349">349: </a><font color="#B22222">@*/</font>
+<a name="line350">350: </a><strong><font color="#4169E1"><a name="TSAdaptDSPSetPID"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/TS/TSAdaptDSPSetPID.html">TSAdaptDSPSetPID</a>(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kkI, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kkP, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> kkD)</font></strong>
+<a name="line351">351: </a>{
+<a name="line352">352: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line357">357: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(adapt, <font color="#666666">"TSAdaptDSPSetPID_C"</font>, (<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>), (adapt, kkI, kkP, kkD));
+<a name="line358">358: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line359">359: </a>}
+
+<a name="line361">361: </a><font color="#B22222">/*MC</font>
+<a name="line362">362: </a><font color="#B22222">   <a href="../../../../../manualpages/TS/TSADAPTDSP.html">TSADAPTDSP</a> - Adaptive controller for time-stepping based on digital signal processing (DSP)</font>
+
+<a name="line364">364: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line365">365: </a><font color="#B22222">+   -ts_adapt_dsp_filter &lt;name&gt; - Sets predefined controller by name; use -help for a list of available controllers</font>
+<a name="line366">366: </a><font color="#B22222">.   -ts_adapt_dsp_pid &lt;kkI,kkP,kkD&gt; - Sets PID controller parameters</font>
+<a name="line367">367: </a><font color="#B22222">.   -ts_adapt_dsp_kbeta &lt;b1,b2,b2&gt; - Sets general filter parameters</font>
+<a name="line368">368: </a><font color="#B22222">-   -ts_adapt_dsp_alpha &lt;a2,a3&gt; - Sets general filter parameters</font>
+
+<a name="line370">370: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line372">372: </a><font color="#B22222">   References:</font>
+<a name="line373">373: </a><font color="#B22222">+  * - http://dx.doi.org/10.1145/641876.641877</font>
+<a name="line374">374: </a><font color="#B22222">-  * - http://dx.doi.org/10.1016/j.cam.2005.03.008</font>
+
+<a name="line376">376: </a><font color="#B22222">.seealso: [](chapter_ts), `<a href="../../../../../manualpages/TS/TS.html">TS</a>`, `<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a>`, `<a href="../../../../../manualpages/TS/TSGetAdapt.html">TSGetAdapt</a>()`, `<a href="../../../../../manualpages/TS/TSAdaptDSPSetPID.html">TSAdaptDSPSetPID</a>()`, `<a href="../../../../../manualpages/TS/TSAdaptDSPSetFilter.html">TSAdaptDSPSetFilter</a>()`, `<a href="../../../../../manualpages/TS/TSAdaptType.html">TSAdaptType</a>`</font>
+<a name="line377">377: </a><font color="#B22222">M*/</font>
+<a name="line378">378: </a><strong><font color="#4169E1"><a name="TSAdaptCreate_DSP"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TSAdaptCreate_DSP(<a href="../../../../../manualpages/TS/TSAdapt.html">TSAdapt</a> adapt)</font></strong>
+<a name="line379">379: </a>{
+<a name="line380">380: </a>  TSAdapt_DSP *dsp;
+
+<a name="line382">382: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line383">383: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;dsp));
+<a name="line384">384: </a>  adapt-&gt;reject_safety = 1.0; <font color="#B22222">/* unused */</font>
+
+<a name="line386">386: </a>  adapt-&gt;data                = (void *)dsp;
+<a name="line387">387: </a>  adapt-&gt;ops-&gt;choose         = TSAdaptChoose_DSP;
+<a name="line388">388: </a>  adapt-&gt;ops-&gt;setfromoptions = TSAdaptSetFromOptions_DSP;
+<a name="line389">389: </a>  adapt-&gt;ops-&gt;destroy        = TSAdaptDestroy_DSP;
+<a name="line390">390: </a>  adapt-&gt;ops-&gt;view           = TSAdaptView_DSP;
+
+<a name="line392">392: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt, <font color="#666666">"TSAdaptDSPSetFilter_C"</font>, TSAdaptDSPSetFilter_DSP));
+<a name="line393">393: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)adapt, <font color="#666666">"TSAdaptDSPSetPID_C"</font>, TSAdaptDSPSetPID_DSP));
+
+<a name="line395">395: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TSAdaptDSPSetFilter_DSP(adapt, <font color="#666666">"PI42"</font>));
+<a name="line396">396: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TSAdaptRestart_DSP(adapt));
+<a name="line397">397: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line398">398: </a>}
+</pre>
+</body>
+
+</html>

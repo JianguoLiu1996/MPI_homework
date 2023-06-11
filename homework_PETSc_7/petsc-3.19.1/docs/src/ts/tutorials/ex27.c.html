@@ -1,0 +1,352 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ts/tutorials/ex27.c">Actual source code: ex27.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:34+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>static char help[] = <font color="#666666">"Time-Dependent Reactive Flow example in 2D with Darcy Flow"</font>;
+
+<a name="line3">  3: </a><font color="#B22222">/*</font>
+
+<a name="line5">  5: </a><font color="#B22222">This example solves the elementary chemical reaction:</font>
+
+<a name="line7">  7: </a><font color="#B22222">SP_A + 2SP_B = SP_C</font>
+
+<a name="line9">  9: </a><font color="#B22222">Subject to predetermined flow modeled as though it were in a porous media.</font>
+<a name="line10"> 10: </a><font color="#B22222">This flow is modeled as advection and diffusion of the three species as</font>
+
+<a name="line12"> 12: </a><font color="#B22222">v = porosity*saturation*grad(q)</font>
+
+<a name="line14"> 14: </a><font color="#B22222">and the time-dependent equation solved for each species as</font>
+<a name="line15"> 15: </a><font color="#B22222">advection + diffusion + reaction:</font>
+
+<a name="line17"> 17: </a><font color="#B22222">v dot grad SP_i + dSP_i / dt + dispersivity*div*grad(SP_i) + R(SP_i) = 0</font>
+
+<a name="line19"> 19: </a><font color="#B22222">The following options are available:</font>
+
+<a name="line21"> 21: </a><font color="#B22222">-length_x - The length of the domain in the direction of the flow</font>
+<a name="line22"> 22: </a><font color="#B22222">-length_y - The length of the domain in the direction orthogonal to the flow</font>
+
+<a name="line24"> 24: </a><font color="#B22222">-gradq_inflow - The inflow speed as if the saturation and porosity were 1.</font>
+<a name="line25"> 25: </a><font color="#B22222">-saturation - The saturation of the porous medium.</font>
+<a name="line26"> 26: </a><font color="#B22222">-porosity - The porosity of the medium.</font>
+<a name="line27"> 27: </a><font color="#B22222">-dispersivity - The dispersivity of the flow.</font>
+<a name="line28"> 28: </a><font color="#B22222">-rate_constant - The rate constant for the chemical reaction</font>
+<a name="line29"> 29: </a><font color="#B22222">-stoich - The stoichiometry matrix for the reaction</font>
+<a name="line30"> 30: </a><font color="#B22222">-sp_inflow - The species concentrations at the inflow</font>
+<a name="line31"> 31: </a><font color="#B22222">-sp_0 - The species concentrations at time 0</font>
+
+<a name="line33"> 33: </a><font color="#B22222"> */</font>
+
+<a name="line35"> 35: </a>#include <A href="../../../include/petscdm.h.html">&lt;petscdm.h&gt;</A>
+<a name="line36"> 36: </a>#include <A href="../../../include/petscdmda.h.html">&lt;petscdmda.h&gt;</A>
+<a name="line37"> 37: </a>#include <A href="../../../include/petscsnes.h.html">&lt;petscsnes.h&gt;</A>
+<a name="line38"> 38: </a>#include <A href="../../../include/petscts.h.html">&lt;petscts.h&gt;</A>
+
+<a name="line40"> 40: </a><strong><font color="#228B22">#define N_SPECIES   3</font></strong>
+<a name="line41"> 41: </a><strong><font color="#228B22">#define N_REACTIONS 1</font></strong>
+<a name="line42"> 42: </a><strong><font color="#228B22">#define DIM         2</font></strong>
+
+<a name="line44"> 44: </a><strong><font color="#228B22">#define stoich(i, j) ctx-&gt;stoichiometry[N_SPECIES * i + j]</font></strong>
+
+<a name="line46"> 46: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line47"> 47: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> sp[N_SPECIES];
+<a name="line48"> 48: </a>} Field;
+
+<a name="line50"> 50: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line51"> 51: </a>  Field     x_inflow;
+<a name="line52"> 52: </a>  Field     x_0;
+<a name="line53"> 53: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> stoichiometry[N_SPECIES * N_REACTIONS];
+<a name="line54"> 54: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> porosity;
+<a name="line55"> 55: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> dispersivity;
+<a name="line56"> 56: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> saturation;
+<a name="line57"> 57: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> rate_constant[N_REACTIONS];
+<a name="line58"> 58: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> gradq_inflow;
+<a name="line59"> 59: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> length[DIM];
+<a name="line60"> 60: </a>} AppCtx;
+
+<a name="line62"> 62: </a><strong><font color="#4169E1">extern <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormInitialGuess(<a href="../../../manualpages/DM/DM.html">DM</a> da, AppCtx *ctx, <a href="../../../manualpages/Vec/Vec.html">Vec</a> X)</font></strong>;
+<a name="line63"> 63: </a><strong><font color="#4169E1">extern <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormIFunctionLocal(<a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> *, <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>, Field **, Field **, Field **, AppCtx *)</font></strong>;
+<a name="line64"> 64: </a><strong><font color="#4169E1">extern <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormIFunction(<a href="../../../manualpages/TS/TS.html">TS</a>, <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, void *)</font></strong>;
+<a name="line65"> 65: </a><strong><font color="#4169E1">extern <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ReactingFlowPostCheck(<a href="../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a> *, <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a> *, void *)</font></strong>;
+
+<a name="line67"> 67: </a><strong><font color="#4169E1"><a name="SetFromOptions"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SetFromOptions(AppCtx *ctx)</font></strong>
+<a name="line68"> 68: </a>{
+<a name="line69"> 69: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> i, j;
+
+<a name="line71"> 71: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line72"> 72: </a>  ctx-&gt;dispersivity     = 0.5;
+<a name="line73"> 73: </a>  ctx-&gt;porosity         = 0.25;
+<a name="line74"> 74: </a>  ctx-&gt;saturation       = 1.0;
+<a name="line75"> 75: </a>  ctx-&gt;gradq_inflow     = 1.0;
+<a name="line76"> 76: </a>  ctx-&gt;rate_constant[0] = 0.5;
+
+<a name="line78"> 78: </a>  ctx-&gt;length[0] = 100.0;
+<a name="line79"> 79: </a>  ctx-&gt;length[1] = 100.0;
+
+<a name="line81"> 81: </a>  ctx-&gt;x_0.sp[0] = 0.0;
+<a name="line82"> 82: </a>  ctx-&gt;x_0.sp[1] = 0.0;
+<a name="line83"> 83: </a>  ctx-&gt;x_0.sp[2] = 0.0;
+
+<a name="line85"> 85: </a>  ctx-&gt;x_inflow.sp[0] = 0.05;
+<a name="line86"> 86: </a>  ctx-&gt;x_inflow.sp[1] = 0.05;
+<a name="line87"> 87: </a>  ctx-&gt;x_inflow.sp[2] = 0.0;
+
+<a name="line89"> 89: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; N_REACTIONS; i++) {
+<a name="line90"> 90: </a>    <font color="#4169E1">for</font> (j = 0; j &lt; N_SPECIES; j++) stoich(i, j) = 0.;
+<a name="line91"> 91: </a>  }
+
+<a name="line93"> 93: </a>  <font color="#B22222">/* set up a pretty easy example */</font>
+<a name="line94"> 94: </a>  stoich(0, 0) = -1.;
+<a name="line95"> 95: </a>  stoich(0, 1) = -2.;
+<a name="line96"> 96: </a>  stoich(0, 2) = 1.;
+
+<a name="line98"> 98: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> as = N_SPECIES;
+<a name="line99"> 99: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-length_x"</font>, &amp;ctx-&gt;length[0], NULL));
+<a name="line100">100: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-length_y"</font>, &amp;ctx-&gt;length[1], NULL));
+<a name="line101">101: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-porosity"</font>, &amp;ctx-&gt;porosity, NULL));
+<a name="line102">102: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-saturation"</font>, &amp;ctx-&gt;saturation, NULL));
+<a name="line103">103: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-dispersivity"</font>, &amp;ctx-&gt;dispersivity, NULL));
+<a name="line104">104: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-gradq_inflow"</font>, &amp;ctx-&gt;gradq_inflow, NULL));
+<a name="line105">105: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-rate_constant"</font>, &amp;ctx-&gt;rate_constant[0], NULL));
+<a name="line106">106: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetRealArray.html">PetscOptionsGetRealArray</a>(NULL, NULL, <font color="#666666">"-sp_inflow"</font>, ctx-&gt;x_inflow.sp, &amp;as, NULL));
+<a name="line107">107: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetRealArray.html">PetscOptionsGetRealArray</a>(NULL, NULL, <font color="#666666">"-sp_0"</font>, ctx-&gt;x_0.sp, &amp;as, NULL));
+<a name="line108">108: </a>  as = N_SPECIES;
+<a name="line109">109: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetRealArray.html">PetscOptionsGetRealArray</a>(NULL, NULL, <font color="#666666">"-stoich"</font>, ctx-&gt;stoichiometry, &amp;as, NULL));
+<a name="line110">110: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line111">111: </a>}
+
+<a name="line113">113: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc, char **argv)</font></strong>
+<a name="line114">114: </a>{
+<a name="line115">115: </a>  <a href="../../../manualpages/TS/TS.html">TS</a>             ts;
+<a name="line116">116: </a>  <a href="../../../manualpages/SNES/SNES.html">SNES</a>           snes;
+<a name="line117">117: </a>  <a href="../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch;
+<a name="line118">118: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>            x;
+<a name="line119">119: </a>  AppCtx         ctx;
+<a name="line120">120: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da;
+
+<a name="line122">122: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line123">123: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>(&amp;argc, &amp;argv, (char *)0, help));
+<a name="line124">124: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(SetFromOptions(&amp;ctx));
+<a name="line125">125: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSCreate.html">TSCreate</a>(<a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;ts));
+<a name="line126">126: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetType.html">TSSetType</a>(ts, <a href="../../../manualpages/TS/TSCN.html">TSCN</a>));
+<a name="line127">127: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetProblemType.html">TSSetProblemType</a>(ts, <a href="../../../manualpages/TS/TSProblemType.html">TS_NONLINEAR</a>));
+<a name="line128">128: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetIFunction.html">TSSetIFunction</a>(ts, NULL, FormIFunction, &amp;ctx));
+<a name="line129">129: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDACreate2d.html">DMDACreate2d</a>(<a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <a href="../../../manualpages/DM/DMBoundaryType.html">DM_BOUNDARY_NONE</a>, <a href="../../../manualpages/DM/DMBoundaryType.html">DM_BOUNDARY_NONE</a>, <a href="../../../manualpages/DMDA/DMDAStencilType.html">DMDA_STENCIL_STAR</a>, -4, -4, <a href="../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, N_SPECIES, 1, NULL, NULL, &amp;da));
+<a name="line130">130: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMSetFromOptions.html">DMSetFromOptions</a>(da));
+<a name="line131">131: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMSetUp.html">DMSetUp</a>(da));
+<a name="line132">132: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetUniformCoordinates.html">DMDASetUniformCoordinates</a>(da, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0));
+<a name="line133">133: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 0, <font color="#666666">"species A"</font>));
+<a name="line134">134: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 1, <font color="#666666">"species B"</font>));
+<a name="line135">135: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 2, <font color="#666666">"species C"</font>));
+<a name="line136">136: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMSetApplicationContext.html">DMSetApplicationContext</a>(da, &amp;ctx));
+<a name="line137">137: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMCreateGlobalVector.html">DMCreateGlobalVector</a>(da, &amp;x));
+<a name="line138">138: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(FormInitialGuess(da, &amp;ctx, x));
+
+<a name="line140">140: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetDM.html">TSSetDM</a>(ts, da));
+<a name="line141">141: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetMaxTime.html">TSSetMaxTime</a>(ts, 1000.0));
+<a name="line142">142: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetExactFinalTime.html">TSSetExactFinalTime</a>(ts, <a href="../../../manualpages/TS/TSExactFinalTimeOption.html">TS_EXACTFINALTIME_STEPOVER</a>));
+<a name="line143">143: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetTimeStep.html">TSSetTimeStep</a>(ts, 1.0));
+<a name="line144">144: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetSolution.html">TSSetSolution</a>(ts, x));
+<a name="line145">145: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSetFromOptions.html">TSSetFromOptions</a>(ts));
+
+<a name="line147">147: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetSNES.html">TSGetSNES</a>(ts, &amp;snes));
+<a name="line148">148: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESGetLineSearch.html">SNESGetLineSearch</a>(snes, &amp;linesearch));
+<a name="line149">149: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESLineSearchSetPostCheck.html">SNESLineSearchSetPostCheck</a>(linesearch, ReactingFlowPostCheck, (void *)&amp;ctx));
+<a name="line150">150: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESSetFromOptions.html">SNESSetFromOptions</a>(snes));
+<a name="line151">151: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSSolve.html">TSSolve</a>(ts, x));
+
+<a name="line153">153: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;x));
+<a name="line154">154: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSDestroy.html">TSDestroy</a>(&amp;ts));
+<a name="line155">155: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMDestroy.html">DMDestroy</a>(&amp;da));
+<a name="line156">156: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a>());
+<a name="line157">157: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line158">158: </a>}
+
+<a name="line160">160: </a><font color="#B22222">/* ------------------------------------------------------------------- */</font>
+
+<a name="line162">162: </a><strong><font color="#4169E1"><a name="FormInitialGuess"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormInitialGuess(<a href="../../../manualpages/DM/DM.html">DM</a> da, AppCtx *ctx, <a href="../../../manualpages/Vec/Vec.html">Vec</a> X)</font></strong>
+<a name="line163">163: </a>{
+<a name="line164">164: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> i, j, l, Mx, My, xs, ys, xm, ym;
+<a name="line165">165: </a>  Field  **x;
+
+<a name="line167">167: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line168">168: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(da, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, &amp;Mx, &amp;My, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>));
+<a name="line169">169: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArray.html">DMDAVecGetArray</a>(da, X, &amp;x));
+<a name="line170">170: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetCorners.html">DMDAGetCorners</a>(da, &amp;xs, &amp;ys, NULL, &amp;xm, &amp;ym, NULL));
+
+<a name="line172">172: </a>  <font color="#4169E1">for</font> (j = ys; j &lt; ys + ym; j++) {
+<a name="line173">173: </a>    <font color="#4169E1">for</font> (i = xs; i &lt; xs + xm; i++) {
+<a name="line174">174: </a>      <font color="#4169E1">for</font> (l = 0; l &lt; N_SPECIES; l++) {
+<a name="line175">175: </a>        <font color="#4169E1">if</font> (i == 0) {
+<a name="line176">176: </a>          <font color="#4169E1">if</font> (l == 0) x[j][i].sp[l] = (ctx-&gt;x_inflow.sp[l] * ((<a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>)j) / (My - 1));
+<a name="line177">177: </a>          <font color="#4169E1">else</font> <font color="#4169E1">if</font> (l == 1) x[j][i].sp[l] = (ctx-&gt;x_inflow.sp[l] * (1. - ((<a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>)j) / (My - 1)));
+<a name="line178">178: </a>          <font color="#4169E1">else</font> x[j][i].sp[l] = ctx-&gt;x_0.sp[l];
+<a name="line179">179: </a>        }
+<a name="line180">180: </a>      }
+<a name="line181">181: </a>    }
+<a name="line182">182: </a>  }
+<a name="line183">183: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArray.html">DMDAVecRestoreArray</a>(da, X, &amp;x));
+<a name="line184">184: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line185">185: </a>}
+
+<a name="line187">187: </a><strong><font color="#4169E1"><a name="FormIFunctionLocal"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormIFunctionLocal(<a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> *info, <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> ptime, Field **x, Field **xt, Field **f, AppCtx *ctx)</font></strong>
+<a name="line188">188: </a>{
+<a name="line189">189: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>    i, j, l, m;
+<a name="line190">190: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>   hx, hy, dhx, dhy, hxdhy, hydhx, scale;
+<a name="line191">191: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> u, uxx, uyy;
+<a name="line192">192: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> vx, vy, sxp, syp, sxm, sym, avx, vxp, vxm, avy, vyp, vym, f_advect;
+<a name="line193">193: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> rate;
+
+<a name="line195">195: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line196">196: </a>  hx = ctx-&gt;length[0] / ((<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(info-&gt;mx - 1));
+<a name="line197">197: </a>  hy = ctx-&gt;length[1] / ((<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(info-&gt;my - 1));
+
+<a name="line199">199: </a>  dhx   = 1. / hx;
+<a name="line200">200: </a>  dhy   = 1. / hy;
+<a name="line201">201: </a>  hxdhy = hx / hy;
+<a name="line202">202: </a>  hydhx = hy / hx;
+<a name="line203">203: </a>  scale = hx * hy;
+
+<a name="line205">205: </a>  <font color="#4169E1">for</font> (j = info-&gt;ys; j &lt; info-&gt;ys + info-&gt;ym; j++) {
+<a name="line206">206: </a>    <font color="#4169E1">for</font> (i = info-&gt;xs; i &lt; info-&gt;xs + info-&gt;xm; i++) {
+<a name="line207">207: </a>      vx  = ctx-&gt;gradq_inflow * ctx-&gt;porosity * ctx-&gt;saturation;
+<a name="line208">208: </a>      vy  = 0.0 * dhy;
+<a name="line209">209: </a>      avx = PetscAbsScalar(vx);
+<a name="line210">210: </a>      vxp = .5 * (vx + avx);
+<a name="line211">211: </a>      vxm = .5 * (vx - avx);
+<a name="line212">212: </a>      avy = PetscAbsScalar(vy);
+<a name="line213">213: </a>      vyp = .5 * (vy + avy);
+<a name="line214">214: </a>      vym = .5 * (vy - avy);
+<a name="line215">215: </a>      <font color="#B22222">/* chemical reactions */</font>
+<a name="line216">216: </a>      <font color="#4169E1">for</font> (l = 0; l &lt; N_SPECIES; l++) {
+<a name="line217">217: </a>        <font color="#B22222">/* determine the velocites as the gradients of the pressure */</font>
+<a name="line218">218: </a>        <font color="#4169E1">if</font> (i == 0) {
+<a name="line219">219: </a>          sxp = (x[j][i + 1].sp[l] - x[j][i].sp[l]) * dhx;
+<a name="line220">220: </a>          sxm = sxp;
+<a name="line221">221: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i == info-&gt;mx - 1) {
+<a name="line222">222: </a>          sxp = (x[j][i].sp[l] - x[j][i - 1].sp[l]) * dhx;
+<a name="line223">223: </a>          sxm = sxp;
+<a name="line224">224: </a>        } <font color="#4169E1">else</font> {
+<a name="line225">225: </a>          sxm = (x[j][i + 1].sp[l] - x[j][i].sp[l]) * dhx;
+<a name="line226">226: </a>          sxp = (x[j][i].sp[l] - x[j][i - 1].sp[l]) * dhx;
+<a name="line227">227: </a>        }
+<a name="line228">228: </a>        <font color="#4169E1">if</font> (j == 0) {
+<a name="line229">229: </a>          syp = (x[j + 1][i].sp[l] - x[j][i].sp[l]) * dhy;
+<a name="line230">230: </a>          sym = syp;
+<a name="line231">231: </a>        } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == info-&gt;my - 1) {
+<a name="line232">232: </a>          syp = (x[j][i].sp[l] - x[j - 1][i].sp[l]) * dhy;
+<a name="line233">233: </a>          sym = syp;
+<a name="line234">234: </a>        } <font color="#4169E1">else</font> {
+<a name="line235">235: </a>          sym = (x[j + 1][i].sp[l] - x[j][i].sp[l]) * dhy;
+<a name="line236">236: </a>          syp = (x[j][i].sp[l] - x[j - 1][i].sp[l]) * dhy;
+<a name="line237">237: </a>        } <font color="#B22222">/* 4 flops per species*point */</font>
+
+<a name="line239">239: </a>        <font color="#4169E1">if</font> (i == 0) {
+<a name="line240">240: </a>          <font color="#4169E1">if</font> (l == 0) f[j][i].sp[l] = (x[j][i].sp[l] - ctx-&gt;x_inflow.sp[l] * ((<a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>)j) / (info-&gt;my - 1));
+<a name="line241">241: </a>          <font color="#4169E1">else</font> <font color="#4169E1">if</font> (l == 1) f[j][i].sp[l] = (x[j][i].sp[l] - ctx-&gt;x_inflow.sp[l] * (1. - ((<a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>)j) / (info-&gt;my - 1)));
+<a name="line242">242: </a>          <font color="#4169E1">else</font> f[j][i].sp[l] = x[j][i].sp[l];
+
+<a name="line244">244: </a>        } <font color="#4169E1">else</font> {
+<a name="line245">245: </a>          f[j][i].sp[l] = xt[j][i].sp[l] * scale;
+<a name="line246">246: </a>          u             = x[j][i].sp[l];
+<a name="line247">247: </a>          <font color="#4169E1">if</font> (j == 0) uyy = u - x[j + 1][i].sp[l];
+<a name="line248">248: </a>          <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j == info-&gt;my - 1) uyy = u - x[j - 1][i].sp[l];
+<a name="line249">249: </a>          <font color="#4169E1">else</font> uyy = (2.0 * u - x[j - 1][i].sp[l] - x[j + 1][i].sp[l]) * hxdhy;
+
+<a name="line251">251: </a>          <font color="#4169E1">if</font> (i != info-&gt;mx - 1) uxx = (2.0 * u - x[j][i - 1].sp[l] - x[j][i + 1].sp[l]) * hydhx;
+<a name="line252">252: </a>          <font color="#4169E1">else</font> uxx = u - x[j][i - 1].sp[l];
+<a name="line253">253: </a>          <font color="#B22222">/* 10 flops per species*point */</font>
+
+<a name="line255">255: </a>          f_advect = 0.;
+<a name="line256">256: </a>          f_advect += scale * (vxp * sxp + vxm * sxm);
+<a name="line257">257: </a>          f_advect += scale * (vyp * syp + vym * sym);
+<a name="line258">258: </a>          f[j][i].sp[l] += f_advect + ctx-&gt;dispersivity * (uxx + uyy);
+<a name="line259">259: </a>          <font color="#B22222">/* 14 flops per species*point */</font>
+<a name="line260">260: </a>        }
+<a name="line261">261: </a>      }
+<a name="line262">262: </a>      <font color="#B22222">/* reaction */</font>
+<a name="line263">263: </a>      <font color="#4169E1">if</font> (i != 0) {
+<a name="line264">264: </a>        <font color="#4169E1">for</font> (m = 0; m &lt; N_REACTIONS; m++) {
+<a name="line265">265: </a>          rate = ctx-&gt;rate_constant[m];
+<a name="line266">266: </a>          <font color="#4169E1">for</font> (l = 0; l &lt; N_SPECIES; l++) {
+<a name="line267">267: </a>            <font color="#4169E1">if</font> (stoich(m, l) &lt; 0) {
+<a name="line268">268: </a>              <font color="#B22222">/* assume an elementary reaction */</font>
+<a name="line269">269: </a>              rate *= PetscPowScalar(x[j][i].sp[l], PetscAbsScalar(stoich(m, l)));
+<a name="line270">270: </a>              <font color="#B22222">/* ~10 flops per reaction per species per point */</font>
+<a name="line271">271: </a>            }
+<a name="line272">272: </a>          }
+<a name="line273">273: </a>          <font color="#4169E1">for</font> (l = 0; l &lt; N_SPECIES; l++) {
+<a name="line274">274: </a>            f[j][i].sp[l] += -scale * stoich(m, l) * rate; <font color="#B22222">/* Reaction term */</font>
+<a name="line275">275: </a>                                                           <font color="#B22222">/* 3 flops per reaction per species per point */</font>
+<a name="line276">276: </a>          }
+<a name="line277">277: </a>        }
+<a name="line278">278: </a>      }
+<a name="line279">279: </a>    }
+<a name="line280">280: </a>  }
+<a name="line281">281: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>((N_SPECIES * (28.0 + 13.0 * N_REACTIONS)) * info-&gt;ym * info-&gt;xm));
+<a name="line282">282: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line283">283: </a>}
+
+<a name="line285">285: </a><strong><font color="#4169E1"><a name="ReactingFlowPostCheck"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ReactingFlowPostCheck(<a href="../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch, <a href="../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../manualpages/Vec/Vec.html">Vec</a> Y, <a href="../../../manualpages/Vec/Vec.html">Vec</a> W, <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a> *changed_y, <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a> *changed_w, void *vctx)</font></strong>
+<a name="line286">286: </a>{
+<a name="line287">287: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>    i, j, l, Mx, My, xs, ys, xm, ym;
+<a name="line288">288: </a>  Field     **x;
+<a name="line289">289: </a>  <a href="../../../manualpages/SNES/SNES.html">SNES</a>        snes;
+<a name="line290">290: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>          da;
+<a name="line291">291: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> min;
+
+<a name="line293">293: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line294">294: </a>  *changed_w = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line295">295: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecMin.html">VecMin</a>(X, NULL, &amp;min));
+<a name="line296">296: </a>  <font color="#4169E1">if</font> (min &gt;= 0.) <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+
+<a name="line298">298: </a>  *changed_w = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line299">299: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESLineSearchGetSNES.html">SNESLineSearchGetSNES</a>(linesearch, &amp;snes));
+<a name="line300">300: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESGetDM.html">SNESGetDM</a>(snes, &amp;da));
+<a name="line301">301: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(da, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, &amp;Mx, &amp;My, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>));
+<a name="line302">302: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArray.html">DMDAVecGetArray</a>(da, W, &amp;x));
+<a name="line303">303: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetCorners.html">DMDAGetCorners</a>(da, &amp;xs, &amp;ys, NULL, &amp;xm, &amp;ym, NULL));
+<a name="line304">304: </a>  <font color="#4169E1">for</font> (j = ys; j &lt; ys + ym; j++) {
+<a name="line305">305: </a>    <font color="#4169E1">for</font> (i = xs; i &lt; xs + xm; i++) {
+<a name="line306">306: </a>      <font color="#4169E1">for</font> (l = 0; l &lt; N_SPECIES; l++) {
+<a name="line307">307: </a>        <font color="#4169E1">if</font> (x[j][i].sp[l] &lt; 0.) x[j][i].sp[l] = 0.;
+<a name="line308">308: </a>      }
+<a name="line309">309: </a>    }
+<a name="line310">310: </a>  }
+<a name="line311">311: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArray.html">DMDAVecRestoreArray</a>(da, W, &amp;x));
+<a name="line312">312: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line313">313: </a>}
+
+<a name="line315">315: </a><strong><font color="#4169E1"><a name="FormIFunction"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormIFunction(<a href="../../../manualpages/TS/TS.html">TS</a> ts, <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> ptime, <a href="../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../manualpages/Vec/Vec.html">Vec</a> Xdot, <a href="../../../manualpages/Vec/Vec.html">Vec</a> F, void *user)</font></strong>
+<a name="line316">316: </a>{
+<a name="line317">317: </a>  <a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> info;
+<a name="line318">318: </a>  Field       **u, **udot, **fu;
+<a name="line319">319: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>           localX;
+<a name="line320">320: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>            da;
+
+<a name="line322">322: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line323">323: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(ts, (<a href="../../../manualpages/DM/DM.html">DM</a> *)&amp;da));
+<a name="line324">324: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGetLocalVector.html">DMGetLocalVector</a>(da, &amp;localX));
+<a name="line325">325: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalBegin.html">DMGlobalToLocalBegin</a>(da, X, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, localX));
+<a name="line326">326: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalEnd.html">DMGlobalToLocalEnd</a>(da, X, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, localX));
+<a name="line327">327: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetLocalInfo.html">DMDAGetLocalInfo</a>(da, &amp;info));
+<a name="line328">328: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArrayRead.html">DMDAVecGetArrayRead</a>(da, localX, &amp;u));
+<a name="line329">329: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArrayRead.html">DMDAVecGetArrayRead</a>(da, Xdot, &amp;udot));
+<a name="line330">330: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArray.html">DMDAVecGetArray</a>(da, F, &amp;fu));
+<a name="line331">331: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(FormIFunctionLocal(&amp;info, ptime, u, udot, fu, (AppCtx *)user));
+<a name="line332">332: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArrayRead.html">DMDAVecRestoreArrayRead</a>(da, localX, &amp;u));
+<a name="line333">333: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArrayRead.html">DMDAVecRestoreArrayRead</a>(da, Xdot, &amp;udot));
+<a name="line334">334: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArray.html">DMDAVecRestoreArray</a>(da, F, &amp;fu));
+<a name="line335">335: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMRestoreLocalVector.html">DMRestoreLocalVector</a>(da, &amp;localX));
+<a name="line336">336: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line337">337: </a>}
+</pre>
+</body>
+
+</html>

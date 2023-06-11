@@ -1,0 +1,909 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/ksp/impls/gmres/gmres.c">Actual source code: gmres.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:19+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222">    This file implements GMRES (a Generalized Minimal Residual) method.</font>
+<a name="line3">  3: </a><font color="#B22222">    Reference:  Saad and Schultz, 1986.</font>
+
+<a name="line5">  5: </a><font color="#B22222">    Some comments on left vs. right preconditioning, and restarts.</font>
+<a name="line6">  6: </a><font color="#B22222">    Left and right preconditioning.</font>
+<a name="line7">  7: </a><font color="#B22222">    If right preconditioning is chosen, then the problem being solved</font>
+<a name="line8">  8: </a><font color="#B22222">    by gmres is actually</font>
+<a name="line9">  9: </a><font color="#B22222">       My =  AB^-1 y = f</font>
+<a name="line10"> 10: </a><font color="#B22222">    so the initial residual is</font>
+<a name="line11"> 11: </a><font color="#B22222">          r = f - Mx</font>
+<a name="line12"> 12: </a><font color="#B22222">    Note that B^-1 y = x or y = B x, and if x is non-zero, the initial</font>
+<a name="line13"> 13: </a><font color="#B22222">    residual is</font>
+<a name="line14"> 14: </a><font color="#B22222">          r = f - A x</font>
+<a name="line15"> 15: </a><font color="#B22222">    The final solution is then</font>
+<a name="line16"> 16: </a><font color="#B22222">          x = B^-1 y</font>
+
+<a name="line18"> 18: </a><font color="#B22222">    If left preconditioning is chosen, then the problem being solved is</font>
+<a name="line19"> 19: </a><font color="#B22222">       My = B^-1 A x = B^-1 f,</font>
+<a name="line20"> 20: </a><font color="#B22222">    and the initial residual is</font>
+<a name="line21"> 21: </a><font color="#B22222">       r  = B^-1(f - Ax)</font>
+
+<a name="line23"> 23: </a><font color="#B22222">    Restarts:  Restarts are basically solves with x0 not equal to zero.</font>
+<a name="line24"> 24: </a><font color="#B22222">    Note that we can eliminate an extra application of B^-1 between</font>
+<a name="line25"> 25: </a><font color="#B22222">    restarts as long as we don't require that the solution at the end</font>
+<a name="line26"> 26: </a><font color="#B22222">    of an unsuccessful gmres iteration always be the solution x.</font>
+<a name="line27"> 27: </a><font color="#B22222"> */</font>
+
+<a name="line29"> 29: </a>#include <A href="gmresimpl.h.html">&lt;../src/ksp/ksp/impls/gmres/gmresimpl.h&gt;</A>
+<a name="line30"> 30: </a><strong><font color="#228B22">#define GMRES_DELTA_DIRECTIONS 10</font></strong>
+<a name="line31"> 31: </a><strong><font color="#228B22">#define GMRES_DEFAULT_MAXK     30</font></strong>
+<a name="line32"> 32: </a><strong><font color="#4169E1">static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESUpdateHessenberg(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)</font></strong>;
+<a name="line33"> 33: </a><strong><font color="#4169E1">static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESBuildSoln(<a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)</font></strong>;
+
+<a name="line35"> 35: </a><strong><font color="#4169E1"><a name="KSPSetUp_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPSetUp_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line36"> 36: </a>{
+<a name="line37"> 37: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   hh, hes, rs, cc;
+<a name="line38"> 38: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   max_k, k;
+<a name="line39"> 39: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line41"> 41: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line42"> 42: </a>  max_k = gmres-&gt;max_k; <font color="#B22222">/* restart size */</font>
+<a name="line43"> 43: </a>  hh    = (max_k + 2) * (max_k + 1);
+<a name="line44"> 44: </a>  hes   = (max_k + 1) * (max_k + 1);
+<a name="line45"> 45: </a>  rs    = (max_k + 2);
+<a name="line46"> 46: </a>  cc    = (max_k + 1);
+
+<a name="line48"> 48: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCalloc5.html">PetscCalloc5</a>(hh, &amp;gmres-&gt;hh_origin, hes, &amp;gmres-&gt;hes_origin, rs, &amp;gmres-&gt;rs_origin, cc, &amp;gmres-&gt;cc_origin, cc, &amp;gmres-&gt;ss_origin));
+
+<a name="line50"> 50: </a>  <font color="#4169E1">if</font> (ksp-&gt;calc_sings) {
+<a name="line51"> 51: </a>    <font color="#B22222">/* Allocate workspace to hold Hessenberg matrix needed by lapack */</font>
+<a name="line52"> 52: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>((max_k + 3) * (max_k + 9), &amp;gmres-&gt;Rsvd));
+<a name="line53"> 53: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(6 * (max_k + 2), &amp;gmres-&gt;Dsvd));
+<a name="line54"> 54: </a>  }
+
+<a name="line56"> 56: </a>  <font color="#B22222">/* Allocate array to hold pointers to user vectors.  Note that we need</font>
+<a name="line57"> 57: </a><font color="#B22222">   4 + max_k + 1 (since we need it+1 vectors, and it &lt;= max_k) */</font>
+<a name="line58"> 58: </a>  gmres-&gt;vecs_allocated = VEC_OFFSET + 2 + max_k + gmres-&gt;nextra_vecs;
+
+<a name="line60"> 60: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(gmres-&gt;vecs_allocated, &amp;gmres-&gt;vecs));
+<a name="line61"> 61: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(VEC_OFFSET + 2 + max_k, &amp;gmres-&gt;user_work));
+<a name="line62"> 62: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(VEC_OFFSET + 2 + max_k, &amp;gmres-&gt;mwork_alloc));
+
+<a name="line64"> 64: </a>  <font color="#4169E1">if</font> (gmres-&gt;q_preallocate) {
+<a name="line65"> 65: </a>    gmres-&gt;vv_allocated = VEC_OFFSET + 2 + max_k;
+
+<a name="line67"> 67: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCreateVecs.html">KSPCreateVecs</a>(ksp, gmres-&gt;vv_allocated, &amp;gmres-&gt;user_work[0], 0, NULL));
+
+<a name="line69"> 69: </a>    gmres-&gt;mwork_alloc[0] = gmres-&gt;vv_allocated;
+<a name="line70"> 70: </a>    gmres-&gt;nwork_alloc    = 1;
+<a name="line71"> 71: </a>    <font color="#4169E1">for</font> (k = 0; k &lt; gmres-&gt;vv_allocated; k++) gmres-&gt;vecs[k] = gmres-&gt;user_work[0][k];
+<a name="line72"> 72: </a>  } <font color="#4169E1">else</font> {
+<a name="line73"> 73: </a>    gmres-&gt;vv_allocated = 5;
+
+<a name="line75"> 75: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCreateVecs.html">KSPCreateVecs</a>(ksp, 5, &amp;gmres-&gt;user_work[0], 0, NULL));
+
+<a name="line77"> 77: </a>    gmres-&gt;mwork_alloc[0] = 5;
+<a name="line78"> 78: </a>    gmres-&gt;nwork_alloc    = 1;
+<a name="line79"> 79: </a>    <font color="#4169E1">for</font> (k = 0; k &lt; gmres-&gt;vv_allocated; k++) gmres-&gt;vecs[k] = gmres-&gt;user_work[0][k];
+<a name="line80"> 80: </a>  }
+<a name="line81"> 81: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line82"> 82: </a>}
+
+<a name="line84"> 84: </a><font color="#B22222">/*</font>
+<a name="line85"> 85: </a><font color="#B22222">    Run gmres, possibly with restart.  Return residual history if requested.</font>
+<a name="line86"> 86: </a><font color="#B22222">    input parameters:</font>
+
+<a name="line88"> 88: </a><font color="#B22222">.        gmres  - structure containing parameters and work areas</font>
+
+<a name="line90"> 90: </a><font color="#B22222">    output parameters:</font>
+<a name="line91"> 91: </a><font color="#B22222">.        nres    - residuals (from preconditioned system) at each step.</font>
+<a name="line92"> 92: </a><font color="#B22222">                  If restarting, consider passing nres+it.  If null,</font>
+<a name="line93"> 93: </a><font color="#B22222">                  ignored</font>
+<a name="line94"> 94: </a><font color="#B22222">.        itcount - number of iterations used.  nres[0] to nres[itcount]</font>
+<a name="line95"> 95: </a><font color="#B22222">                  are defined.  If null, ignored.</font>
+
+<a name="line97"> 97: </a><font color="#B22222">    Notes:</font>
+<a name="line98"> 98: </a><font color="#B22222">    On entry, the value in vector VEC_VV(0) should be the initial residual</font>
+<a name="line99"> 99: </a><font color="#B22222">    (this allows shortcuts where the initial preconditioned residual is 0).</font>
+<a name="line100">100: </a><font color="#B22222"> */</font>
+<a name="line101">101: </a><strong><font color="#4169E1"><a name="KSPGMRESCycle"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESCycle(<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *itcount, <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line102">102: </a>{
+<a name="line103">103: </a>  KSP_GMRES *gmres = (KSP_GMRES *)(ksp-&gt;data);
+<a name="line104">104: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>  res, hapbnd, tt;
+<a name="line105">105: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   it = 0, max_k = gmres-&gt;max_k;
+<a name="line106">106: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  hapend = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line108">108: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line109">109: </a>  <font color="#4169E1">if</font> (itcount) *itcount = 0;
+<a name="line110">110: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormalize.html">VecNormalize</a>(VEC_VV(0), &amp;res));
+<a name="line111">111: </a>  <a href="../../../../../manualpages/KSP/KSPCheckNorm.html">KSPCheckNorm</a>(ksp, res);
+
+<a name="line113">113: </a>  <font color="#B22222">/* the constant .1 is arbitrary, just some measure at how incorrect the residuals are */</font>
+<a name="line114">114: </a>  <font color="#4169E1">if</font> ((ksp-&gt;rnorm &gt; 0.0) &amp;&amp; (<a href="../../../../../manualpages/Sys/PetscAbsReal.html">PetscAbsReal</a>(res - ksp-&gt;rnorm) &gt; gmres-&gt;breakdowntol * gmres-&gt;rnorm0)) {
+<a name="line115">115: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!ksp-&gt;errorifnotconverged, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_CONV_FAILED</a>, <font color="#666666">"Residual norm computed by GMRES recursion formula %g is far from the computed residual norm %g at restart, residual norm at start of cycle %g"</font>,
+<a name="line116">116: </a>               (double)ksp-&gt;rnorm, (double)res, (double)gmres-&gt;rnorm0);
+<a name="line117">117: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(ksp, <font color="#666666">"Residual norm computed by GMRES recursion formula %g is far from the computed residual norm %g at restart, residual norm at start of cycle %g"</font>, (double)ksp-&gt;rnorm, (double)res, (double)gmres-&gt;rnorm0));
+<a name="line118">118: </a>    ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html">KSP_DIVERGED_BREAKDOWN</a>;
+<a name="line119">119: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line120">120: </a>  }
+<a name="line121">121: </a>  *GRS(0) = gmres-&gt;rnorm0 = res;
+
+<a name="line123">123: </a>  <font color="#B22222">/* check for the convergence */</font>
+<a name="line124">124: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectSAWsTakeAccess.html">PetscObjectSAWsTakeAccess</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp));
+<a name="line125">125: </a>  ksp-&gt;rnorm = res;
+<a name="line126">126: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectSAWsGrantAccess.html">PetscObjectSAWsGrantAccess</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp));
+<a name="line127">127: </a>  gmres-&gt;it = (it - 1);
+<a name="line128">128: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPLogResidualHistory(ksp, res));
+<a name="line129">129: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPLogErrorHistory(ksp));
+<a name="line130">130: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPMonitor.html">KSPMonitor</a>(ksp, ksp-&gt;its, res));
+<a name="line131">131: </a>  <font color="#4169E1">if</font> (!res) {
+<a name="line132">132: </a>    ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSP_CONVERGED_ATOL.html">KSP_CONVERGED_ATOL</a>;
+<a name="line133">133: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(ksp, <font color="#666666">"Converged due to zero residual norm on entry\n"</font>));
+<a name="line134">134: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line135">135: </a>  }
+
+<a name="line137">137: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*ksp-&gt;converged)(ksp, ksp-&gt;its, res, &amp;ksp-&gt;reason, ksp-&gt;cnvP));
+<a name="line138">138: </a>  <font color="#4169E1">while</font> (!ksp-&gt;reason &amp;&amp; it &lt; max_k &amp;&amp; ksp-&gt;its &lt; ksp-&gt;max_it) {
+<a name="line139">139: </a>    <font color="#4169E1">if</font> (it) {
+<a name="line140">140: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPLogResidualHistory(ksp, res));
+<a name="line141">141: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPLogErrorHistory(ksp));
+<a name="line142">142: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPMonitor.html">KSPMonitor</a>(ksp, ksp-&gt;its, res));
+<a name="line143">143: </a>    }
+<a name="line144">144: </a>    gmres-&gt;it = (it - 1);
+<a name="line145">145: </a>    <font color="#4169E1">if</font> (gmres-&gt;vv_allocated &lt;= it + VEC_OFFSET + 1) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPGMRESGetNewVectors(ksp, it + 1));
+<a name="line146">146: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSP_PCApplyBAorAB(ksp, VEC_VV(it), VEC_VV(1 + it), VEC_TEMP_MATOP));
+
+<a name="line148">148: </a>    <font color="#B22222">/* update hessenberg matrix and do Gram-Schmidt */</font>
+<a name="line149">149: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*gmres-&gt;orthog)(ksp, it));
+<a name="line150">150: </a>    <font color="#4169E1">if</font> (ksp-&gt;reason) <font color="#4169E1">break</font>;
+
+<a name="line152">152: </a>    <font color="#B22222">/* vv(i+1) . vv(i+1) */</font>
+<a name="line153">153: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormalize.html">VecNormalize</a>(VEC_VV(it + 1), &amp;tt));
+<a name="line154">154: </a>    <a href="../../../../../manualpages/KSP/KSPCheckNorm.html">KSPCheckNorm</a>(ksp, tt);
+
+<a name="line156">156: </a>    <font color="#B22222">/* save the magnitude */</font>
+<a name="line157">157: </a>    *HH(it + 1, it)  = tt;
+<a name="line158">158: </a>    *HES(it + 1, it) = tt;
+
+<a name="line160">160: </a>    <font color="#B22222">/* check for the happy breakdown */</font>
+<a name="line161">161: </a>    hapbnd = PetscAbsScalar(tt / *GRS(it));
+<a name="line162">162: </a>    <font color="#4169E1">if</font> (hapbnd &gt; gmres-&gt;haptol) hapbnd = gmres-&gt;haptol;
+<a name="line163">163: </a>    <font color="#4169E1">if</font> (tt &lt; hapbnd) {
+<a name="line164">164: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(ksp, <font color="#666666">"Detected happy breakdown, current hapbnd = %14.12e tt = %14.12e\n"</font>, (double)hapbnd, (double)tt));
+<a name="line165">165: </a>      hapend = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line166">166: </a>    }
+<a name="line167">167: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPGMRESUpdateHessenberg(ksp, it, hapend, &amp;res));
+
+<a name="line169">169: </a>    it++;
+<a name="line170">170: </a>    gmres-&gt;it = (it - 1); <font color="#B22222">/* For converged */</font>
+<a name="line171">171: </a>    ksp-&gt;its++;
+<a name="line172">172: </a>    ksp-&gt;rnorm = res;
+<a name="line173">173: </a>    <font color="#4169E1">if</font> (ksp-&gt;reason) <font color="#4169E1">break</font>;
+
+<a name="line175">175: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*ksp-&gt;converged)(ksp, ksp-&gt;its, res, &amp;ksp-&gt;reason, ksp-&gt;cnvP));
+
+<a name="line177">177: </a>    <font color="#B22222">/* Catch error in happy breakdown and signal convergence and break from loop */</font>
+<a name="line178">178: </a>    <font color="#4169E1">if</font> (hapend) {
+<a name="line179">179: </a>      <font color="#4169E1">if</font> (ksp-&gt;normtype == <a href="../../../../../manualpages/KSP/KSP_NORM_NONE.html">KSP_NORM_NONE</a>) { <font color="#B22222">/* convergence test was skipped in this case */</font>
+<a name="line180">180: </a>        ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_CONVERGED_HAPPY_BREAKDOWN</a>;
+<a name="line181">181: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (!ksp-&gt;reason) {
+<a name="line182">182: </a>        <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!ksp-&gt;errorifnotconverged, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_NOT_CONVERGED</a>, <font color="#666666">"You reached the happy break down, but convergence was not indicated. Residual norm = %g"</font>, (double)res);
+<a name="line183">183: </a>        ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html">KSP_DIVERGED_BREAKDOWN</a>;
+<a name="line184">184: </a>        <font color="#4169E1">break</font>;
+<a name="line185">185: </a>      }
+<a name="line186">186: </a>    }
+<a name="line187">187: </a>  }
+
+<a name="line189">189: </a>  <font color="#B22222">/* Monitor if we know that we will not return for a restart */</font>
+<a name="line190">190: </a>  <font color="#4169E1">if</font> (it &amp;&amp; (ksp-&gt;reason || ksp-&gt;its &gt;= ksp-&gt;max_it)) {
+<a name="line191">191: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPLogResidualHistory(ksp, res));
+<a name="line192">192: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPLogErrorHistory(ksp));
+<a name="line193">193: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPMonitor.html">KSPMonitor</a>(ksp, ksp-&gt;its, res));
+<a name="line194">194: </a>  }
+
+<a name="line196">196: </a>  <font color="#4169E1">if</font> (itcount) *itcount = it;
+
+<a name="line198">198: </a>  <font color="#B22222">/*</font>
+<a name="line199">199: </a><font color="#B22222">    Down here we have to solve for the "best" coefficients of the Krylov</font>
+<a name="line200">200: </a><font color="#B22222">    columns, add the solution values together, and possibly unwind the</font>
+<a name="line201">201: </a><font color="#B22222">    preconditioning from the solution</font>
+<a name="line202">202: </a><font color="#B22222">   */</font>
+<a name="line203">203: </a>  <font color="#B22222">/* Form the solution (or the solution so far) */</font>
+<a name="line204">204: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPGMRESBuildSoln(GRS(0), ksp-&gt;vec_sol, ksp-&gt;vec_sol, ksp, it - 1));
+<a name="line205">205: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line206">206: </a>}
+
+<a name="line208">208: </a><strong><font color="#4169E1"><a name="KSPSolve_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPSolve_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line209">209: </a>{
+<a name="line210">210: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   its, itcount, i;
+<a name="line211">211: </a>  KSP_GMRES *gmres      = (KSP_GMRES *)ksp-&gt;data;
+<a name="line212">212: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  guess_zero = ksp-&gt;guess_zero;
+<a name="line213">213: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   N          = gmres-&gt;max_k + 1;
+
+<a name="line215">215: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line216">216: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!ksp-&gt;calc_sings || gmres-&gt;Rsvd, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Must call <a href="../../../../../manualpages/KSP/KSPSetComputeSingularValues.html">KSPSetComputeSingularValues</a>() before <a href="../../../../../manualpages/KSP/KSPSetUp.html">KSPSetUp</a>() is called"</font>);
+
+<a name="line218">218: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectSAWsTakeAccess.html">PetscObjectSAWsTakeAccess</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp));
+<a name="line219">219: </a>  ksp-&gt;its = 0;
+<a name="line220">220: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectSAWsGrantAccess.html">PetscObjectSAWsGrantAccess</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp));
+
+<a name="line222">222: </a>  itcount          = 0;
+<a name="line223">223: </a>  gmres-&gt;fullcycle = 0;
+<a name="line224">224: </a>  ksp-&gt;rnorm       = -1.0; <font color="#B22222">/* special marker for KSPGMRESCycle() */</font>
+<a name="line225">225: </a>  <font color="#4169E1">while</font> (!ksp-&gt;reason || (ksp-&gt;rnorm == -1 &amp;&amp; ksp-&gt;reason == <a href="../../../../../manualpages/KSP/KSP_DIVERGED_PC_FAILED.html">KSP_DIVERGED_PC_FAILED</a>)) {
+<a name="line226">226: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPInitialResidual.html">KSPInitialResidual</a>(ksp, ksp-&gt;vec_sol, VEC_TEMP, VEC_TEMP_MATOP, VEC_VV(0), ksp-&gt;vec_rhs));
+<a name="line227">227: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPGMRESCycle(&amp;its, ksp));
+<a name="line228">228: </a>    <font color="#B22222">/* Store the Hessenberg matrix and the basis vectors of the Krylov subspace</font>
+<a name="line229">229: </a><font color="#B22222">    if the cycle is complete for the computation of the Ritz pairs */</font>
+<a name="line230">230: </a>    <font color="#4169E1">if</font> (its == gmres-&gt;max_k) {
+<a name="line231">231: </a>      gmres-&gt;fullcycle++;
+<a name="line232">232: </a>      <font color="#4169E1">if</font> (ksp-&gt;calc_ritz) {
+<a name="line233">233: </a>        <font color="#4169E1">if</font> (!gmres-&gt;hes_ritz) {
+<a name="line234">234: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(N * N, &amp;gmres-&gt;hes_ritz));
+<a name="line235">235: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicateVecs.html">VecDuplicateVecs</a>(VEC_VV(0), N, &amp;gmres-&gt;vecb));
+<a name="line236">236: </a>        }
+<a name="line237">237: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(gmres-&gt;hes_ritz, gmres-&gt;hes_origin, N * N));
+<a name="line238">238: </a>        <font color="#4169E1">for</font> (i = 0; i &lt; gmres-&gt;max_k + 1; i++) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(VEC_VV(i), gmres-&gt;vecb[i]));
+<a name="line239">239: </a>      }
+<a name="line240">240: </a>    }
+<a name="line241">241: </a>    itcount += its;
+<a name="line242">242: </a>    <font color="#4169E1">if</font> (itcount &gt;= ksp-&gt;max_it) {
+<a name="line243">243: </a>      <font color="#4169E1">if</font> (!ksp-&gt;reason) ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSP_DIVERGED_ITS.html">KSP_DIVERGED_ITS</a>;
+<a name="line244">244: </a>      <font color="#4169E1">break</font>;
+<a name="line245">245: </a>    }
+<a name="line246">246: </a>    ksp-&gt;guess_zero = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>; <font color="#B22222">/* every future call to <a href="../../../../../manualpages/KSP/KSPInitialResidual.html">KSPInitialResidual</a>() will have nonzero guess */</font>
+<a name="line247">247: </a>  }
+<a name="line248">248: </a>  ksp-&gt;guess_zero = guess_zero; <font color="#B22222">/* restore if user provided nonzero initial guess */</font>
+<a name="line249">249: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line250">250: </a>}
+
+<a name="line252">252: </a><strong><font color="#4169E1"><a name="KSPReset_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPReset_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line253">253: </a>{
+<a name="line254">254: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+<a name="line255">255: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   i;
+
+<a name="line257">257: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line258">258: </a>  <font color="#B22222">/* Free the Hessenberg matrices */</font>
+<a name="line259">259: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree5.html">PetscFree5</a>(gmres-&gt;hh_origin, gmres-&gt;hes_origin, gmres-&gt;rs_origin, gmres-&gt;cc_origin, gmres-&gt;ss_origin));
+<a name="line260">260: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;hes_ritz));
+
+<a name="line262">262: </a>  <font color="#B22222">/* free work vectors */</font>
+<a name="line263">263: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;vecs));
+<a name="line264">264: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; gmres-&gt;nwork_alloc; i++) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(gmres-&gt;mwork_alloc[i], &amp;gmres-&gt;user_work[i]));
+<a name="line265">265: </a>  gmres-&gt;nwork_alloc = 0;
+<a name="line266">266: </a>  <font color="#4169E1">if</font> (gmres-&gt;vecb) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(gmres-&gt;max_k + 1, &amp;gmres-&gt;vecb));
+
+<a name="line268">268: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;user_work));
+<a name="line269">269: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;mwork_alloc));
+<a name="line270">270: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;nrs));
+<a name="line271">271: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;gmres-&gt;sol_temp));
+<a name="line272">272: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;Rsvd));
+<a name="line273">273: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;Dsvd));
+<a name="line274">274: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(gmres-&gt;orthogwork));
+
+<a name="line276">276: </a>  gmres-&gt;vv_allocated   = 0;
+<a name="line277">277: </a>  gmres-&gt;vecs_allocated = 0;
+<a name="line278">278: </a>  gmres-&gt;sol_temp       = NULL;
+<a name="line279">279: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line280">280: </a>}
+
+<a name="line282">282: </a><strong><font color="#4169E1"><a name="KSPDestroy_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPDestroy_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line283">283: </a>{
+<a name="line284">284: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line285">285: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPReset_GMRES(ksp));
+<a name="line286">286: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(ksp-&gt;data));
+<a name="line287">287: </a>  <font color="#B22222">/* clear composed functions */</font>
+<a name="line288">288: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetPreAllocateVectors_C"</font>, NULL));
+<a name="line289">289: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetOrthogonalization_C"</font>, NULL));
+<a name="line290">290: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESGetOrthogonalization_C"</font>, NULL));
+<a name="line291">291: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetRestart_C"</font>, NULL));
+<a name="line292">292: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESGetRestart_C"</font>, NULL));
+<a name="line293">293: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetHapTol_C"</font>, NULL));
+<a name="line294">294: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetBreakdownTolerance_C"</font>, NULL));
+<a name="line295">295: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetCGSRefinementType_C"</font>, NULL));
+<a name="line296">296: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESGetCGSRefinementType_C"</font>, NULL));
+<a name="line297">297: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line298">298: </a>}
+<a name="line299">299: </a><font color="#B22222">/*</font>
+<a name="line300">300: </a><font color="#B22222">    KSPGMRESBuildSoln - create the solution from the starting vector and the</font>
+<a name="line301">301: </a><font color="#B22222">    current iterates.</font>
+
+<a name="line303">303: </a><font color="#B22222">    Input parameters:</font>
+<a name="line304">304: </a><font color="#B22222">        nrs - work area of size it + 1.</font>
+<a name="line305">305: </a><font color="#B22222">        vs  - index of initial guess</font>
+<a name="line306">306: </a><font color="#B22222">        vdest - index of result.  Note that vs may == vdest (replace</font>
+<a name="line307">307: </a><font color="#B22222">                guess with the solution).</font>
+
+<a name="line309">309: </a><font color="#B22222">     This is an internal routine that knows about the GMRES internals.</font>
+<a name="line310">310: </a><font color="#B22222"> */</font>
+<a name="line311">311: </a><strong><font color="#4169E1"><a name="KSPGMRESBuildSoln"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESBuildSoln(<a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *nrs, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vs, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vdest, <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> it)</font></strong>
+<a name="line312">312: </a>{
+<a name="line313">313: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> tt;
+<a name="line314">314: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    ii, k, j;
+<a name="line315">315: </a>  KSP_GMRES  *gmres = (KSP_GMRES *)(ksp-&gt;data);
+
+<a name="line317">317: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line318">318: </a>  <font color="#B22222">/* Solve for solution vector that minimizes the residual */</font>
+
+<a name="line320">320: </a>  <font color="#B22222">/* If it is &lt; 0, no gmres steps have been performed */</font>
+<a name="line321">321: </a>  <font color="#4169E1">if</font> (it &lt; 0) {
+<a name="line322">322: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(vs, vdest)); <font color="#B22222">/* <a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>() is smart, exists immediately if vguess == vdest */</font>
+<a name="line323">323: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line324">324: </a>  }
+<a name="line325">325: </a>  <font color="#4169E1">if</font> (*HH(it, it) != 0.0) {
+<a name="line326">326: </a>    nrs[it] = *GRS(it) / *HH(it, it);
+<a name="line327">327: </a>  } <font color="#4169E1">else</font> {
+<a name="line328">328: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!ksp-&gt;errorifnotconverged, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_NOT_CONVERGED</a>, <font color="#666666">"You reached the break down in GMRES; HH(it,it) = 0"</font>);
+<a name="line329">329: </a>    ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html">KSP_DIVERGED_BREAKDOWN</a>;
+
+<a name="line331">331: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(ksp, <font color="#666666">"Likely your matrix or preconditioner is singular. HH(it,it) is identically zero; it = %"</font> PetscInt_FMT <font color="#666666">" GRS(it) = %g\n"</font>, it, (double)PetscAbsScalar(*GRS(it))));
+<a name="line332">332: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line333">333: </a>  }
+<a name="line334">334: </a>  <font color="#4169E1">for</font> (ii = 1; ii &lt;= it; ii++) {
+<a name="line335">335: </a>    k  = it - ii;
+<a name="line336">336: </a>    tt = *GRS(k);
+<a name="line337">337: </a>    <font color="#4169E1">for</font> (j = k + 1; j &lt;= it; j++) tt = tt - *HH(k, j) * nrs[j];
+<a name="line338">338: </a>    <font color="#4169E1">if</font> (*HH(k, k) == 0.0) {
+<a name="line339">339: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!ksp-&gt;errorifnotconverged, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_NOT_CONVERGED</a>, <font color="#666666">"Likely your matrix or preconditioner is singular. HH(k,k) is identically zero; k = %"</font> PetscInt_FMT, k);
+<a name="line340">340: </a>      ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSP_DIVERGED_BREAKDOWN.html">KSP_DIVERGED_BREAKDOWN</a>;
+<a name="line341">341: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(ksp, <font color="#666666">"Likely your matrix or preconditioner is singular. HH(k,k) is identically zero; k = %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, k));
+<a name="line342">342: </a>      <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line343">343: </a>    }
+<a name="line344">344: </a>    nrs[k] = tt / *HH(k, k);
+<a name="line345">345: </a>  }
+
+<a name="line347">347: </a>  <font color="#B22222">/* Accumulate the correction to the solution of the preconditioned problem in TEMP */</font>
+<a name="line348">348: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(VEC_TEMP, 0.0));
+<a name="line349">349: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(VEC_TEMP, it + 1, nrs, &amp;VEC_VV(0)));
+
+<a name="line351">351: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPUnwindPreconditioner.html">KSPUnwindPreconditioner</a>(ksp, VEC_TEMP, VEC_TEMP_MATOP));
+<a name="line352">352: </a>  <font color="#B22222">/* add solution to previous solution */</font>
+<a name="line353">353: </a>  <font color="#4169E1">if</font> (vdest != vs) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(vs, vdest));
+<a name="line354">354: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(vdest, 1.0, VEC_TEMP));
+<a name="line355">355: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line356">356: </a>}
+<a name="line357">357: </a><font color="#B22222">/*</font>
+<a name="line358">358: </a><font color="#B22222">   Do the scalar work for the orthogonalization.  Return new residual norm.</font>
+<a name="line359">359: </a><font color="#B22222"> */</font>
+<a name="line360">360: </a><strong><font color="#4169E1"><a name="KSPGMRESUpdateHessenberg"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESUpdateHessenberg(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> it, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> hapend, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *res)</font></strong>
+<a name="line361">361: </a>{
+<a name="line362">362: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *hh, *cc, *ss, tt;
+<a name="line363">363: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     j;
+<a name="line364">364: </a>  KSP_GMRES   *gmres = (KSP_GMRES *)(ksp-&gt;data);
+
+<a name="line366">366: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line367">367: </a>  hh = HH(0, it);
+<a name="line368">368: </a>  cc = CC(0);
+<a name="line369">369: </a>  ss = SS(0);
+
+<a name="line371">371: </a>  <font color="#B22222">/* Apply all the previously computed plane rotations to the new column</font>
+<a name="line372">372: </a><font color="#B22222">     of the Hessenberg matrix */</font>
+<a name="line373">373: </a>  <font color="#4169E1">for</font> (j = 1; j &lt;= it; j++) {
+<a name="line374">374: </a>    tt  = *hh;
+<a name="line375">375: </a>    *hh = PetscConj(*cc) * tt + *ss * *(hh + 1);
+<a name="line376">376: </a>    hh++;
+<a name="line377">377: </a>    *hh = *cc++ * *hh - (*ss++ * tt);
+<a name="line378">378: </a>  }
+
+<a name="line380">380: </a>  <font color="#B22222">/*</font>
+<a name="line381">381: </a><font color="#B22222">    compute the new plane rotation, and apply it to:</font>
+<a name="line382">382: </a><font color="#B22222">     1) the right-hand-side of the Hessenberg system</font>
+<a name="line383">383: </a><font color="#B22222">     2) the new column of the Hessenberg matrix</font>
+<a name="line384">384: </a><font color="#B22222">    thus obtaining the updated value of the residual</font>
+<a name="line385">385: </a><font color="#B22222">  */</font>
+<a name="line386">386: </a>  <font color="#4169E1">if</font> (!hapend) {
+<a name="line387">387: </a>    tt = PetscSqrtScalar(PetscConj(*hh) * *hh + PetscConj(*(hh + 1)) * *(hh + 1));
+<a name="line388">388: </a>    <font color="#4169E1">if</font> (tt == 0.0) {
+<a name="line389">389: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!ksp-&gt;errorifnotconverged, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_NOT_CONVERGED</a>, <font color="#666666">"tt == 0.0"</font>);
+<a name="line390">390: </a>      ksp-&gt;reason = <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSP_DIVERGED_NULL</a>;
+<a name="line391">391: </a>      <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line392">392: </a>    }
+<a name="line393">393: </a>    *cc          = *hh / tt;
+<a name="line394">394: </a>    *ss          = *(hh + 1) / tt;
+<a name="line395">395: </a>    *GRS(it + 1) = -(*ss * *GRS(it));
+<a name="line396">396: </a>    *GRS(it)     = PetscConj(*cc) * *GRS(it);
+<a name="line397">397: </a>    *hh          = PetscConj(*cc) * *hh + *ss * *(hh + 1);
+<a name="line398">398: </a>    *res         = PetscAbsScalar(*GRS(it + 1));
+<a name="line399">399: </a>  } <font color="#4169E1">else</font> {
+<a name="line400">400: </a>    <font color="#B22222">/* happy breakdown: HH(it+1, it) = 0, therefore we don't need to apply</font>
+<a name="line401">401: </a><font color="#B22222">            another rotation matrix (so RH doesn't change).  The new residual is</font>
+<a name="line402">402: </a><font color="#B22222">            always the new sine term times the residual from last time (GRS(it)),</font>
+<a name="line403">403: </a><font color="#B22222">            but now the new sine rotation would be zero...so the residual should</font>
+<a name="line404">404: </a><font color="#B22222">            be zero...so we will multiply "zero" by the last residual.  This might</font>
+<a name="line405">405: </a><font color="#B22222">            not be exactly what we want to do here -could just return "zero". */</font>
+
+<a name="line407">407: </a>    *res = 0.0;
+<a name="line408">408: </a>  }
+<a name="line409">409: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line410">410: </a>}
+<a name="line411">411: </a><font color="#B22222">/*</font>
+<a name="line412">412: </a><font color="#B22222">   This routine allocates more work vectors, starting from VEC_VV(it).</font>
+<a name="line413">413: </a><font color="#B22222"> */</font>
+<a name="line414">414: </a><strong><font color="#4169E1"><a name="KSPGMRESGetNewVectors"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESGetNewVectors(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> it)</font></strong>
+<a name="line415">415: </a>{
+<a name="line416">416: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+<a name="line417">417: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   nwork = gmres-&gt;nwork_alloc, k, nalloc;
+
+<a name="line419">419: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line420">420: </a>  nalloc = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(ksp-&gt;max_it, gmres-&gt;delta_allocate);
+<a name="line421">421: </a>  <font color="#B22222">/* Adjust the number to allocate to make sure that we don't exceed the</font>
+<a name="line422">422: </a><font color="#B22222">    number of available slots */</font>
+<a name="line423">423: </a>  <font color="#4169E1">if</font> (it + VEC_OFFSET + nalloc &gt;= gmres-&gt;vecs_allocated) nalloc = gmres-&gt;vecs_allocated - it - VEC_OFFSET;
+<a name="line424">424: </a>  <font color="#4169E1">if</font> (!nalloc) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+
+<a name="line426">426: </a>  gmres-&gt;vv_allocated += nalloc;
+
+<a name="line428">428: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCreateVecs.html">KSPCreateVecs</a>(ksp, nalloc, &amp;gmres-&gt;user_work[nwork], 0, NULL));
+
+<a name="line430">430: </a>  gmres-&gt;mwork_alloc[nwork] = nalloc;
+<a name="line431">431: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; nalloc; k++) gmres-&gt;vecs[it + VEC_OFFSET + k] = gmres-&gt;user_work[nwork][k];
+<a name="line432">432: </a>  gmres-&gt;nwork_alloc++;
+<a name="line433">433: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line434">434: </a>}
+
+<a name="line436">436: </a><strong><font color="#4169E1"><a name="KSPBuildSolution_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPBuildSolution_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> ptr, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> *result)</font></strong>
+<a name="line437">437: </a>{
+<a name="line438">438: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line440">440: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line441">441: </a>  <font color="#4169E1">if</font> (!ptr) {
+<a name="line442">442: </a>    <font color="#4169E1">if</font> (!gmres-&gt;sol_temp) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(ksp-&gt;vec_sol, &amp;gmres-&gt;sol_temp));
+<a name="line443">443: </a>    ptr = gmres-&gt;sol_temp;
+<a name="line444">444: </a>  }
+<a name="line445">445: </a>  <font color="#4169E1">if</font> (!gmres-&gt;nrs) {
+<a name="line446">446: </a>    <font color="#B22222">/* allocate the work area */</font>
+<a name="line447">447: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(gmres-&gt;max_k, &amp;gmres-&gt;nrs));
+<a name="line448">448: </a>  }
+
+<a name="line450">450: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPGMRESBuildSoln(gmres-&gt;nrs, ksp-&gt;vec_sol, ptr, ksp, gmres-&gt;it));
+<a name="line451">451: </a>  <font color="#4169E1">if</font> (result) *result = ptr;
+<a name="line452">452: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line453">453: </a>}
+
+<a name="line455">455: </a><strong><font color="#4169E1"><a name="KSPView_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPView_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line456">456: </a>{
+<a name="line457">457: </a>  KSP_GMRES  *gmres = (KSP_GMRES *)ksp-&gt;data;
+<a name="line458">458: </a>  const char *cstr;
+<a name="line459">459: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   iascii, isstring;
+
+<a name="line461">461: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line462">462: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line463">463: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERSTRING.html">PETSCVIEWERSTRING</a>, &amp;isstring));
+<a name="line464">464: </a>  <font color="#4169E1">if</font> (gmres-&gt;orthog == <a href="../../../../../manualpages/KSP/KSPGMRESClassicalGramSchmidtOrthogonalization.html">KSPGMRESClassicalGramSchmidtOrthogonalization</a>) {
+<a name="line465">465: </a>    <font color="#4169E1">switch</font> (gmres-&gt;cgstype) {
+<a name="line466">466: </a>    <font color="#4169E1">case</font> (<a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_NEVER.html">KSP_GMRES_CGS_REFINE_NEVER</a>):
+<a name="line467">467: </a>      cstr = <font color="#666666">"Classical (unmodified) Gram-Schmidt Orthogonalization with no iterative refinement"</font>;
+<a name="line468">468: </a>      <font color="#4169E1">break</font>;
+<a name="line469">469: </a>    <font color="#4169E1">case</font> (<a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_ALWAYS.html">KSP_GMRES_CGS_REFINE_ALWAYS</a>):
+<a name="line470">470: </a>      cstr = <font color="#666666">"Classical (unmodified) Gram-Schmidt Orthogonalization with one step of iterative refinement"</font>;
+<a name="line471">471: </a>      <font color="#4169E1">break</font>;
+<a name="line472">472: </a>    <font color="#4169E1">case</font> (<a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_IFNEEDED.html">KSP_GMRES_CGS_REFINE_IFNEEDED</a>):
+<a name="line473">473: </a>      cstr = <font color="#666666">"Classical (unmodified) Gram-Schmidt Orthogonalization with one step of iterative refinement when needed"</font>;
+<a name="line474">474: </a>      <font color="#4169E1">break</font>;
+<a name="line475">475: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line476">476: </a>      <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Unknown orthogonalization"</font>);
+<a name="line477">477: </a>    }
+<a name="line478">478: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (gmres-&gt;orthog == <a href="../../../../../manualpages/KSP/KSPGMRESModifiedGramSchmidtOrthogonalization.html">KSPGMRESModifiedGramSchmidtOrthogonalization</a>) {
+<a name="line479">479: </a>    cstr = <font color="#666666">"Modified Gram-Schmidt Orthogonalization"</font>;
+<a name="line480">480: </a>  } <font color="#4169E1">else</font> {
+<a name="line481">481: </a>    cstr = <font color="#666666">"unknown orthogonalization"</font>;
+<a name="line482">482: </a>  }
+<a name="line483">483: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line484">484: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"  restart=%"</font> PetscInt_FMT <font color="#666666">", using %s\n"</font>, gmres-&gt;max_k, cstr));
+<a name="line485">485: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"  happy breakdown tolerance %g\n"</font>, (double)gmres-&gt;haptol));
+<a name="line486">486: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (isstring) {
+<a name="line487">487: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerStringSPrintf.html">PetscViewerStringSPrintf</a>(viewer, <font color="#666666">"%s restart %"</font> PetscInt_FMT, cstr, gmres-&gt;max_k));
+<a name="line488">488: </a>  }
+<a name="line489">489: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line490">490: </a>}
+
+<a name="line492">492: </a><font color="#B22222">/*@C</font>
+<a name="line493">493: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESMonitorKrylov.html">KSPGMRESMonitorKrylov</a> - Calls `<a href="../../../../../manualpages/Vec/VecView.html">VecView</a>()` for each new direction in the `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>` accumulated Krylov space.</font>
+
+<a name="line495">495: </a><font color="#B22222">   Collective</font>
+
+<a name="line497">497: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line498">498: </a><font color="#B22222">+  ksp - the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` context</font>
+<a name="line499">499: </a><font color="#B22222">.  its - iteration number</font>
+<a name="line500">500: </a><font color="#B22222">.  fgnorm - 2-norm of residual (or gradient)</font>
+<a name="line501">501: </a><font color="#B22222">-  dummy - a collection of viewers created with `<a href="../../../../../manualpages/Viewer/PetscViewersCreate.html">PetscViewersCreate</a>()`</font>
+
+<a name="line503">503: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line504">504: </a><font color="#B22222">.   -ksp_gmres_krylov_monitor &lt;bool&gt; - Plot the Krylov directions</font>
+
+<a name="line506">506: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line508">508: </a><font color="#B22222">   Note:</font>
+<a name="line509">509: </a><font color="#B22222">    A new `<a href="../../../../../manualpages/Viewer/PETSCVIEWERDRAW.html">PETSCVIEWERDRAW</a>` is created for each Krylov vector so they can all be simultaneously viewed</font>
+
+<a name="line511">511: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPMonitorSet.html">KSPMonitorSet</a>()`, `<a href="../../../../../manualpages/KSP/KSPMonitorResidual.html">KSPMonitorResidual</a>()`, `<a href="../../../../../manualpages/Vec/VecView.html">VecView</a>()`, `<a href="../../../../../manualpages/Viewer/PetscViewersCreate.html">PetscViewersCreate</a>()`, `<a href="../../../../../manualpages/Viewer/PetscViewersDestroy.html">PetscViewersDestroy</a>()`</font>
+<a name="line512">512: </a><font color="#B22222">@*/</font>
+<a name="line513">513: </a><strong><font color="#4169E1"><a name="KSPGMRESMonitorKrylov"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESMonitorKrylov.html">KSPGMRESMonitorKrylov</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> its, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> fgnorm, void *dummy)</font></strong>
+<a name="line514">514: </a>{
+<a name="line515">515: </a>  <a href="../../../../../manualpages/Viewer/PetscViewers.html">PetscViewers</a> viewers = (<a href="../../../../../manualpages/Viewer/PetscViewers.html">PetscViewers</a>)dummy;
+<a name="line516">516: </a>  KSP_GMRES   *gmres   = (KSP_GMRES *)ksp-&gt;data;
+<a name="line517">517: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>          x;
+<a name="line518">518: </a>  <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a>  viewer;
+<a name="line519">519: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>    flg;
+
+<a name="line521">521: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line522">522: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewersGetViewer.html">PetscViewersGetViewer</a>(viewers, gmres-&gt;it + 1, &amp;viewer));
+<a name="line523">523: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERDRAW.html">PETSCVIEWERDRAW</a>, &amp;flg));
+<a name="line524">524: </a>  <font color="#4169E1">if</font> (!flg) {
+<a name="line525">525: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerSetType.html">PetscViewerSetType</a>(viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERDRAW.html">PETSCVIEWERDRAW</a>));
+<a name="line526">526: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscViewerDrawSetInfo(viewer, NULL, <font color="#666666">"Krylov GMRES Monitor"</font>, <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, 300, 300));
+<a name="line527">527: </a>  }
+<a name="line528">528: </a>  x = VEC_VV(gmres-&gt;it + 1);
+<a name="line529">529: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecView.html">VecView</a>(x, viewer));
+<a name="line530">530: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line531">531: </a>}
+
+<a name="line533">533: </a><strong><font color="#4169E1"><a name="KSPSetFromOptions_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPSetFromOptions_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line534">534: </a>{
+<a name="line535">535: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   restart;
+<a name="line536">536: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>  haptol, breakdowntol;
+<a name="line537">537: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+<a name="line538">538: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  flg;
+
+<a name="line540">540: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line541">541: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> GMRES Options"</font>);
+<a name="line542">542: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-ksp_gmres_restart"</font>, <font color="#666666">"Number of Krylov search directions"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetRestart.html">KSPGMRESSetRestart</a>"</font>, gmres-&gt;max_k, &amp;restart, &amp;flg));
+<a name="line543">543: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGMRESSetRestart.html">KSPGMRESSetRestart</a>(ksp, restart));
+<a name="line544">544: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-ksp_gmres_haptol"</font>, <font color="#666666">"Tolerance for exact convergence (happy ending)"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetHapTol.html">KSPGMRESSetHapTol</a>"</font>, gmres-&gt;haptol, &amp;haptol, &amp;flg));
+<a name="line545">545: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGMRESSetHapTol.html">KSPGMRESSetHapTol</a>(ksp, haptol));
+<a name="line546">546: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-ksp_gmres_breakdown_tolerance"</font>, <font color="#666666">"Divergence breakdown tolerance during GMRES restart"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetBreakdownTolerance.html">KSPGMRESSetBreakdownTolerance</a>"</font>, gmres-&gt;breakdowntol, &amp;breakdowntol, &amp;flg));
+<a name="line547">547: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGMRESSetBreakdownTolerance.html">KSPGMRESSetBreakdownTolerance</a>(ksp, breakdowntol));
+<a name="line548">548: </a>  flg = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line549">549: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-ksp_gmres_preallocate"</font>, <font color="#666666">"Preallocate Krylov vectors"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetPreAllocateVectors.html">KSPGMRESSetPreAllocateVectors</a>"</font>, flg, &amp;flg, NULL));
+<a name="line550">550: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGMRESSetPreAllocateVectors.html">KSPGMRESSetPreAllocateVectors</a>(ksp));
+<a name="line551">551: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBoolGroupBegin.html">PetscOptionsBoolGroupBegin</a>(<font color="#666666">"-ksp_gmres_classicalgramschmidt"</font>, <font color="#666666">"Classical (unmodified) Gram-Schmidt (fast)"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>"</font>, &amp;flg));
+<a name="line552">552: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>(ksp, <a href="../../../../../manualpages/KSP/KSPGMRESClassicalGramSchmidtOrthogonalization.html">KSPGMRESClassicalGramSchmidtOrthogonalization</a>));
+<a name="line553">553: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBoolGroupEnd.html">PetscOptionsBoolGroupEnd</a>(<font color="#666666">"-ksp_gmres_modifiedgramschmidt"</font>, <font color="#666666">"Modified Gram-Schmidt (slow,more stable)"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>"</font>, &amp;flg));
+<a name="line554">554: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>(ksp, <a href="../../../../../manualpages/KSP/KSPGMRESModifiedGramSchmidtOrthogonalization.html">KSPGMRESModifiedGramSchmidtOrthogonalization</a>));
+<a name="line555">555: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-ksp_gmres_cgs_refinement_type"</font>, <font color="#666666">"Type of iterative refinement for classical (unmodified) Gram-Schmidt"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPGMRESSetCGSRefinementType.html">KSPGMRESSetCGSRefinementType</a>"</font>, KSPGMRESCGSRefinementTypes, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)gmres-&gt;cgstype, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;gmres-&gt;cgstype, &amp;flg));
+<a name="line556">556: </a>  flg = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line557">557: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-ksp_gmres_krylov_monitor"</font>, <font color="#666666">"Plot the Krylov directions"</font>, <font color="#666666">"<a href="../../../../../manualpages/KSP/KSPMonitorSet.html">KSPMonitorSet</a>"</font>, flg, &amp;flg, NULL));
+<a name="line558">558: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line559">559: </a>    <a href="../../../../../manualpages/Viewer/PetscViewers.html">PetscViewers</a> viewers;
+<a name="line560">560: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewersCreate.html">PetscViewersCreate</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), &amp;viewers));
+<a name="line561">561: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPMonitorSet.html">KSPMonitorSet</a>(ksp, <a href="../../../../../manualpages/KSP/KSPGMRESMonitorKrylov.html">KSPGMRESMonitorKrylov</a>, viewers, (<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a>(*)(void **))<a href="../../../../../manualpages/Viewer/PetscViewersDestroy.html">PetscViewersDestroy</a>));
+<a name="line562">562: </a>  }
+<a name="line563">563: </a>  PetscOptionsHeadEnd();
+<a name="line564">564: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line565">565: </a>}
+
+<a name="line567">567: </a><strong><font color="#4169E1"><a name="KSPGMRESSetHapTol_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESSetHapTol_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> tol)</font></strong>
+<a name="line568">568: </a>{
+<a name="line569">569: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line571">571: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line572">572: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(tol &gt;= 0.0, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Tolerance must be non-negative"</font>);
+<a name="line573">573: </a>  gmres-&gt;haptol = tol;
+<a name="line574">574: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line575">575: </a>}
+
+<a name="line577">577: </a><strong><font color="#4169E1"><a name="KSPGMRESSetBreakdownTolerance_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESSetBreakdownTolerance_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> tol)</font></strong>
+<a name="line578">578: </a>{
+<a name="line579">579: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line581">581: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line582">582: </a>  <font color="#4169E1">if</font> (tol == (<a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>)<a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>) {
+<a name="line583">583: </a>    gmres-&gt;breakdowntol = 0.1;
+<a name="line584">584: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line585">585: </a>  }
+<a name="line586">586: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(tol &gt;= 0.0, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Breakdown tolerance must be non-negative"</font>);
+<a name="line587">587: </a>  gmres-&gt;breakdowntol = tol;
+<a name="line588">588: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line589">589: </a>}
+
+<a name="line591">591: </a><strong><font color="#4169E1"><a name="KSPGMRESGetRestart_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESGetRestart_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *max_k)</font></strong>
+<a name="line592">592: </a>{
+<a name="line593">593: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line595">595: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line596">596: </a>  *max_k = gmres-&gt;max_k;
+<a name="line597">597: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line598">598: </a>}
+
+<a name="line600">600: </a><strong><font color="#4169E1"><a name="KSPGMRESSetRestart_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESSetRestart_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> max_k)</font></strong>
+<a name="line601">601: </a>{
+<a name="line602">602: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line604">604: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line605">605: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(max_k &gt;= 1, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Restart must be positive"</font>);
+<a name="line606">606: </a>  <font color="#4169E1">if</font> (!ksp-&gt;setupstage) {
+<a name="line607">607: </a>    gmres-&gt;max_k = max_k;
+<a name="line608">608: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (gmres-&gt;max_k != max_k) {
+<a name="line609">609: </a>    gmres-&gt;max_k    = max_k;
+<a name="line610">610: </a>    ksp-&gt;setupstage = KSP_SETUP_NEW;
+<a name="line611">611: </a>    <font color="#B22222">/* free the data structures, then create them again */</font>
+<a name="line612">612: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSPReset_GMRES(ksp));
+<a name="line613">613: </a>  }
+<a name="line614">614: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line615">615: </a>}
+
+<a name="line617">617: </a><strong><font color="#4169E1"><a name="KSPGMRESSetOrthogonalization_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESSetOrthogonalization_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, FCN fcn)</font></strong>
+<a name="line618">618: </a>{
+<a name="line619">619: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line620">620: </a>  ((KSP_GMRES *)ksp-&gt;data)-&gt;orthog = fcn;
+<a name="line621">621: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line622">622: </a>}
+
+<a name="line624">624: </a><strong><font color="#4169E1"><a name="KSPGMRESGetOrthogonalization_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESGetOrthogonalization_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, FCN *fcn)</font></strong>
+<a name="line625">625: </a>{
+<a name="line626">626: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line627">627: </a>  *fcn = ((KSP_GMRES *)ksp-&gt;data)-&gt;orthog;
+<a name="line628">628: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line629">629: </a>}
+
+<a name="line631">631: </a><strong><font color="#4169E1"><a name="KSPGMRESSetPreAllocateVectors_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESSetPreAllocateVectors_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line632">632: </a>{
+<a name="line633">633: </a>  KSP_GMRES *gmres;
+
+<a name="line635">635: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line636">636: </a>  gmres                = (KSP_GMRES *)ksp-&gt;data;
+<a name="line637">637: </a>  gmres-&gt;q_preallocate = 1;
+<a name="line638">638: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line639">639: </a>}
+
+<a name="line641">641: </a><strong><font color="#4169E1"><a name="KSPGMRESSetCGSRefinementType_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESSetCGSRefinementType_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a> type)</font></strong>
+<a name="line642">642: </a>{
+<a name="line643">643: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line645">645: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line646">646: </a>  gmres-&gt;cgstype = type;
+<a name="line647">647: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line648">648: </a>}
+
+<a name="line650">650: </a><strong><font color="#4169E1"><a name="KSPGMRESGetCGSRefinementType_GMRES"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGMRESGetCGSRefinementType_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a> *type)</font></strong>
+<a name="line651">651: </a>{
+<a name="line652">652: </a>  KSP_GMRES *gmres = (KSP_GMRES *)ksp-&gt;data;
+
+<a name="line654">654: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line655">655: </a>  *type = gmres-&gt;cgstype;
+<a name="line656">656: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line657">657: </a>}
+
+<a name="line659">659: </a><font color="#B22222">/*@</font>
+<a name="line660">660: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESSetCGSRefinementType.html">KSPGMRESSetCGSRefinementType</a> - Sets the type of iterative refinement to use</font>
+<a name="line661">661: </a><font color="#B22222">         in the classical Gram Schmidt orthogonalization.</font>
+
+<a name="line663">663: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line665">665: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line666">666: </a><font color="#B22222">+  ksp - the Krylov space context</font>
+<a name="line667">667: </a><font color="#B22222">-  type - the type of refinement</font>
+<a name="line668">668: </a><font color="#B22222">.vb</font>
+<a name="line669">669: </a><font color="#B22222">  <a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_NEVER.html">KSP_GMRES_CGS_REFINE_NEVER</a></font>
+<a name="line670">670: </a><font color="#B22222">  <a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_IFNEEDED.html">KSP_GMRES_CGS_REFINE_IFNEEDED</a></font>
+<a name="line671">671: </a><font color="#B22222">  <a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_ALWAYS.html">KSP_GMRES_CGS_REFINE_ALWAYS</a></font>
+<a name="line672">672: </a><font color="#B22222">.ve</font>
+
+<a name="line674">674: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line675">675: </a><font color="#B22222">.  -ksp_gmres_cgs_refinement_type &lt;refine_never,refine_ifneeded,refine_always&gt; - refinement type</font>
+
+<a name="line677">677: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line679">679: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a>`, `<a href="../../../../../manualpages/KSP/KSPGMRESClassicalGramSchmidtOrthogonalization.html">KSPGMRESClassicalGramSchmidtOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESGetCGSRefinementType.html">KSPGMRESGetCGSRefinementType</a>()`,</font>
+<a name="line680">680: </a><font color="#B22222">          `<a href="../../../../../manualpages/KSP/KSPGMRESGetOrthogonalization.html">KSPGMRESGetOrthogonalization</a>()`</font>
+<a name="line681">681: </a><font color="#B22222">@*/</font>
+<a name="line682">682: </a><strong><font color="#4169E1"><a name="KSPGMRESSetCGSRefinementType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESSetCGSRefinementType.html">KSPGMRESSetCGSRefinementType</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a> type)</font></strong>
+<a name="line683">683: </a>{
+<a name="line684">684: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line687">687: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(ksp, <font color="#666666">"KSPGMRESSetCGSRefinementType_C"</font>, (<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a>), (ksp, type));
+<a name="line688">688: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line689">689: </a>}
+
+<a name="line691">691: </a><font color="#B22222">/*@</font>
+<a name="line692">692: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESGetCGSRefinementType.html">KSPGMRESGetCGSRefinementType</a> - Gets the type of iterative refinement to use</font>
+<a name="line693">693: </a><font color="#B22222">         in the classical Gram Schmidt orthogonalization.</font>
+
+<a name="line695">695: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line697">697: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line698">698: </a><font color="#B22222">.  ksp - the Krylov space context</font>
+
+<a name="line700">700: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line701">701: </a><font color="#B22222">.  type - the type of refinement</font>
+
+<a name="line703">703: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line704">704: </a><font color="#B22222">.  -ksp_gmres_cgs_refinement_type &lt;refine_never,refine_ifneeded,refine_always&gt; - type of refinement</font>
+
+<a name="line706">706: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line708">708: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a>`, `<a href="../../../../../manualpages/KSP/KSPGMRESClassicalGramSchmidtOrthogonalization.html">KSPGMRESClassicalGramSchmidtOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetCGSRefinementType.html">KSPGMRESSetCGSRefinementType</a>()`,</font>
+<a name="line709">709: </a><font color="#B22222">          `<a href="../../../../../manualpages/KSP/KSPGMRESGetOrthogonalization.html">KSPGMRESGetOrthogonalization</a>()`</font>
+<a name="line710">710: </a><font color="#B22222">@*/</font>
+<a name="line711">711: </a><strong><font color="#4169E1"><a name="KSPGMRESGetCGSRefinementType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESGetCGSRefinementType.html">KSPGMRESGetCGSRefinementType</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a> *type)</font></strong>
+<a name="line712">712: </a>{
+<a name="line713">713: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line715">715: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(ksp, <font color="#666666">"KSPGMRESGetCGSRefinementType_C"</font>, (<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a> *), (ksp, type));
+<a name="line716">716: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line717">717: </a>}
+
+<a name="line719">719: </a><font color="#B22222">/*@</font>
+<a name="line720">720: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESSetRestart.html">KSPGMRESSetRestart</a> - Sets number of iterations at which `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPFGMRES.html">KSPFGMRES</a>` and `<a href="../../../../../manualpages/KSP/KSPLGMRES.html">KSPLGMRES</a>` restarts.</font>
+
+<a name="line722">722: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line724">724: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line725">725: </a><font color="#B22222">+  ksp - the Krylov space context</font>
+<a name="line726">726: </a><font color="#B22222">-  restart - integer restart value</font>
+
+<a name="line728">728: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line729">729: </a><font color="#B22222">.  -ksp_gmres_restart &lt;positive integer&gt; - integer restart value</font>
+
+<a name="line731">731: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line733">733: </a><font color="#B22222">    Note:</font>
+<a name="line734">734: </a><font color="#B22222">    The default value is 30.</font>
+
+<a name="line736">736: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPSetTolerances.html">KSPSetTolerances</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetPreAllocateVectors.html">KSPGMRESSetPreAllocateVectors</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESGetRestart.html">KSPGMRESGetRestart</a>()`</font>
+<a name="line737">737: </a><font color="#B22222">@*/</font>
+<a name="line738">738: </a><strong><font color="#4169E1"><a name="KSPGMRESSetRestart"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESSetRestart.html">KSPGMRESSetRestart</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> restart)</font></strong>
+<a name="line739">739: </a>{
+<a name="line740">740: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+
+<a name="line743">743: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(ksp, <font color="#666666">"KSPGMRESSetRestart_C"</font>, (<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>), (ksp, restart));
+<a name="line744">744: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line745">745: </a>}
+
+<a name="line747">747: </a><font color="#B22222">/*@</font>
+<a name="line748">748: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESGetRestart.html">KSPGMRESGetRestart</a> - Gets number of iterations at which `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPFGMRES.html">KSPFGMRES</a>` and `<a href="../../../../../manualpages/KSP/KSPLGMRES.html">KSPLGMRES</a>` restarts.</font>
+
+<a name="line750">750: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line752">752: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line753">753: </a><font color="#B22222">.  ksp - the Krylov space context</font>
+
+<a name="line755">755: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line756">756: </a><font color="#B22222">.   restart - integer restart value</font>
+
+<a name="line758">758: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line760">760: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPSetTolerances.html">KSPSetTolerances</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetPreAllocateVectors.html">KSPGMRESSetPreAllocateVectors</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetRestart.html">KSPGMRESSetRestart</a>()`</font>
+<a name="line761">761: </a><font color="#B22222">@*/</font>
+<a name="line762">762: </a><strong><font color="#4169E1"><a name="KSPGMRESGetRestart"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESGetRestart.html">KSPGMRESGetRestart</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *restart)</font></strong>
+<a name="line763">763: </a>{
+<a name="line764">764: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line765">765: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(ksp, <font color="#666666">"KSPGMRESGetRestart_C"</font>, (<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *), (ksp, restart));
+<a name="line766">766: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line767">767: </a>}
+
+<a name="line769">769: </a><font color="#B22222">/*@</font>
+<a name="line770">770: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESSetHapTol.html">KSPGMRESSetHapTol</a> - Sets tolerance for determining happy breakdown in `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPFGMRES.html">KSPFGMRES</a>` and `<a href="../../../../../manualpages/KSP/KSPLGMRES.html">KSPLGMRES</a>`</font>
+
+<a name="line772">772: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line774">774: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line775">775: </a><font color="#B22222">+  ksp - the Krylov space context</font>
+<a name="line776">776: </a><font color="#B22222">-  tol - the tolerance</font>
+
+<a name="line778">778: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line779">779: </a><font color="#B22222">.  -ksp_gmres_haptol &lt;positive real value&gt; - set tolerance for determining happy breakdown</font>
+
+<a name="line781">781: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line783">783: </a><font color="#B22222">   Note:</font>
+<a name="line784">784: </a><font color="#B22222">   Happy breakdown is the rare case in `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>` where an 'exact' solution is obtained after</font>
+<a name="line785">785: </a><font color="#B22222">   a certain number of iterations. If you attempt more iterations after this point unstable</font>
+<a name="line786">786: </a><font color="#B22222">   things can happen hence very occasionally you may need to set this value to detect this condition</font>
+
+<a name="line788">788: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPSetTolerances.html">KSPSetTolerances</a>()`</font>
+<a name="line789">789: </a><font color="#B22222">@*/</font>
+<a name="line790">790: </a><strong><font color="#4169E1"><a name="KSPGMRESSetHapTol"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESSetHapTol.html">KSPGMRESSetHapTol</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> tol)</font></strong>
+<a name="line791">791: </a>{
+<a name="line792">792: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line794">794: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>((ksp), <font color="#666666">"KSPGMRESSetHapTol_C"</font>, (<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>), ((ksp), (tol)));
+<a name="line795">795: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line796">796: </a>}
+
+<a name="line798">798: </a><font color="#B22222">/*@</font>
+<a name="line799">799: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/KSPGMRESSetBreakdownTolerance.html">KSPGMRESSetBreakdownTolerance</a> - Sets tolerance for determining divergence breakdown in `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`.</font>
+
+<a name="line801">801: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line803">803: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line804">804: </a><font color="#B22222">+  ksp - the Krylov space context</font>
+<a name="line805">805: </a><font color="#B22222">-  tol - the tolerance</font>
+
+<a name="line807">807: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line808">808: </a><font color="#B22222">.  -ksp_gmres_breakdown_tolerance &lt;positive real value&gt; - set tolerance for determining divergence breakdown</font>
+
+<a name="line810">810: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line812">812: </a><font color="#B22222">   Note:</font>
+<a name="line813">813: </a><font color="#B22222">   Divergence breakdown occurs when GMRES residual increases significantly during restart</font>
+
+<a name="line815">815: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPSetTolerances.html">KSPSetTolerances</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetHapTol.html">KSPGMRESSetHapTol</a>()`</font>
+<a name="line816">816: </a><font color="#B22222">@*/</font>
+<a name="line817">817: </a><strong><font color="#4169E1"><a name="KSPGMRESSetBreakdownTolerance"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/KSP/KSPGMRESSetBreakdownTolerance.html">KSPGMRESSetBreakdownTolerance</a>(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> tol)</font></strong>
+<a name="line818">818: </a>{
+<a name="line819">819: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line821">821: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>((ksp), <font color="#666666">"KSPGMRESSetBreakdownTolerance_C"</font>, (<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>), (ksp, tol));
+<a name="line822">822: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line823">823: </a>}
+
+<a name="line825">825: </a><font color="#B22222">/*MC</font>
+<a name="line826">826: </a><font color="#B22222">     <a href="../../../../../manualpages/KSP/KSPGMRES.html">KSPGMRES</a> - Implements the Generalized Minimal Residual method [1] with restart</font>
+
+<a name="line828">828: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line829">829: </a><font color="#B22222">+   -ksp_gmres_restart &lt;restart&gt; - the number of Krylov directions to orthogonalize against</font>
+<a name="line830">830: </a><font color="#B22222">.   -ksp_gmres_haptol &lt;tol&gt; - sets the tolerance for "happy ending" (exact convergence)</font>
+<a name="line831">831: </a><font color="#B22222">.   -ksp_gmres_preallocate - preallocate all the Krylov search directions initially (otherwise groups of</font>
+<a name="line832">832: </a><font color="#B22222">                             vectors are allocated as needed)</font>
+<a name="line833">833: </a><font color="#B22222">.   -ksp_gmres_classicalgramschmidt - use classical (unmodified) Gram-Schmidt to orthogonalize against the Krylov space (fast) (the default)</font>
+<a name="line834">834: </a><font color="#B22222">.   -ksp_gmres_modifiedgramschmidt - use modified Gram-Schmidt in the orthogonalization (more stable, but slower)</font>
+<a name="line835">835: </a><font color="#B22222">.   -ksp_gmres_cgs_refinement_type &lt;refine_never,refine_ifneeded,refine_always&gt; - determine if iterative refinement is used to increase the</font>
+<a name="line836">836: </a><font color="#B22222">                                   stability of the classical Gram-Schmidt  orthogonalization.</font>
+<a name="line837">837: </a><font color="#B22222">-   -ksp_gmres_krylov_monitor - plot the Krylov space generated</font>
+
+<a name="line839">839: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line841">841: </a><font color="#B22222">   Note:</font>
+<a name="line842">842: </a><font color="#B22222">    Left and right preconditioning are supported, but not symmetric preconditioning.</font>
+
+<a name="line844">844: </a><font color="#B22222">   Reference:</font>
+<a name="line845">845: </a><font color="#B22222">.  [1] - YOUCEF SAAD AND MARTIN H. SCHULTZ, GMRES: A GENERALIZED MINIMAL RESIDUAL ALGORITHM FOR SOLVING NONSYMMETRIC LINEAR SYSTEMS.</font>
+<a name="line846">846: </a><font color="#B22222">          SIAM J. ScI. STAT. COMPUT. Vo|. 7, No. 3, July 1986.</font>
+
+<a name="line848">848: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../manualpages/KSP/KSPCreate.html">KSPCreate</a>()`, `<a href="../../../../../manualpages/KSP/KSPSetType.html">KSPSetType</a>()`, `<a href="../../../../../manualpages/KSP/KSPType.html">KSPType</a>`, `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>`, `<a href="../../../../../manualpages/KSP/KSPFGMRES.html">KSPFGMRES</a>`, `<a href="../../../../../manualpages/KSP/KSPLGMRES.html">KSPLGMRES</a>`,</font>
+<a name="line849">849: </a><font color="#B22222">          `<a href="../../../../../manualpages/KSP/KSPGMRESSetRestart.html">KSPGMRESSetRestart</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetHapTol.html">KSPGMRESSetHapTol</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetPreAllocateVectors.html">KSPGMRESSetPreAllocateVectors</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetOrthogonalization.html">KSPGMRESSetOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESGetOrthogonalization.html">KSPGMRESGetOrthogonalization</a>()`,</font>
+<a name="line850">850: </a><font color="#B22222">          `<a href="../../../../../manualpages/KSP/KSPGMRESClassicalGramSchmidtOrthogonalization.html">KSPGMRESClassicalGramSchmidtOrthogonalization</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESModifiedGramSchmidtOrthogonalization.html">KSPGMRESModifiedGramSchmidtOrthogonalization</a>()`,</font>
+<a name="line851">851: </a><font color="#B22222">          `<a href="../../../../../manualpages/KSP/KSPGMRESCGSRefinementType.html">KSPGMRESCGSRefinementType</a>`, `<a href="../../../../../manualpages/KSP/KSPGMRESSetCGSRefinementType.html">KSPGMRESSetCGSRefinementType</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESGetCGSRefinementType.html">KSPGMRESGetCGSRefinementType</a>()`, `<a href="../../../../../manualpages/KSP/KSPGMRESMonitorKrylov.html">KSPGMRESMonitorKrylov</a>()`, `<a href="../../../../../manualpages/KSP/KSPSetPCSide.html">KSPSetPCSide</a>()`</font>
+<a name="line852">852: </a><font color="#B22222">M*/</font>
+
+<a name="line854">854: </a><strong><font color="#4169E1"><a name="KSPCreate_GMRES"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPCreate_GMRES(<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> ksp)</font></strong>
+<a name="line855">855: </a>{
+<a name="line856">856: </a>  KSP_GMRES *gmres;
+
+<a name="line858">858: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line859">859: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;gmres));
+<a name="line860">860: </a>  ksp-&gt;data = (void *)gmres;
+
+<a name="line862">862: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetSupportedNorm.html">KSPSetSupportedNorm</a>(ksp, <a href="../../../../../manualpages/KSP/KSP_NORM_PRECONDITIONED.html">KSP_NORM_PRECONDITIONED</a>, <a href="../../../../../manualpages/PC/PCSide.html">PC_LEFT</a>, 4));
+<a name="line863">863: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetSupportedNorm.html">KSPSetSupportedNorm</a>(ksp, <a href="../../../../../manualpages/KSP/KSP_NORM_UNPRECONDITIONED.html">KSP_NORM_UNPRECONDITIONED</a>, <a href="../../../../../manualpages/PC/PCSide.html">PC_RIGHT</a>, 3));
+<a name="line864">864: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetSupportedNorm.html">KSPSetSupportedNorm</a>(ksp, <a href="../../../../../manualpages/KSP/KSP_NORM_PRECONDITIONED.html">KSP_NORM_PRECONDITIONED</a>, <a href="../../../../../manualpages/PC/PCSide.html">PC_SYMMETRIC</a>, 2));
+<a name="line865">865: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetSupportedNorm.html">KSPSetSupportedNorm</a>(ksp, <a href="../../../../../manualpages/KSP/KSP_NORM_NONE.html">KSP_NORM_NONE</a>, <a href="../../../../../manualpages/PC/PCSide.html">PC_RIGHT</a>, 1));
+<a name="line866">866: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetSupportedNorm.html">KSPSetSupportedNorm</a>(ksp, <a href="../../../../../manualpages/KSP/KSP_NORM_NONE.html">KSP_NORM_NONE</a>, <a href="../../../../../manualpages/PC/PCSide.html">PC_LEFT</a>, 1));
+
+<a name="line868">868: </a>  ksp-&gt;ops-&gt;buildsolution                = KSPBuildSolution_GMRES;
+<a name="line869">869: </a>  ksp-&gt;ops-&gt;setup                        = KSPSetUp_GMRES;
+<a name="line870">870: </a>  ksp-&gt;ops-&gt;solve                        = KSPSolve_GMRES;
+<a name="line871">871: </a>  ksp-&gt;ops-&gt;reset                        = KSPReset_GMRES;
+<a name="line872">872: </a>  ksp-&gt;ops-&gt;destroy                      = KSPDestroy_GMRES;
+<a name="line873">873: </a>  ksp-&gt;ops-&gt;view                         = KSPView_GMRES;
+<a name="line874">874: </a>  ksp-&gt;ops-&gt;setfromoptions               = KSPSetFromOptions_GMRES;
+<a name="line875">875: </a>  ksp-&gt;ops-&gt;computeextremesingularvalues = KSPComputeExtremeSingularValues_GMRES;
+<a name="line876">876: </a>  ksp-&gt;ops-&gt;computeeigenvalues           = KSPComputeEigenvalues_GMRES;
+<a name="line877">877: </a>  ksp-&gt;ops-&gt;computeritz                  = KSPComputeRitz_GMRES;
+<a name="line878">878: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetPreAllocateVectors_C"</font>, KSPGMRESSetPreAllocateVectors_GMRES));
+<a name="line879">879: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetOrthogonalization_C"</font>, KSPGMRESSetOrthogonalization_GMRES));
+<a name="line880">880: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESGetOrthogonalization_C"</font>, KSPGMRESGetOrthogonalization_GMRES));
+<a name="line881">881: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetRestart_C"</font>, KSPGMRESSetRestart_GMRES));
+<a name="line882">882: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESGetRestart_C"</font>, KSPGMRESGetRestart_GMRES));
+<a name="line883">883: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetHapTol_C"</font>, KSPGMRESSetHapTol_GMRES));
+<a name="line884">884: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetBreakdownTolerance_C"</font>, KSPGMRESSetBreakdownTolerance_GMRES));
+<a name="line885">885: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESSetCGSRefinementType_C"</font>, KSPGMRESSetCGSRefinementType_GMRES));
+<a name="line886">886: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)ksp, <font color="#666666">"KSPGMRESGetCGSRefinementType_C"</font>, KSPGMRESGetCGSRefinementType_GMRES));
+
+<a name="line888">888: </a>  gmres-&gt;haptol         = 1.0e-30;
+<a name="line889">889: </a>  gmres-&gt;breakdowntol   = 0.1;
+<a name="line890">890: </a>  gmres-&gt;q_preallocate  = 0;
+<a name="line891">891: </a>  gmres-&gt;delta_allocate = GMRES_DELTA_DIRECTIONS;
+<a name="line892">892: </a>  gmres-&gt;orthog         = <a href="../../../../../manualpages/KSP/KSPGMRESClassicalGramSchmidtOrthogonalization.html">KSPGMRESClassicalGramSchmidtOrthogonalization</a>;
+<a name="line893">893: </a>  gmres-&gt;nrs            = NULL;
+<a name="line894">894: </a>  gmres-&gt;sol_temp       = NULL;
+<a name="line895">895: </a>  gmres-&gt;max_k          = GMRES_DEFAULT_MAXK;
+<a name="line896">896: </a>  gmres-&gt;Rsvd           = NULL;
+<a name="line897">897: </a>  gmres-&gt;cgstype        = <a href="../../../../../manualpages/KSP/KSP_GMRES_CGS_REFINE_NEVER.html">KSP_GMRES_CGS_REFINE_NEVER</a>;
+<a name="line898">898: </a>  gmres-&gt;orthogwork     = NULL;
+<a name="line899">899: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line900">900: </a>}
+</pre>
+</body>
+
+</html>

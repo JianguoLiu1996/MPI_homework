@@ -1,0 +1,1335 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/tao/constrained/impls/admm/admm.c">Actual source code: admm.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:15+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="admm.h.html">&lt;../src/tao/constrained/impls/admm/admm.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../include/petsctao.h.html">&lt;petsctao.h&gt;</A>
+<a name="line3">  3: </a>#include <A href="../../../../../include/petsc/private/petscimpl.h.html">&lt;petsc/private/petscimpl.h&gt;</A>
+
+<a name="line5">  5: </a><font color="#B22222">/* Updates terminating criteria</font>
+<a name="line6">  6: </a><font color="#B22222"> *</font>
+<a name="line7">  7: </a><font color="#B22222"> * 1  ||r_k|| = ||Ax+Bz-c|| =&lt; catol_admm* max{||Ax||,||Bz||,||c||}</font>
+<a name="line8">  8: </a><font color="#B22222"> *</font>
+<a name="line9">  9: </a><font color="#B22222"> * 2. Updates dual residual, d_k</font>
+<a name="line10"> 10: </a><font color="#B22222"> *</font>
+<a name="line11"> 11: </a><font color="#B22222"> * 3. ||d_k|| = ||mu*A^T*B(z_k-z_{k-1})|| =&lt; gatol_admm * ||A^Ty||   */</font>
+
+<a name="line13"> 13: </a>static <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  cited      = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line14"> 14: </a>static const char citation[] = <font color="#666666">"@misc{xu2017adaptive,\n"</font>
+<a name="line15"> 15: </a>                               <font color="#666666">"   title={Adaptive Relaxed ADMM: Convergence Theory and Practical Implementation},\n"</font>
+<a name="line16"> 16: </a>                               <font color="#666666">"   author={Zheng Xu and Mario A. T. Figueiredo and Xiaoming Yuan and Christoph Studer and Tom Goldstein},\n"</font>
+<a name="line17"> 17: </a>                               <font color="#666666">"   year={2017},\n"</font>
+<a name="line18"> 18: </a>                               <font color="#666666">"   eprint={1704.02712},\n"</font>
+<a name="line19"> 19: </a>                               <font color="#666666">"   archivePrefix={arXiv},\n"</font>
+<a name="line20"> 20: </a>                               <font color="#666666">"   primaryClass={cs.CV}\n"</font>
+<a name="line21"> 21: </a>                               <font color="#666666">"}  \n"</font>;
+
+<a name="line23"> 23: </a>const char *const TaoADMMRegularizerTypes[] = {<font color="#666666">"REGULARIZER_USER"</font>, <font color="#666666">"REGULARIZER_SOFT_THRESH"</font>, <font color="#666666">"<a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a>"</font>, <font color="#666666">"TAO_ADMM_"</font>, NULL};
+<a name="line24"> 24: </a>const char *const TaoADMMUpdateTypes[]      = {<font color="#666666">"UPDATE_BASIC"</font>, <font color="#666666">"UPDATE_ADAPTIVE"</font>, <font color="#666666">"UPDATE_ADAPTIVE_RELAXED"</font>, <font color="#666666">"<a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a>"</font>, <font color="#666666">"TAO_ADMM_"</font>, NULL};
+<a name="line25"> 25: </a>const char *const TaoALMMTypes[]            = {<font color="#666666">"CLASSIC"</font>, <font color="#666666">"PHR"</font>, <font color="#666666">"<a href="../../../../../manualpages/Tao/TaoALMMType.html">TaoALMMType</a>"</font>, <font color="#666666">"TAO_ALMM_"</font>, NULL};
+
+<a name="line27"> 27: </a><strong><font color="#4169E1"><a name="TaoADMMToleranceUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoADMMToleranceUpdate(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line28"> 28: </a>{
+<a name="line29"> 29: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+<a name="line30"> 30: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> Axnorm, Bznorm, ATynorm, temp;
+<a name="line31"> 31: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       tempJR, tempL;
+<a name="line32"> 32: </a>  <a href="../../../../../manualpages/Tao/Tao.html">Tao</a>       mis;
+
+<a name="line34"> 34: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line35"> 35: </a>  mis    = am-&gt;subsolverX;
+<a name="line36"> 36: </a>  tempJR = am-&gt;workJacobianRight;
+<a name="line37"> 37: </a>  tempL  = am-&gt;workLeft;
+<a name="line38"> 38: </a>  <font color="#B22222">/* ATy */</font>
+<a name="line39"> 39: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeJacobianEquality.html">TaoComputeJacobianEquality</a>(mis, am-&gt;y, mis-&gt;jacobian_equality, mis-&gt;jacobian_equality_pre));
+<a name="line40"> 40: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(mis-&gt;jacobian_equality, am-&gt;y, tempJR));
+<a name="line41"> 41: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(tempJR, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;ATynorm));
+<a name="line42"> 42: </a>  <font color="#B22222">/* dualres = mu * ||AT(Bz-Bzold)||_2 */</font>
+<a name="line43"> 43: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(tempJR, -1., am-&gt;Bzold, am-&gt;Bz));
+<a name="line44"> 44: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(mis-&gt;jacobian_equality, tempJR, tempL));
+<a name="line45"> 45: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(tempL, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;am-&gt;dualres));
+<a name="line46"> 46: </a>  am-&gt;dualres *= am-&gt;mu;
+
+<a name="line48"> 48: </a>  <font color="#B22222">/* ||Ax||_2, ||Bz||_2 */</font>
+<a name="line49"> 49: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(am-&gt;Ax, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;Axnorm));
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(am-&gt;Bz, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;Bznorm));
+
+<a name="line52"> 52: </a>  <font color="#B22222">/* Set catol to be catol_admm *  max{||Ax||,||Bz||,||c||} *</font>
+<a name="line53"> 53: </a><font color="#B22222">   * Set gatol to be gatol_admm *  ||A^Ty|| *</font>
+<a name="line54"> 54: </a><font color="#B22222">   * while cnorm is ||r_k||_2, and gnorm is ||d_k||_2 */</font>
+<a name="line55"> 55: </a>  temp = am-&gt;catol_admm * <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(Axnorm, (!am-&gt;const_norm) ? Bznorm : <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(Bznorm, am-&gt;const_norm));
+<a name="line56"> 56: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetConstraintTolerances.html">TaoSetConstraintTolerances</a>(tao, temp, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>));
+<a name="line57"> 57: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetTolerances.html">TaoSetTolerances</a>(tao, am-&gt;gatol_admm * ATynorm, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>));
+<a name="line58"> 58: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line59"> 59: </a>}
+
+<a name="line61"> 61: </a><font color="#B22222">/* Penaly Update for Adaptive ADMM. */</font>
+<a name="line62"> 62: </a><strong><font color="#4169E1"><a name="AdaptiveADMMPenaltyUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> AdaptiveADMMPenaltyUpdate(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line63"> 63: </a>{
+<a name="line64"> 64: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+<a name="line65"> 65: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> ydiff_norm, yhatdiff_norm, Axdiff_norm, Bzdiff_norm, Axyhat, Bzy, a_sd, a_mg, a_k, b_sd, b_mg, b_k;
+<a name="line66"> 66: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> hflag, gflag;
+<a name="line67"> 67: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       tempJR, tempJR2;
+
+<a name="line69"> 69: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line70"> 70: </a>  tempJR  = am-&gt;workJacobianRight;
+<a name="line71"> 71: </a>  tempJR2 = am-&gt;workJacobianRight2;
+<a name="line72"> 72: </a>  hflag   = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line73"> 73: </a>  gflag   = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line74"> 74: </a>  a_k     = -1;
+<a name="line75"> 75: </a>  b_k     = -1;
+
+<a name="line77"> 77: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(tempJR, -1., am-&gt;Axold, am-&gt;Ax));
+<a name="line78"> 78: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(tempJR2, -1., am-&gt;yhatold, am-&gt;yhat));
+<a name="line79"> 79: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(tempJR, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;Axdiff_norm));
+<a name="line80"> 80: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(tempJR2, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;yhatdiff_norm));
+<a name="line81"> 81: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDot.html">VecDot</a>(tempJR, tempJR2, &amp;Axyhat));
+
+<a name="line83"> 83: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(tempJR, -1., am-&gt;Bz0, am-&gt;Bz));
+<a name="line84"> 84: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(tempJR2, -1., am-&gt;y, am-&gt;y0));
+<a name="line85"> 85: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(tempJR, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;Bzdiff_norm));
+<a name="line86"> 86: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(tempJR2, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;ydiff_norm));
+<a name="line87"> 87: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDot.html">VecDot</a>(tempJR, tempJR2, &amp;Bzy));
+
+<a name="line89"> 89: </a>  <font color="#4169E1">if</font> (Axyhat &gt; am-&gt;orthval * Axdiff_norm * yhatdiff_norm + am-&gt;mueps) {
+<a name="line90"> 90: </a>    hflag = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line91"> 91: </a>    a_sd  = <a href="../../../../../manualpages/Sys/PetscSqr.html">PetscSqr</a>(yhatdiff_norm) / Axyhat; <font color="#B22222">/* alphaSD */</font>
+<a name="line92"> 92: </a>    a_mg  = Axyhat / <a href="../../../../../manualpages/Sys/PetscSqr.html">PetscSqr</a>(Axdiff_norm);   <font color="#B22222">/* alphaMG */</font>
+<a name="line93"> 93: </a>    a_k   = (a_mg / a_sd) &gt; 0.5 ? a_mg : a_sd - 0.5 * a_mg;
+<a name="line94"> 94: </a>  }
+<a name="line95"> 95: </a>  <font color="#4169E1">if</font> (Bzy &gt; am-&gt;orthval * Bzdiff_norm * ydiff_norm + am-&gt;mueps) {
+<a name="line96"> 96: </a>    gflag = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line97"> 97: </a>    b_sd  = <a href="../../../../../manualpages/Sys/PetscSqr.html">PetscSqr</a>(ydiff_norm) / Bzy;  <font color="#B22222">/* betaSD */</font>
+<a name="line98"> 98: </a>    b_mg  = Bzy / <a href="../../../../../manualpages/Sys/PetscSqr.html">PetscSqr</a>(Bzdiff_norm); <font color="#B22222">/* betaMG */</font>
+<a name="line99"> 99: </a>    b_k   = (b_mg / b_sd) &gt; 0.5 ? b_mg : b_sd - 0.5 * b_mg;
+<a name="line100">100: </a>  }
+<a name="line101">101: </a>  am-&gt;muold = am-&gt;mu;
+<a name="line102">102: </a>  <font color="#4169E1">if</font> (gflag &amp;&amp; hflag) {
+<a name="line103">103: </a>    am-&gt;mu = PetscSqrtReal(a_k * b_k);
+<a name="line104">104: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (hflag) {
+<a name="line105">105: </a>    am-&gt;mu = a_k;
+<a name="line106">106: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (gflag) {
+<a name="line107">107: </a>    am-&gt;mu = b_k;
+<a name="line108">108: </a>  }
+<a name="line109">109: </a>  <font color="#4169E1">if</font> (am-&gt;mu &gt; am-&gt;muold) am-&gt;mu = am-&gt;muold;
+<a name="line110">110: </a>  <font color="#4169E1">if</font> (am-&gt;mu &lt; am-&gt;mumin) am-&gt;mu = am-&gt;mumin;
+<a name="line111">111: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line112">112: </a>}
+
+<a name="line114">114: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegularizerType_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoADMMSetRegularizerType_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a> type)</font></strong>
+<a name="line115">115: </a>{
+<a name="line116">116: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line118">118: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line119">119: </a>  am-&gt;regswitch = type;
+<a name="line120">120: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line121">121: </a>}
+
+<a name="line123">123: </a><strong><font color="#4169E1"><a name="TaoADMMGetRegularizerType_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoADMMGetRegularizerType_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a> *type)</font></strong>
+<a name="line124">124: </a>{
+<a name="line125">125: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line127">127: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line128">128: </a>  *type = am-&gt;regswitch;
+<a name="line129">129: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line130">130: </a>}
+
+<a name="line132">132: </a><strong><font color="#4169E1"><a name="TaoADMMSetUpdateType_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoADMMSetUpdateType_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a> type)</font></strong>
+<a name="line133">133: </a>{
+<a name="line134">134: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line136">136: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line137">137: </a>  am-&gt;update = type;
+<a name="line138">138: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line139">139: </a>}
+
+<a name="line141">141: </a><strong><font color="#4169E1"><a name="TaoADMMGetUpdateType_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoADMMGetUpdateType_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a> *type)</font></strong>
+<a name="line142">142: </a>{
+<a name="line143">143: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line145">145: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line146">146: </a>  *type = am-&gt;update;
+<a name="line147">147: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line148">148: </a>}
+
+<a name="line150">150: </a><font color="#B22222">/* This routine updates Jacobians with new x,z vectors,</font>
+<a name="line151">151: </a><font color="#B22222"> * and then updates Ax and Bz vectors, then computes updated residual vector*/</font>
+<a name="line152">152: </a><strong><font color="#4169E1"><a name="ADMMUpdateConstraintResidualVector"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ADMMUpdateConstraintResidualVector(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> z, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> Ax, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> Bz, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> residual)</font></strong>
+<a name="line153">153: </a>{
+<a name="line154">154: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+<a name="line155">155: </a>  <a href="../../../../../manualpages/Tao/Tao.html">Tao</a>       mis, reg;
+
+<a name="line157">157: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line158">158: </a>  mis = am-&gt;subsolverX;
+<a name="line159">159: </a>  reg = am-&gt;subsolverZ;
+<a name="line160">160: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeJacobianEquality.html">TaoComputeJacobianEquality</a>(mis, x, mis-&gt;jacobian_equality, mis-&gt;jacobian_equality_pre));
+<a name="line161">161: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMult.html">MatMult</a>(mis-&gt;jacobian_equality, x, Ax));
+<a name="line162">162: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeJacobianEquality.html">TaoComputeJacobianEquality</a>(reg, z, reg-&gt;jacobian_equality, reg-&gt;jacobian_equality_pre));
+<a name="line163">163: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMult.html">MatMult</a>(reg-&gt;jacobian_equality, z, Bz));
+
+<a name="line165">165: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(residual, 1., Bz, Ax));
+<a name="line166">166: </a>  <font color="#4169E1">if</font> (am-&gt;constraint != NULL) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(residual, -1., am-&gt;constraint));
+<a name="line167">167: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line168">168: </a>}
+
+<a name="line170">170: </a><font color="#B22222">/* Updates Augmented Lagrangians to given routines *</font>
+<a name="line171">171: </a><font color="#B22222"> * For subsolverX, routine needs to be ComputeObjectiveAndGraidnet</font>
+<a name="line172">172: </a><font color="#B22222"> * Separate Objective and Gradient routines are not supported.  */</font>
+<a name="line173">173: </a><strong><font color="#4169E1"><a name="SubObjGradUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SubObjGradUpdate(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *f, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> g, void *ptr)</font></strong>
+<a name="line174">174: </a>{
+<a name="line175">175: </a>  <a href="../../../../../manualpages/Tao/Tao.html">Tao</a>       parent = (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>)ptr;
+<a name="line176">176: </a>  TAO_ADMM *am     = (TAO_ADMM *)parent-&gt;data;
+<a name="line177">177: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> temp, temp2;
+<a name="line178">178: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       tempJR;
+
+<a name="line180">180: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line181">181: </a>  tempJR = am-&gt;workJacobianRight;
+<a name="line182">182: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMUpdateConstraintResidualVector(parent, x, am-&gt;subsolverZ-&gt;solution, am-&gt;Ax, am-&gt;Bz, am-&gt;residual));
+<a name="line183">183: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*am-&gt;ops-&gt;misfitobjgrad)(am-&gt;subsolverX, x, f, g, am-&gt;misfitobjgradP));
+
+<a name="line185">185: </a>  am-&gt;last_misfit_val = *f;
+<a name="line186">186: </a>  <font color="#B22222">/* Objective  Add + yT(Ax+Bz-c) + mu/2*||Ax+Bz-c||_2^2 */</font>
+<a name="line187">187: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecTDot.html">VecTDot</a>(am-&gt;residual, am-&gt;y, &amp;temp));
+<a name="line188">188: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecTDot.html">VecTDot</a>(am-&gt;residual, am-&gt;residual, &amp;temp2));
+<a name="line189">189: </a>  *f += temp + (am-&gt;mu / 2) * temp2;
+
+<a name="line191">191: </a>  <font color="#B22222">/* Gradient. Add + mu*AT(Ax+Bz-c) + yTA*/</font>
+<a name="line192">192: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(tao-&gt;jacobian_equality, am-&gt;residual, tempJR));
+<a name="line193">193: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(g, am-&gt;mu, tempJR));
+<a name="line194">194: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(tao-&gt;jacobian_equality, am-&gt;y, tempJR));
+<a name="line195">195: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(g, 1., tempJR));
+<a name="line196">196: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line197">197: </a>}
+
+<a name="line199">199: </a><font color="#B22222">/* Updates Augmented Lagrangians to given routines</font>
+<a name="line200">200: </a><font color="#B22222"> * For subsolverZ, routine needs to be ComputeObjectiveAndGraidnet</font>
+<a name="line201">201: </a><font color="#B22222"> * Separate Objective and Gradient routines are not supported.  */</font>
+<a name="line202">202: </a><strong><font color="#4169E1"><a name="RegObjGradUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> RegObjGradUpdate(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> z, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *f, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> g, void *ptr)</font></strong>
+<a name="line203">203: </a>{
+<a name="line204">204: </a>  <a href="../../../../../manualpages/Tao/Tao.html">Tao</a>       parent = (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>)ptr;
+<a name="line205">205: </a>  TAO_ADMM *am     = (TAO_ADMM *)parent-&gt;data;
+<a name="line206">206: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> temp, temp2;
+<a name="line207">207: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       tempJR;
+
+<a name="line209">209: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line210">210: </a>  tempJR = am-&gt;workJacobianRight;
+<a name="line211">211: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMUpdateConstraintResidualVector(parent, am-&gt;subsolverX-&gt;solution, z, am-&gt;Ax, am-&gt;Bz, am-&gt;residual));
+<a name="line212">212: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*am-&gt;ops-&gt;regobjgrad)(am-&gt;subsolverZ, z, f, g, am-&gt;regobjgradP));
+<a name="line213">213: </a>  am-&gt;last_reg_val = *f;
+<a name="line214">214: </a>  <font color="#B22222">/* Objective  Add  + yT(Ax+Bz-c) + mu/2*||Ax+Bz-c||_2^2 */</font>
+<a name="line215">215: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecTDot.html">VecTDot</a>(am-&gt;residual, am-&gt;y, &amp;temp));
+<a name="line216">216: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecTDot.html">VecTDot</a>(am-&gt;residual, am-&gt;residual, &amp;temp2));
+<a name="line217">217: </a>  *f += temp + (am-&gt;mu / 2) * temp2;
+
+<a name="line219">219: </a>  <font color="#B22222">/* Gradient. Add + mu*BT(Ax+Bz-c) + yTB*/</font>
+<a name="line220">220: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(am-&gt;subsolverZ-&gt;jacobian_equality, am-&gt;residual, tempJR));
+<a name="line221">221: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(g, am-&gt;mu, tempJR));
+<a name="line222">222: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(am-&gt;subsolverZ-&gt;jacobian_equality, am-&gt;y, tempJR));
+<a name="line223">223: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(g, 1., tempJR));
+<a name="line224">224: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line225">225: </a>}
+
+<a name="line227">227: </a><font color="#B22222">/* Computes epsilon padded L1 norm lambda*sum(sqrt(x^2+eps^2)-eps */</font>
+<a name="line228">228: </a><strong><font color="#4169E1"><a name="ADMML1EpsilonNorm"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ADMML1EpsilonNorm(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> eps, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *norm)</font></strong>
+<a name="line229">229: </a>{
+<a name="line230">230: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+<a name="line231">231: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  N;
+
+<a name="line233">233: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line234">234: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(am-&gt;workLeft, &amp;N));
+<a name="line235">235: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecPointwiseMult.html">VecPointwiseMult</a>(am-&gt;workLeft, x, x));
+<a name="line236">236: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecShift.html">VecShift</a>(am-&gt;workLeft, am-&gt;l1epsilon * am-&gt;l1epsilon));
+<a name="line237">237: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSqrtAbs.html">VecSqrtAbs</a>(am-&gt;workLeft));
+<a name="line238">238: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSum.html">VecSum</a>(am-&gt;workLeft, norm));
+<a name="line239">239: </a>  *norm += N * am-&gt;l1epsilon;
+<a name="line240">240: </a>  *norm *= am-&gt;lambda;
+<a name="line241">241: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line242">242: </a>}
+
+<a name="line244">244: </a><strong><font color="#4169E1"><a name="ADMMInternalHessianUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ADMMInternalHessianUpdate(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Constraint, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> Identity, void *ptr)</font></strong>
+<a name="line245">245: </a>{
+<a name="line246">246: </a>  TAO_ADMM *am = (TAO_ADMM *)ptr;
+
+<a name="line248">248: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line249">249: </a>  <font color="#4169E1">switch</font> (am-&gt;update) {
+<a name="line250">250: </a>  <font color="#4169E1">case</font> (<a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_BASIC.html">TAO_ADMM_UPDATE_BASIC</a>):
+<a name="line251">251: </a>    <font color="#4169E1">break</font>;
+<a name="line252">252: </a>  <font color="#4169E1">case</font> (<a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_ADAPTIVE.html">TAO_ADMM_UPDATE_ADAPTIVE</a>):
+<a name="line253">253: </a>  <font color="#4169E1">case</font> (<a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TAO_ADMM_UPDATE_ADAPTIVE_RELAXED</a>):
+<a name="line254">254: </a>    <font color="#4169E1">if</font> (H &amp;&amp; (am-&gt;muold != am-&gt;mu)) {
+<a name="line255">255: </a>      <font color="#4169E1">if</font> (!Identity) {
+<a name="line256">256: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAXPY.html">MatAXPY</a>(H, am-&gt;mu - am-&gt;muold, Constraint, <a href="../../../../../manualpages/Mat/MatStructure.html">DIFFERENT_NONZERO_PATTERN</a>));
+<a name="line257">257: </a>      } <font color="#4169E1">else</font> {
+<a name="line258">258: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShift.html">MatShift</a>(H, am-&gt;mu - am-&gt;muold));
+<a name="line259">259: </a>      }
+<a name="line260">260: </a>    }
+<a name="line261">261: </a>    <font color="#4169E1">break</font>;
+<a name="line262">262: </a>  }
+<a name="line263">263: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line264">264: </a>}
+
+<a name="line266">266: </a><font color="#B22222">/* Updates Hessian - adds second derivative of augmented Lagrangian</font>
+<a name="line267">267: </a><font color="#B22222"> * H \gets H + \rho*ATA</font>
+<a name="line268">268: </a><font color="#B22222">  Here, \rho does not change in <a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_BASIC.html">TAO_ADMM_UPDATE_BASIC</a> - thus no-op</font>
+<a name="line269">269: </a><font color="#B22222">  For ADAPTAIVE,ADAPTIVE_RELAXED,</font>
+<a name="line270">270: </a><font color="#B22222">  H \gets H + (\rho-\rhoold)*ATA</font>
+<a name="line271">271: </a><font color="#B22222">  Here, we assume that A is linear constraint i.e., does not change.</font>
+<a name="line272">272: </a><font color="#B22222">  Thus, for both ADAPTIVE, and RELAXED, ATA matrix is pre-set (except for A=I (null case)) see TaoSetUp_ADMM */</font>
+<a name="line273">273: </a><strong><font color="#4169E1"><a name="SubHessianUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SubHessianUpdate(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, void *ptr)</font></strong>
+<a name="line274">274: </a>{
+<a name="line275">275: </a>  <a href="../../../../../manualpages/Tao/Tao.html">Tao</a>       parent = (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>)ptr;
+<a name="line276">276: </a>  TAO_ADMM *am     = (TAO_ADMM *)parent-&gt;data;
+
+<a name="line278">278: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line279">279: </a>  <font color="#4169E1">if</font> (am-&gt;Hxchange) {
+<a name="line280">280: </a>    <font color="#B22222">/* Case where Hessian gets updated with respect to x vector input. */</font>
+<a name="line281">281: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*am-&gt;ops-&gt;misfithess)(am-&gt;subsolverX, x, H, Hpre, am-&gt;misfithessP));
+<a name="line282">282: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMInternalHessianUpdate(am-&gt;subsolverX-&gt;hessian, am-&gt;ATA, am-&gt;xJI, am));
+<a name="line283">283: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (am-&gt;Hxbool) {
+<a name="line284">284: </a>    <font color="#B22222">/* Hessian doesn't get updated. H(x) = c */</font>
+<a name="line285">285: </a>    <font color="#B22222">/* Update Lagrangian only only per TAO call */</font>
+<a name="line286">286: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMInternalHessianUpdate(am-&gt;subsolverX-&gt;hessian, am-&gt;ATA, am-&gt;xJI, am));
+<a name="line287">287: </a>    am-&gt;Hxbool = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line288">288: </a>  }
+<a name="line289">289: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line290">290: </a>}
+
+<a name="line292">292: </a><font color="#B22222">/* Same as SubHessianUpdate, except for B matrix instead of A matrix */</font>
+<a name="line293">293: </a><strong><font color="#4169E1"><a name="RegHessianUpdate"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> RegHessianUpdate(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> z, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, void *ptr)</font></strong>
+<a name="line294">294: </a>{
+<a name="line295">295: </a>  <a href="../../../../../manualpages/Tao/Tao.html">Tao</a>       parent = (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>)ptr;
+<a name="line296">296: </a>  TAO_ADMM *am     = (TAO_ADMM *)parent-&gt;data;
+
+<a name="line298">298: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+
+<a name="line300">300: </a>  <font color="#4169E1">if</font> (am-&gt;Hzchange) {
+<a name="line301">301: </a>    <font color="#B22222">/* Case where Hessian gets updated with respect to x vector input. */</font>
+<a name="line302">302: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*am-&gt;ops-&gt;reghess)(am-&gt;subsolverZ, z, H, Hpre, am-&gt;reghessP));
+<a name="line303">303: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMInternalHessianUpdate(am-&gt;subsolverZ-&gt;hessian, am-&gt;BTB, am-&gt;zJI, am));
+<a name="line304">304: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (am-&gt;Hzbool) {
+<a name="line305">305: </a>    <font color="#B22222">/* Hessian doesn't get updated. H(x) = c */</font>
+<a name="line306">306: </a>    <font color="#B22222">/* Update Lagrangian only only per TAO call */</font>
+<a name="line307">307: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMInternalHessianUpdate(am-&gt;subsolverZ-&gt;hessian, am-&gt;BTB, am-&gt;zJI, am));
+<a name="line308">308: </a>    am-&gt;Hzbool = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line309">309: </a>  }
+<a name="line310">310: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line311">311: </a>}
+
+<a name="line313">313: </a><font color="#B22222">/* Shell Matrix routine for A matrix.</font>
+<a name="line314">314: </a><font color="#B22222"> * This gets used when user puts NULL for</font>
+<a name="line315">315: </a><font color="#B22222"> * <a href="../../../../../manualpages/Tao/TaoSetJacobianEqualityRoutine.html">TaoSetJacobianEqualityRoutine</a>(tao, NULL,NULL, ...)</font>
+<a name="line316">316: </a><font color="#B22222"> * Essentially sets A=I*/</font>
+<a name="line317">317: </a><strong><font color="#4169E1"><a name="JacobianIdentity"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> JacobianIdentity(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> mat, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> in, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> out)</font></strong>
+<a name="line318">318: </a>{
+<a name="line319">319: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line320">320: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(in, out));
+<a name="line321">321: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line322">322: </a>}
+
+<a name="line324">324: </a><font color="#B22222">/* Shell Matrix routine for B matrix.</font>
+<a name="line325">325: </a><font color="#B22222"> * This gets used when user puts NULL for</font>
+<a name="line326">326: </a><font color="#B22222"> * <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>(tao, NULL,NULL, ...)</font>
+<a name="line327">327: </a><font color="#B22222"> * Sets B=-I */</font>
+<a name="line328">328: </a><strong><font color="#4169E1"><a name="JacobianIdentityB"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> JacobianIdentityB(<a href="../../../../../manualpages/Mat/Mat.html">Mat</a> mat, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> in, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> out)</font></strong>
+<a name="line329">329: </a>{
+<a name="line330">330: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line331">331: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(in, out));
+<a name="line332">332: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(out, -1.));
+<a name="line333">333: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line334">334: </a>}
+
+<a name="line336">336: </a><font color="#B22222">/* Solve f(x) + g(z) s.t. Ax + Bz = c */</font>
+<a name="line337">337: </a><strong><font color="#4169E1"><a name="TaoSolve_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoSolve_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line338">338: </a>{
+<a name="line339">339: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+<a name="line340">340: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  N;
+<a name="line341">341: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> reg_func;
+<a name="line342">342: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> is_reg_shell;
+<a name="line343">343: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       tempL;
+
+<a name="line345">345: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line346">346: </a>  <font color="#4169E1">if</font> (am-&gt;regswitch != <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_SOFT_THRESH.html">TAO_ADMM_REGULARIZER_SOFT_THRESH</a>) {
+<a name="line347">347: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(am-&gt;subsolverX-&gt;ops-&gt;computejacobianequality, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Must call <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a>() first"</font>);
+<a name="line348">348: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(am-&gt;subsolverZ-&gt;ops-&gt;computejacobianequality, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Must call <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>() first"</font>);
+<a name="line349">349: </a>    <font color="#4169E1">if</font> (am-&gt;constraint != NULL) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(am-&gt;constraint, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;am-&gt;const_norm));
+<a name="line350">350: </a>  }
+<a name="line351">351: </a>  tempL = am-&gt;workLeft;
+<a name="line352">352: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(tempL, &amp;N));
+
+<a name="line354">354: </a>  <font color="#4169E1">if</font> (am-&gt;Hx &amp;&amp; am-&gt;ops-&gt;misfithess) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetHessian.html">TaoSetHessian</a>(am-&gt;subsolverX, am-&gt;Hx, am-&gt;Hx, SubHessianUpdate, tao));
+
+<a name="line356">356: </a>  <font color="#4169E1">if</font> (!am-&gt;zJI) {
+<a name="line357">357: </a>    <font color="#B22222">/* Currently, B is assumed to be a linear system, i.e., not getting updated*/</font>
+<a name="line358">358: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(am-&gt;JB, am-&gt;JB, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;(am-&gt;BTB)));
+<a name="line359">359: </a>  }
+<a name="line360">360: </a>  <font color="#4169E1">if</font> (!am-&gt;xJI) {
+<a name="line361">361: </a>    <font color="#B22222">/* Currently, A is assumed to be a linear system, i.e., not getting updated*/</font>
+<a name="line362">362: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(am-&gt;subsolverX-&gt;jacobian_equality, am-&gt;subsolverX-&gt;jacobian_equality, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;(am-&gt;ATA)));
+<a name="line363">363: </a>  }
+
+<a name="line365">365: </a>  is_reg_shell = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line367">367: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverZ, <a href="../../../../../manualpages/Tao/TAOSHELL.html">TAOSHELL</a>, &amp;is_reg_shell));
+
+<a name="line369">369: </a>  <font color="#4169E1">if</font> (!is_reg_shell) {
+<a name="line370">370: </a>    <font color="#4169E1">switch</font> (am-&gt;regswitch) {
+<a name="line371">371: </a>    <font color="#4169E1">case</font> (<a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_USER.html">TAO_ADMM_REGULARIZER_USER</a>):
+<a name="line372">372: </a>      <font color="#4169E1">break</font>;
+<a name="line373">373: </a>    <font color="#4169E1">case</font> (<a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_SOFT_THRESH.html">TAO_ADMM_REGULARIZER_SOFT_THRESH</a>):
+<a name="line374">374: </a>      <font color="#B22222">/* Soft Threshold. */</font>
+<a name="line375">375: </a>      <font color="#4169E1">break</font>;
+<a name="line376">376: </a>    }
+<a name="line377">377: </a>    <font color="#4169E1">if</font> (am-&gt;ops-&gt;regobjgrad) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetObjectiveAndGradient.html">TaoSetObjectiveAndGradient</a>(am-&gt;subsolverZ, NULL, RegObjGradUpdate, tao));
+<a name="line378">378: </a>    <font color="#4169E1">if</font> (am-&gt;Hz &amp;&amp; am-&gt;ops-&gt;reghess) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetHessian.html">TaoSetHessian</a>(am-&gt;subsolverZ, am-&gt;Hz, am-&gt;Hzpre, RegHessianUpdate, tao));
+<a name="line379">379: </a>  }
+
+<a name="line381">381: </a>  <font color="#4169E1">switch</font> (am-&gt;update) {
+<a name="line382">382: </a>  <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_BASIC.html">TAO_ADMM_UPDATE_BASIC</a>:
+<a name="line383">383: </a>    <font color="#4169E1">if</font> (am-&gt;subsolverX-&gt;hessian) {
+<a name="line384">384: </a>      <font color="#B22222">/* In basic case, Hessian does not get updated w.r.t. to spectral penalty</font>
+<a name="line385">385: </a><font color="#B22222">       * Here, when A is set, i.e., am-&gt;xJI, add mu*ATA to Hessian*/</font>
+<a name="line386">386: </a>      <font color="#4169E1">if</font> (!am-&gt;xJI) {
+<a name="line387">387: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAXPY.html">MatAXPY</a>(am-&gt;subsolverX-&gt;hessian, am-&gt;mu, am-&gt;ATA, <a href="../../../../../manualpages/Mat/MatStructure.html">DIFFERENT_NONZERO_PATTERN</a>));
+<a name="line388">388: </a>      } <font color="#4169E1">else</font> {
+<a name="line389">389: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShift.html">MatShift</a>(am-&gt;subsolverX-&gt;hessian, am-&gt;mu));
+<a name="line390">390: </a>      }
+<a name="line391">391: </a>    }
+<a name="line392">392: </a>    <font color="#4169E1">if</font> (am-&gt;subsolverZ-&gt;hessian &amp;&amp; am-&gt;regswitch == <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_USER.html">TAO_ADMM_REGULARIZER_USER</a>) {
+<a name="line393">393: </a>      <font color="#4169E1">if</font> (am-&gt;regswitch == <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_USER.html">TAO_ADMM_REGULARIZER_USER</a> &amp;&amp; !am-&gt;zJI) {
+<a name="line394">394: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAXPY.html">MatAXPY</a>(am-&gt;subsolverZ-&gt;hessian, am-&gt;mu, am-&gt;BTB, <a href="../../../../../manualpages/Mat/MatStructure.html">DIFFERENT_NONZERO_PATTERN</a>));
+<a name="line395">395: </a>      } <font color="#4169E1">else</font> {
+<a name="line396">396: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShift.html">MatShift</a>(am-&gt;subsolverZ-&gt;hessian, am-&gt;mu));
+<a name="line397">397: </a>      }
+<a name="line398">398: </a>    }
+<a name="line399">399: </a>    <font color="#4169E1">break</font>;
+<a name="line400">400: </a>  <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_ADAPTIVE.html">TAO_ADMM_UPDATE_ADAPTIVE</a>:
+<a name="line401">401: </a>  <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TAO_ADMM_UPDATE_ADAPTIVE_RELAXED</a>:
+<a name="line402">402: </a>    <font color="#4169E1">break</font>;
+<a name="line403">403: </a>  }
+
+<a name="line405">405: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCitationsRegister.html">PetscCitationsRegister</a>(citation, &amp;cited));
+<a name="line406">406: </a>  tao-&gt;reason = <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_CONTINUE_ITERATING</a>;
+
+<a name="line408">408: </a>  <font color="#4169E1">while</font> (tao-&gt;reason == <a href="../../../../../manualpages/Tao/TaoConvergedReason.html">TAO_CONTINUE_ITERATING</a>) {
+<a name="line409">409: </a>    <a href="../../../../../manualpages/Sys/PetscTryTypeMethod.html">PetscTryTypeMethod</a>(tao, update, tao-&gt;niter, tao-&gt;user_update);
+<a name="line410">410: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;Bz, am-&gt;Bzold));
+
+<a name="line412">412: </a>    <font color="#B22222">/* x update */</font>
+<a name="line413">413: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSolve.html">TaoSolve</a>(am-&gt;subsolverX));
+<a name="line414">414: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoComputeJacobianEquality.html">TaoComputeJacobianEquality</a>(am-&gt;subsolverX, am-&gt;subsolverX-&gt;solution, am-&gt;subsolverX-&gt;jacobian_equality, am-&gt;subsolverX-&gt;jacobian_equality_pre));
+<a name="line415">415: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMult.html">MatMult</a>(am-&gt;subsolverX-&gt;jacobian_equality, am-&gt;subsolverX-&gt;solution, am-&gt;Ax));
+
+<a name="line417">417: </a>    am-&gt;Hxbool = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+
+<a name="line419">419: </a>    <font color="#B22222">/* z update */</font>
+<a name="line420">420: </a>    <font color="#4169E1">switch</font> (am-&gt;regswitch) {
+<a name="line421">421: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_USER.html">TAO_ADMM_REGULARIZER_USER</a>:
+<a name="line422">422: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSolve.html">TaoSolve</a>(am-&gt;subsolverZ));
+<a name="line423">423: </a>      <font color="#4169E1">break</font>;
+<a name="line424">424: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_SOFT_THRESH.html">TAO_ADMM_REGULARIZER_SOFT_THRESH</a>:
+<a name="line425">425: </a>      <font color="#B22222">/* L1 assumes A,B jacobians are identity nxn matrix */</font>
+<a name="line426">426: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(am-&gt;workJacobianRight, 1 / am-&gt;mu, am-&gt;y, am-&gt;Ax));
+<a name="line427">427: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSoftThreshold.html">TaoSoftThreshold</a>(am-&gt;workJacobianRight, -am-&gt;lambda / am-&gt;mu, am-&gt;lambda / am-&gt;mu, am-&gt;subsolverZ-&gt;solution));
+<a name="line428">428: </a>      <font color="#4169E1">break</font>;
+<a name="line429">429: </a>    }
+<a name="line430">430: </a>    am-&gt;Hzbool = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line431">431: </a>    <font color="#B22222">/* Returns Ax + Bz - c with updated Ax,Bz vectors */</font>
+<a name="line432">432: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMUpdateConstraintResidualVector(tao, am-&gt;subsolverX-&gt;solution, am-&gt;subsolverZ-&gt;solution, am-&gt;Ax, am-&gt;Bz, am-&gt;residual));
+<a name="line433">433: </a>    <font color="#B22222">/* Dual variable, y += y + mu*(Ax+Bz-c) */</font>
+<a name="line434">434: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(am-&gt;y, am-&gt;mu, am-&gt;residual, am-&gt;yold));
+
+<a name="line436">436: </a>    <font color="#B22222">/* stopping tolerance update */</font>
+<a name="line437">437: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TaoADMMToleranceUpdate(tao));
+
+<a name="line439">439: </a>    <font color="#B22222">/* Updating Spectral Penalty */</font>
+<a name="line440">440: </a>    <font color="#4169E1">switch</font> (am-&gt;update) {
+<a name="line441">441: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_BASIC.html">TAO_ADMM_UPDATE_BASIC</a>:
+<a name="line442">442: </a>      am-&gt;muold = am-&gt;mu;
+<a name="line443">443: </a>      <font color="#4169E1">break</font>;
+<a name="line444">444: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_ADAPTIVE.html">TAO_ADMM_UPDATE_ADAPTIVE</a>:
+<a name="line445">445: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TAO_ADMM_UPDATE_ADAPTIVE_RELAXED</a>:
+<a name="line446">446: </a>      <font color="#4169E1">if</font> (tao-&gt;niter == 0) {
+<a name="line447">447: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;y, am-&gt;y0));
+<a name="line448">448: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(am-&gt;residual, 1., am-&gt;Ax, am-&gt;Bzold));
+<a name="line449">449: </a>        <font color="#4169E1">if</font> (am-&gt;constraint) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(am-&gt;residual, -1., am-&gt;constraint));
+<a name="line450">450: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(am-&gt;yhatold, -am-&gt;mu, am-&gt;residual, am-&gt;yold));
+<a name="line451">451: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;Ax, am-&gt;Axold));
+<a name="line452">452: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;Bz, am-&gt;Bz0));
+<a name="line453">453: </a>        am-&gt;muold = am-&gt;mu;
+<a name="line454">454: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (tao-&gt;niter % am-&gt;T == 1) {
+<a name="line455">455: </a>        <font color="#B22222">/* we have compute Bzold in a previous iteration, and we computed Ax above */</font>
+<a name="line456">456: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(am-&gt;residual, 1., am-&gt;Ax, am-&gt;Bzold));
+<a name="line457">457: </a>        <font color="#4169E1">if</font> (am-&gt;constraint) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(am-&gt;residual, -1., am-&gt;constraint));
+<a name="line458">458: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(am-&gt;yhat, -am-&gt;mu, am-&gt;residual, am-&gt;yold));
+<a name="line459">459: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(AdaptiveADMMPenaltyUpdate(tao));
+<a name="line460">460: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;Ax, am-&gt;Axold));
+<a name="line461">461: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;Bz, am-&gt;Bz0));
+<a name="line462">462: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;yhat, am-&gt;yhatold));
+<a name="line463">463: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;y, am-&gt;y0));
+<a name="line464">464: </a>      } <font color="#4169E1">else</font> {
+<a name="line465">465: </a>        am-&gt;muold = am-&gt;mu;
+<a name="line466">466: </a>      }
+<a name="line467">467: </a>      <font color="#4169E1">break</font>;
+<a name="line468">468: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line469">469: </a>      <font color="#4169E1">break</font>;
+<a name="line470">470: </a>    }
+<a name="line471">471: </a>    tao-&gt;niter++;
+
+<a name="line473">473: </a>    <font color="#B22222">/* Calculate original function values. misfit part was done in TaoADMMToleranceUpdate*/</font>
+<a name="line474">474: </a>    <font color="#4169E1">switch</font> (am-&gt;regswitch) {
+<a name="line475">475: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_USER.html">TAO_ADMM_REGULARIZER_USER</a>:
+<a name="line476">476: </a>      <font color="#4169E1">if</font> (is_reg_shell) {
+<a name="line477">477: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMML1EpsilonNorm(tao, am-&gt;subsolverZ-&gt;solution, am-&gt;l1epsilon, &amp;reg_func));
+<a name="line478">478: </a>      } <font color="#4169E1">else</font> {
+<a name="line479">479: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*am-&gt;ops-&gt;regobjgrad)(am-&gt;subsolverZ, am-&gt;subsolverX-&gt;solution, &amp;reg_func, tempL, am-&gt;regobjgradP));
+<a name="line480">480: </a>      }
+<a name="line481">481: </a>      <font color="#4169E1">break</font>;
+<a name="line482">482: </a>    <font color="#4169E1">case</font> <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_SOFT_THRESH.html">TAO_ADMM_REGULARIZER_SOFT_THRESH</a>:
+<a name="line483">483: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMML1EpsilonNorm(tao, am-&gt;subsolverZ-&gt;solution, am-&gt;l1epsilon, &amp;reg_func));
+<a name="line484">484: </a>      <font color="#4169E1">break</font>;
+<a name="line485">485: </a>    }
+<a name="line486">486: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;y, am-&gt;yold));
+<a name="line487">487: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ADMMUpdateConstraintResidualVector(tao, am-&gt;subsolverX-&gt;solution, am-&gt;subsolverZ-&gt;solution, am-&gt;Ax, am-&gt;Bz, am-&gt;residual));
+<a name="line488">488: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(am-&gt;residual, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;am-&gt;resnorm));
+<a name="line489">489: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(TaoLogConvergenceHistory(tao, am-&gt;last_misfit_val + reg_func, am-&gt;dualres, am-&gt;resnorm, tao-&gt;ksp_its));
+
+<a name="line491">491: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoMonitor.html">TaoMonitor</a>(tao, tao-&gt;niter, am-&gt;last_misfit_val + reg_func, am-&gt;dualres, am-&gt;resnorm, 1.0));
+<a name="line492">492: </a>    <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(tao, convergencetest, tao-&gt;cnvP);
+<a name="line493">493: </a>  }
+<a name="line494">494: </a>  <font color="#B22222">/* Update vectors */</font>
+<a name="line495">495: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;subsolverX-&gt;solution, tao-&gt;solution));
+<a name="line496">496: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(am-&gt;subsolverX-&gt;gradient, tao-&gt;gradient));
+<a name="line497">497: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverX, <font color="#666666">"TaoGetADMMParentTao_ADMM"</font>, NULL));
+<a name="line498">498: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverZ, <font color="#666666">"TaoGetADMMParentTao_ADMM"</font>, NULL));
+<a name="line499">499: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMSetRegularizerType_C"</font>, NULL));
+<a name="line500">500: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMGetRegularizerType_C"</font>, NULL));
+<a name="line501">501: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMSetUpdateType_C"</font>, NULL));
+<a name="line502">502: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMGetUpdateType_C"</font>, NULL));
+<a name="line503">503: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line504">504: </a>}
+
+<a name="line506">506: </a><strong><font color="#4169E1"><a name="TaoSetFromOptions_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoSetFromOptions_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line507">507: </a>{
+<a name="line508">508: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line510">510: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line511">511: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"ADMM problem that solves f(x) in a form of f(x) + g(z) subject to x - z = 0. Norm 1 and 2 are supported. Different subsolver routines can be selected. "</font>);
+<a name="line512">512: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_admm_regularizer_coefficient"</font>, <font color="#666666">"regularizer constant"</font>, <font color="#666666">""</font>, am-&gt;lambda, &amp;am-&gt;lambda, NULL));
+<a name="line513">513: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_admm_spectral_penalty"</font>, <font color="#666666">"Constant for Augmented Lagrangian term."</font>, <font color="#666666">""</font>, am-&gt;mu, &amp;am-&gt;mu, NULL));
+<a name="line514">514: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_admm_relaxation_parameter"</font>, <font color="#666666">"x relaxation parameter for Z update."</font>, <font color="#666666">""</font>, am-&gt;gamma, &amp;am-&gt;gamma, NULL));
+<a name="line515">515: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_admm_tolerance_update_factor"</font>, <font color="#666666">"ADMM dynamic tolerance update factor."</font>, <font color="#666666">""</font>, am-&gt;tol, &amp;am-&gt;tol, NULL));
+<a name="line516">516: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_admm_spectral_penalty_update_factor"</font>, <font color="#666666">"ADMM spectral penalty update curvature safeguard value."</font>, <font color="#666666">""</font>, am-&gt;orthval, &amp;am-&gt;orthval, NULL));
+<a name="line517">517: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-tao_admm_minimum_spectral_penalty"</font>, <font color="#666666">"Set ADMM minimum spectral penalty."</font>, <font color="#666666">""</font>, am-&gt;mumin, &amp;am-&gt;mumin, NULL));
+<a name="line518">518: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-tao_admm_dual_update"</font>, <font color="#666666">"Lagrangian dual update policy"</font>, <font color="#666666">"<a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a>"</font>, TaoADMMUpdateTypes, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)am-&gt;update, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;am-&gt;update, NULL));
+<a name="line519">519: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-tao_admm_regularizer_type"</font>, <font color="#666666">"ADMM regularizer update rule"</font>, <font color="#666666">"<a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a>"</font>, TaoADMMRegularizerTypes, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)am-&gt;regswitch, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;am-&gt;regswitch, NULL));
+<a name="line520">520: </a>  PetscOptionsHeadEnd();
+<a name="line521">521: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetFromOptions.html">TaoSetFromOptions</a>(am-&gt;subsolverX));
+<a name="line522">522: </a>  <font color="#4169E1">if</font> (am-&gt;regswitch != <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_SOFT_THRESH.html">TAO_ADMM_REGULARIZER_SOFT_THRESH</a>) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetFromOptions.html">TaoSetFromOptions</a>(am-&gt;subsolverZ));
+<a name="line523">523: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line524">524: </a>}
+
+<a name="line526">526: </a><strong><font color="#4169E1"><a name="TaoView_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoView_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line527">527: </a>{
+<a name="line528">528: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line530">530: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line531">531: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPushTab.html">PetscViewerASCIIPushTab</a>(viewer));
+<a name="line532">532: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoView.html">TaoView</a>(am-&gt;subsolverX, viewer));
+<a name="line533">533: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoView.html">TaoView</a>(am-&gt;subsolverZ, viewer));
+<a name="line534">534: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPopTab.html">PetscViewerASCIIPopTab</a>(viewer));
+<a name="line535">535: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line536">536: </a>}
+
+<a name="line538">538: </a><strong><font color="#4169E1"><a name="TaoSetUp_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoSetUp_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line539">539: </a>{
+<a name="line540">540: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+<a name="line541">541: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  n, N, M;
+
+<a name="line543">543: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line544">544: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(tao-&gt;solution, &amp;n));
+<a name="line545">545: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(tao-&gt;solution, &amp;N));
+<a name="line546">546: </a>  <font color="#B22222">/* If Jacobian is given as NULL, it means Jacobian is identity matrix with size of solution vector */</font>
+<a name="line547">547: </a>  <font color="#4169E1">if</font> (!am-&gt;JB) {
+<a name="line548">548: </a>    am-&gt;zJI = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line549">549: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateShell.html">MatCreateShell</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), n, n, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, NULL, &amp;am-&gt;JB));
+<a name="line550">550: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShellSetOperation.html">MatShellSetOperation</a>(am-&gt;JB, MATOP_MULT, (void (*)(void))JacobianIdentityB));
+<a name="line551">551: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShellSetOperation.html">MatShellSetOperation</a>(am-&gt;JB, MATOP_MULT_TRANSPOSE, (void (*)(void))JacobianIdentityB));
+<a name="line552">552: </a>    am-&gt;JBpre = am-&gt;JB;
+<a name="line553">553: </a>  }
+<a name="line554">554: </a>  <font color="#4169E1">if</font> (!am-&gt;JA) {
+<a name="line555">555: </a>    am-&gt;xJI = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line556">556: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateShell.html">MatCreateShell</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), n, n, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, NULL, &amp;am-&gt;JA));
+<a name="line557">557: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShellSetOperation.html">MatShellSetOperation</a>(am-&gt;JA, MATOP_MULT, (void (*)(void))JacobianIdentity));
+<a name="line558">558: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatShellSetOperation.html">MatShellSetOperation</a>(am-&gt;JA, MATOP_MULT_TRANSPOSE, (void (*)(void))JacobianIdentity));
+<a name="line559">559: </a>    am-&gt;JApre = am-&gt;JA;
+<a name="line560">560: </a>  }
+<a name="line561">561: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(am-&gt;JA, NULL, &amp;am-&gt;Ax));
+<a name="line562">562: </a>  <font color="#4169E1">if</font> (!tao-&gt;gradient) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;tao-&gt;gradient));
+<a name="line563">563: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetSolution.html">TaoSetSolution</a>(am-&gt;subsolverX, tao-&gt;solution));
+<a name="line564">564: </a>  <font color="#4169E1">if</font> (!am-&gt;z) {
+<a name="line565">565: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;am-&gt;z));
+<a name="line566">566: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;z, 0.0));
+<a name="line567">567: </a>  }
+<a name="line568">568: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetSolution.html">TaoSetSolution</a>(am-&gt;subsolverZ, am-&gt;z));
+<a name="line569">569: </a>  <font color="#4169E1">if</font> (!am-&gt;workLeft) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(tao-&gt;solution, &amp;am-&gt;workLeft));
+<a name="line570">570: </a>  <font color="#4169E1">if</font> (!am-&gt;Axold) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;Axold));
+<a name="line571">571: </a>  <font color="#4169E1">if</font> (!am-&gt;workJacobianRight) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;workJacobianRight));
+<a name="line572">572: </a>  <font color="#4169E1">if</font> (!am-&gt;workJacobianRight2) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;workJacobianRight2));
+<a name="line573">573: </a>  <font color="#4169E1">if</font> (!am-&gt;Bz) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;Bz));
+<a name="line574">574: </a>  <font color="#4169E1">if</font> (!am-&gt;Bzold) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;Bzold));
+<a name="line575">575: </a>  <font color="#4169E1">if</font> (!am-&gt;Bz0) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;Bz0));
+<a name="line576">576: </a>  <font color="#4169E1">if</font> (!am-&gt;y) {
+<a name="line577">577: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;y));
+<a name="line578">578: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;y, 0.0));
+<a name="line579">579: </a>  }
+<a name="line580">580: </a>  <font color="#4169E1">if</font> (!am-&gt;yold) {
+<a name="line581">581: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;yold));
+<a name="line582">582: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;yold, 0.0));
+<a name="line583">583: </a>  }
+<a name="line584">584: </a>  <font color="#4169E1">if</font> (!am-&gt;y0) {
+<a name="line585">585: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;y0));
+<a name="line586">586: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;y0, 0.0));
+<a name="line587">587: </a>  }
+<a name="line588">588: </a>  <font color="#4169E1">if</font> (!am-&gt;yhat) {
+<a name="line589">589: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;yhat));
+<a name="line590">590: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;yhat, 0.0));
+<a name="line591">591: </a>  }
+<a name="line592">592: </a>  <font color="#4169E1">if</font> (!am-&gt;yhatold) {
+<a name="line593">593: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;yhatold));
+<a name="line594">594: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;yhatold, 0.0));
+<a name="line595">595: </a>  }
+<a name="line596">596: </a>  <font color="#4169E1">if</font> (!am-&gt;residual) {
+<a name="line597">597: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(am-&gt;Ax, &amp;am-&gt;residual));
+<a name="line598">598: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSet.html">VecSet</a>(am-&gt;residual, 0.0));
+<a name="line599">599: </a>  }
+<a name="line600">600: </a>  <font color="#4169E1">if</font> (!am-&gt;constraint) {
+<a name="line601">601: </a>    am-&gt;constraint = NULL;
+<a name="line602">602: </a>  } <font color="#4169E1">else</font> {
+<a name="line603">603: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(am-&gt;constraint, &amp;M));
+<a name="line604">604: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(M == N, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Solution vector and constraint vector must be of same size!"</font>);
+<a name="line605">605: </a>  }
+
+<a name="line607">607: </a>  <font color="#B22222">/* Save changed tao tolerance for adaptive tolerance */</font>
+<a name="line608">608: </a>  <font color="#4169E1">if</font> (tao-&gt;gatol_changed) am-&gt;gatol_admm = tao-&gt;gatol;
+<a name="line609">609: </a>  <font color="#4169E1">if</font> (tao-&gt;catol_changed) am-&gt;catol_admm = tao-&gt;catol;
+
+<a name="line611">611: </a>  <font color="#B22222">/*Update spectral and dual elements to X subsolver */</font>
+<a name="line612">612: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetObjectiveAndGradient.html">TaoSetObjectiveAndGradient</a>(am-&gt;subsolverX, NULL, SubObjGradUpdate, tao));
+<a name="line613">613: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetJacobianEqualityRoutine.html">TaoSetJacobianEqualityRoutine</a>(am-&gt;subsolverX, am-&gt;JA, am-&gt;JApre, am-&gt;ops-&gt;misfitjac, am-&gt;misfitjacobianP));
+<a name="line614">614: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetJacobianEqualityRoutine.html">TaoSetJacobianEqualityRoutine</a>(am-&gt;subsolverZ, am-&gt;JB, am-&gt;JBpre, am-&gt;ops-&gt;regjac, am-&gt;regjacobianP));
+<a name="line615">615: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line616">616: </a>}
+
+<a name="line618">618: </a><strong><font color="#4169E1"><a name="TaoDestroy_ADMM"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoDestroy_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line619">619: </a>{
+<a name="line620">620: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line622">622: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line623">623: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;z));
+<a name="line624">624: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;Ax));
+<a name="line625">625: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;Axold));
+<a name="line626">626: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;Bz));
+<a name="line627">627: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;Bzold));
+<a name="line628">628: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;Bz0));
+<a name="line629">629: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;residual));
+<a name="line630">630: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;y));
+<a name="line631">631: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;yold));
+<a name="line632">632: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;y0));
+<a name="line633">633: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;yhat));
+<a name="line634">634: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;yhatold));
+<a name="line635">635: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;workLeft));
+<a name="line636">636: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;workJacobianRight));
+<a name="line637">637: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;am-&gt;workJacobianRight2));
+
+<a name="line639">639: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JA));
+<a name="line640">640: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JB));
+<a name="line641">641: </a>  <font color="#4169E1">if</font> (!am-&gt;xJI) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JApre));
+<a name="line642">642: </a>  <font color="#4169E1">if</font> (!am-&gt;zJI) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JBpre));
+<a name="line643">643: </a>  <font color="#4169E1">if</font> (am-&gt;Hx) {
+<a name="line644">644: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hx));
+<a name="line645">645: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hxpre));
+<a name="line646">646: </a>  }
+<a name="line647">647: </a>  <font color="#4169E1">if</font> (am-&gt;Hz) {
+<a name="line648">648: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hz));
+<a name="line649">649: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hzpre));
+<a name="line650">650: </a>  }
+<a name="line651">651: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;ATA));
+<a name="line652">652: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;BTB));
+<a name="line653">653: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoDestroy.html">TaoDestroy</a>(&amp;am-&gt;subsolverX));
+<a name="line654">654: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoDestroy.html">TaoDestroy</a>(&amp;am-&gt;subsolverZ));
+<a name="line655">655: </a>  am-&gt;parent = NULL;
+<a name="line656">656: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMSetRegularizerType_C"</font>, NULL));
+<a name="line657">657: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMGetRegularizerType_C"</font>, NULL));
+<a name="line658">658: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMSetUpdateType_C"</font>, NULL));
+<a name="line659">659: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMGetUpdateType_C"</font>, NULL));
+<a name="line660">660: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(tao-&gt;data));
+<a name="line661">661: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line662">662: </a>}
+
+<a name="line664">664: </a><font color="#B22222">/*MC</font>
+
+<a name="line666">666: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a> - Alternating direction method of multipliers method fo solving linear problems with</font>
+<a name="line667">667: </a><font color="#B22222">            constraints. in a min_x f(x) + g(z)  s.t. Ax+Bz=c.</font>
+<a name="line668">668: </a><font color="#B22222">            This algorithm employs two sub <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> solvers, of which type can be specified</font>
+<a name="line669">669: </a><font color="#B22222">            by the user. User need to provide ObjectiveAndGradient routine, and/or HessianRoutine for both subsolvers.</font>
+<a name="line670">670: </a><font color="#B22222">            Hessians can be given boolean flag determining whether they change with respect to a input vector. This can be set via</font>
+<a name="line671">671: </a><font color="#B22222">            TaoADMMSet{Misfit,Regularizer}HessianChangeStatus.</font>
+<a name="line672">672: </a><font color="#B22222">            Second subsolver does support <a href="../../../../../manualpages/Tao/TAOSHELL.html">TAOSHELL</a>. It should be noted that L1-norm is used for objective value for <a href="../../../../../manualpages/Tao/TAOSHELL.html">TAOSHELL</a> type.</font>
+<a name="line673">673: </a><font color="#B22222">            There is option to set regularizer option, and currently soft-threshold is implemented. For spectral penalty update,</font>
+<a name="line674">674: </a><font color="#B22222">            currently there are basic option and adaptive option.</font>
+<a name="line675">675: </a><font color="#B22222">            Constraint is set at Ax+Bz=c, and A and B can be set with TaoADMMSet{Misfit,Regularizer}ConstraintJacobian.</font>
+<a name="line676">676: </a><font color="#B22222">            c can be set with <a href="../../../../../manualpages/Tao/TaoADMMSetConstraintVectorRHS.html">TaoADMMSetConstraintVectorRHS</a>.</font>
+<a name="line677">677: </a><font color="#B22222">            The user can also provide regularizer weight for second subsolver.</font>
+
+<a name="line679">679: </a><font color="#B22222">  References:</font>
+<a name="line680">680: </a><font color="#B22222">. * - Xu, Zheng and Figueiredo, Mario A. T. and Yuan, Xiaoming and Studer, Christoph and Goldstein, Tom</font>
+<a name="line681">681: </a><font color="#B22222">          "Adaptive Relaxed ADMM: Convergence Theory and Practical Implementation"</font>
+<a name="line682">682: </a><font color="#B22222">          The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), July, 2017.</font>
+
+<a name="line684">684: </a><font color="#B22222">  Options Database Keys:</font>
+<a name="line685">685: </a><font color="#B22222">+ -tao_admm_regularizer_coefficient        - regularizer constant (default 1.e-6)</font>
+<a name="line686">686: </a><font color="#B22222">. -tao_admm_spectral_penalty               - Constant for Augmented Lagrangian term (default 1.)</font>
+<a name="line687">687: </a><font color="#B22222">. -tao_admm_relaxation_parameter           - relaxation parameter for Z update (default 1.)</font>
+<a name="line688">688: </a><font color="#B22222">. -tao_admm_tolerance_update_factor        - ADMM dynamic tolerance update factor (default 1.e-12)</font>
+<a name="line689">689: </a><font color="#B22222">. -tao_admm_spectral_penalty_update_factor - ADMM spectral penalty update curvature safeguard value (default 0.2)</font>
+<a name="line690">690: </a><font color="#B22222">. -tao_admm_minimum_spectral_penalty       - Set ADMM minimum spectral penalty (default 0)</font>
+<a name="line691">691: </a><font color="#B22222">. -tao_admm_dual_update                    - Lagrangian dual update policy ("basic","adaptive","adaptive-relaxed") (default "basic")</font>
+<a name="line692">692: </a><font color="#B22222">- -tao_admm_regularizer_type               - ADMM regularizer update rule ("user","soft-threshold") (default "soft-threshold")</font>
+
+<a name="line694">694: </a><font color="#B22222">  Level: beginner</font>
+
+<a name="line696">696: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetMisfitHessianChangeStatus.html">TaoADMMSetMisfitHessianChangeStatus</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetRegHessianChangeStatus.html">TaoADMMSetRegHessianChangeStatus</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMGetSpectralPenalty.html">TaoADMMGetSpectralPenalty</a>()`,</font>
+<a name="line697">697: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoADMMGetMisfitSubsolver.html">TaoADMMGetMisfitSubsolver</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMGetRegularizationSubsolver.html">TaoADMMGetRegularizationSubsolver</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetConstraintVectorRHS.html">TaoADMMSetConstraintVectorRHS</a>()`,</font>
+<a name="line698">698: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoADMMSetMinimumSpectralPenalty.html">TaoADMMSetMinimumSpectralPenalty</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerCoefficient.html">TaoADMMSetRegularizerCoefficient</a>()`,</font>
+<a name="line699">699: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a>()`,</font>
+<a name="line700">700: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoADMMSetMisfitObjectiveAndGradientRoutine.html">TaoADMMSetMisfitObjectiveAndGradientRoutine</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetMisfitHessianRoutine.html">TaoADMMSetMisfitHessianRoutine</a>()`,</font>
+<a name="line701">701: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerObjectiveAndGradientRoutine.html">TaoADMMSetRegularizerObjectiveAndGradientRoutine</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerHessianRoutine.html">TaoADMMSetRegularizerHessianRoutine</a>()`,</font>
+<a name="line702">702: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoGetADMMParentTao.html">TaoGetADMMParentTao</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMGetDualVector.html">TaoADMMGetDualVector</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerType.html">TaoADMMSetRegularizerType</a>()`,</font>
+<a name="line703">703: </a><font color="#B22222">          `<a href="../../../../../manualpages/Tao/TaoADMMGetRegularizerType.html">TaoADMMGetRegularizerType</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetUpdateType.html">TaoADMMSetUpdateType</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMGetUpdateType.html">TaoADMMGetUpdateType</a>()`</font>
+<a name="line704">704: </a><font color="#B22222">M*/</font>
+
+<a name="line706">706: </a><strong><font color="#4169E1"><a name="TaoCreate_ADMM"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoCreate_ADMM(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line707">707: </a>{
+<a name="line708">708: </a>  TAO_ADMM *am;
+
+<a name="line710">710: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line711">711: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;am));
+
+<a name="line713">713: </a>  tao-&gt;ops-&gt;destroy        = TaoDestroy_ADMM;
+<a name="line714">714: </a>  tao-&gt;ops-&gt;setup          = TaoSetUp_ADMM;
+<a name="line715">715: </a>  tao-&gt;ops-&gt;setfromoptions = TaoSetFromOptions_ADMM;
+<a name="line716">716: </a>  tao-&gt;ops-&gt;view           = TaoView_ADMM;
+<a name="line717">717: </a>  tao-&gt;ops-&gt;solve          = TaoSolve_ADMM;
+
+<a name="line719">719: </a>  tao-&gt;data           = (void *)am;
+<a name="line720">720: </a>  am-&gt;l1epsilon       = 1e-6;
+<a name="line721">721: </a>  am-&gt;lambda          = 1e-4;
+<a name="line722">722: </a>  am-&gt;mu              = 1.;
+<a name="line723">723: </a>  am-&gt;muold           = 0.;
+<a name="line724">724: </a>  am-&gt;mueps           = PETSC_MACHINE_EPSILON;
+<a name="line725">725: </a>  am-&gt;mumin           = 0.;
+<a name="line726">726: </a>  am-&gt;orthval         = 0.2;
+<a name="line727">727: </a>  am-&gt;T               = 2;
+<a name="line728">728: </a>  am-&gt;parent          = tao;
+<a name="line729">729: </a>  am-&gt;update          = <a href="../../../../../manualpages/Tao/TAO_ADMM_UPDATE_BASIC.html">TAO_ADMM_UPDATE_BASIC</a>;
+<a name="line730">730: </a>  am-&gt;regswitch       = <a href="../../../../../manualpages/Tao/TAO_ADMM_REGULARIZER_SOFT_THRESH.html">TAO_ADMM_REGULARIZER_SOFT_THRESH</a>;
+<a name="line731">731: </a>  am-&gt;tol             = PETSC_SMALL;
+<a name="line732">732: </a>  am-&gt;const_norm      = 0;
+<a name="line733">733: </a>  am-&gt;resnorm         = 0;
+<a name="line734">734: </a>  am-&gt;dualres         = 0;
+<a name="line735">735: </a>  am-&gt;ops-&gt;regobjgrad = NULL;
+<a name="line736">736: </a>  am-&gt;ops-&gt;reghess    = NULL;
+<a name="line737">737: </a>  am-&gt;gamma           = 1;
+<a name="line738">738: </a>  am-&gt;regobjgradP     = NULL;
+<a name="line739">739: </a>  am-&gt;reghessP        = NULL;
+<a name="line740">740: </a>  am-&gt;gatol_admm      = 1e-8;
+<a name="line741">741: </a>  am-&gt;catol_admm      = 0;
+<a name="line742">742: </a>  am-&gt;Hxchange        = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line743">743: </a>  am-&gt;Hzchange        = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line744">744: </a>  am-&gt;Hzbool          = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line745">745: </a>  am-&gt;Hxbool          = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+
+<a name="line747">747: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoCreate.html">TaoCreate</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), &amp;am-&gt;subsolverX));
+<a name="line748">748: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetOptionsPrefix.html">TaoSetOptionsPrefix</a>(am-&gt;subsolverX, <font color="#666666">"misfit_"</font>));
+<a name="line749">749: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectIncrementTabLevel.html">PetscObjectIncrementTabLevel</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverX, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, 1));
+<a name="line750">750: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoCreate.html">TaoCreate</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao), &amp;am-&gt;subsolverZ));
+<a name="line751">751: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetOptionsPrefix.html">TaoSetOptionsPrefix</a>(am-&gt;subsolverZ, <font color="#666666">"reg_"</font>));
+<a name="line752">752: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectIncrementTabLevel.html">PetscObjectIncrementTabLevel</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverZ, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, 1));
+
+<a name="line754">754: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetType.html">TaoSetType</a>(am-&gt;subsolverX, <a href="../../../../../manualpages/Tao/TAONLS.html">TAONLS</a>));
+<a name="line755">755: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Tao/TaoSetType.html">TaoSetType</a>(am-&gt;subsolverZ, <a href="../../../../../manualpages/Tao/TAONLS.html">TAONLS</a>));
+<a name="line756">756: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverX, <font color="#666666">"TaoGetADMMParentTao_ADMM"</font>, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao));
+<a name="line757">757: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)am-&gt;subsolverZ, <font color="#666666">"TaoGetADMMParentTao_ADMM"</font>, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao));
+<a name="line758">758: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMSetRegularizerType_C"</font>, TaoADMMSetRegularizerType_ADMM));
+<a name="line759">759: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMGetRegularizerType_C"</font>, TaoADMMGetRegularizerType_ADMM));
+<a name="line760">760: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMSetUpdateType_C"</font>, TaoADMMSetUpdateType_ADMM));
+<a name="line761">761: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoADMMGetUpdateType_C"</font>, TaoADMMGetUpdateType_ADMM));
+<a name="line762">762: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line763">763: </a>}
+
+<a name="line765">765: </a><font color="#B22222">/*@</font>
+<a name="line766">766: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitHessianChangeStatus.html">TaoADMMSetMisfitHessianChangeStatus</a> - Set boolean that determines  whether Hessian matrix of misfit subsolver changes with respect to input vector.</font>
+
+<a name="line768">768: </a><font color="#B22222">  Collective</font>
+
+<a name="line770">770: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line771">771: </a><font color="#B22222">+  tao - the <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> solver context.</font>
+<a name="line772">772: </a><font color="#B22222">-  b - the Hessian matrix change status boolean, `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>`  when the Hessian matrix does not change, `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` otherwise.</font>
+
+<a name="line774">774: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line776">776: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line777">777: </a><font color="#B22222">@*/</font>
+<a name="line778">778: </a><strong><font color="#4169E1"><a name="TaoADMMSetMisfitHessianChangeStatus"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitHessianChangeStatus.html">TaoADMMSetMisfitHessianChangeStatus</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> b)</font></strong>
+<a name="line779">779: </a>{
+<a name="line780">780: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line782">782: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line783">783: </a>  am-&gt;Hxchange = b;
+<a name="line784">784: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line785">785: </a>}
+
+<a name="line787">787: </a><font color="#B22222">/*@</font>
+<a name="line788">788: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetRegHessianChangeStatus.html">TaoADMMSetRegHessianChangeStatus</a> - Set boolean that determines whether Hessian matrix of regularization subsolver changes with respect to input vector.</font>
+
+<a name="line790">790: </a><font color="#B22222">  Collective</font>
+
+<a name="line792">792: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line793">793: </a><font color="#B22222">+  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+<a name="line794">794: </a><font color="#B22222">-  b - the Hessian matrix change status boolean, `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>` when the Hessian matrix does not change, `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` otherwise.</font>
+
+<a name="line796">796: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line798">798: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line799">799: </a><font color="#B22222">@*/</font>
+<a name="line800">800: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegHessianChangeStatus"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetRegHessianChangeStatus.html">TaoADMMSetRegHessianChangeStatus</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> b)</font></strong>
+<a name="line801">801: </a>{
+<a name="line802">802: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line804">804: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line805">805: </a>  am-&gt;Hzchange = b;
+<a name="line806">806: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line807">807: </a>}
+
+<a name="line809">809: </a><font color="#B22222">/*@</font>
+<a name="line810">810: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetSpectralPenalty.html">TaoADMMSetSpectralPenalty</a> - Set the spectral penalty (mu) value</font>
+
+<a name="line812">812: </a><font color="#B22222">  Collective</font>
+
+<a name="line814">814: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line815">815: </a><font color="#B22222">+  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+<a name="line816">816: </a><font color="#B22222">-  mu - spectral penalty</font>
+
+<a name="line818">818: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line820">820: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetMinimumSpectralPenalty.html">TaoADMMSetMinimumSpectralPenalty</a>()`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line821">821: </a><font color="#B22222">@*/</font>
+<a name="line822">822: </a><strong><font color="#4169E1"><a name="TaoADMMSetSpectralPenalty"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetSpectralPenalty.html">TaoADMMSetSpectralPenalty</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> mu)</font></strong>
+<a name="line823">823: </a>{
+<a name="line824">824: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line826">826: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line827">827: </a>  am-&gt;mu = mu;
+<a name="line828">828: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line829">829: </a>}
+
+<a name="line831">831: </a><font color="#B22222">/*@</font>
+<a name="line832">832: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMGetSpectralPenalty.html">TaoADMMGetSpectralPenalty</a> - Get the spectral penalty (mu) value</font>
+
+<a name="line834">834: </a><font color="#B22222">  Collective</font>
+
+<a name="line836">836: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line837">837: </a><font color="#B22222">.  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+
+<a name="line839">839: </a><font color="#B22222">  Output Parameter:</font>
+<a name="line840">840: </a><font color="#B22222">.  mu - spectral penalty</font>
+
+<a name="line842">842: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line844">844: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetMinimumSpectralPenalty.html">TaoADMMSetMinimumSpectralPenalty</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetSpectralPenalty.html">TaoADMMSetSpectralPenalty</a>()`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line845">845: </a><font color="#B22222">@*/</font>
+<a name="line846">846: </a><strong><font color="#4169E1"><a name="TaoADMMGetSpectralPenalty"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMGetSpectralPenalty.html">TaoADMMGetSpectralPenalty</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *mu)</font></strong>
+<a name="line847">847: </a>{
+<a name="line848">848: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line850">850: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line853">853: </a>  *mu = am-&gt;mu;
+<a name="line854">854: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line855">855: </a>}
+
+<a name="line857">857: </a><font color="#B22222">/*@</font>
+<a name="line858">858: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMGetMisfitSubsolver.html">TaoADMMGetMisfitSubsolver</a> - Get the pointer to the misfit subsolver inside `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+
+<a name="line860">860: </a><font color="#B22222">  Collective</font>
+
+<a name="line862">862: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line863">863: </a><font color="#B22222">.  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+
+<a name="line865">865: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line866">866: </a><font color="#B22222">.  misfit - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` subsolver context</font>
+
+<a name="line868">868: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line870">870: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`, `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>`</font>
+<a name="line871">871: </a><font color="#B22222">@*/</font>
+<a name="line872">872: </a><strong><font color="#4169E1"><a name="TaoADMMGetMisfitSubsolver"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMGetMisfitSubsolver.html">TaoADMMGetMisfitSubsolver</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> *misfit)</font></strong>
+<a name="line873">873: </a>{
+<a name="line874">874: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line876">876: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line877">877: </a>  *misfit = am-&gt;subsolverX;
+<a name="line878">878: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line879">879: </a>}
+
+<a name="line881">881: </a><font color="#B22222">/*@</font>
+<a name="line882">882: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMGetRegularizationSubsolver.html">TaoADMMGetRegularizationSubsolver</a> - Get the pointer to the regularization subsolver inside `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+
+<a name="line884">884: </a><font color="#B22222">  Collective</font>
+
+<a name="line886">886: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line887">887: </a><font color="#B22222">.  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+
+<a name="line889">889: </a><font color="#B22222">  Output Parameter:</font>
+<a name="line890">890: </a><font color="#B22222">.  reg - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` subsolver context</font>
+
+<a name="line892">892: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line894">894: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`, `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>`</font>
+<a name="line895">895: </a><font color="#B22222">@*/</font>
+<a name="line896">896: </a><strong><font color="#4169E1"><a name="TaoADMMGetRegularizationSubsolver"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMGetRegularizationSubsolver.html">TaoADMMGetRegularizationSubsolver</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> *reg)</font></strong>
+<a name="line897">897: </a>{
+<a name="line898">898: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line900">900: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line901">901: </a>  *reg = am-&gt;subsolverZ;
+<a name="line902">902: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line903">903: </a>}
+
+<a name="line905">905: </a><font color="#B22222">/*@</font>
+<a name="line906">906: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetConstraintVectorRHS.html">TaoADMMSetConstraintVectorRHS</a> - Set the RHS constraint vector for `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+
+<a name="line908">908: </a><font color="#B22222">  Collective</font>
+
+<a name="line910">910: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line911">911: </a><font color="#B22222">+ tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+<a name="line912">912: </a><font color="#B22222">- c - RHS vector</font>
+
+<a name="line914">914: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line916">916: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line917">917: </a><font color="#B22222">@*/</font>
+<a name="line918">918: </a><strong><font color="#4169E1"><a name="TaoADMMSetConstraintVectorRHS"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetConstraintVectorRHS.html">TaoADMMSetConstraintVectorRHS</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> c)</font></strong>
+<a name="line919">919: </a>{
+<a name="line920">920: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line922">922: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line923">923: </a>  am-&gt;constraint = c;
+<a name="line924">924: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line925">925: </a>}
+
+<a name="line927">927: </a><font color="#B22222">/*@</font>
+<a name="line928">928: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetMinimumSpectralPenalty.html">TaoADMMSetMinimumSpectralPenalty</a> - Set the minimum value for the spectral penalty</font>
+
+<a name="line930">930: </a><font color="#B22222">  Collective</font>
+
+<a name="line932">932: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line933">933: </a><font color="#B22222">+  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+<a name="line934">934: </a><font color="#B22222">-  mu  - minimum spectral penalty value</font>
+
+<a name="line936">936: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line938">938: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMGetSpectralPenalty.html">TaoADMMGetSpectralPenalty</a>()`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line939">939: </a><font color="#B22222">@*/</font>
+<a name="line940">940: </a><strong><font color="#4169E1"><a name="TaoADMMSetMinimumSpectralPenalty"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetMinimumSpectralPenalty.html">TaoADMMSetMinimumSpectralPenalty</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> mu)</font></strong>
+<a name="line941">941: </a>{
+<a name="line942">942: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line944">944: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line945">945: </a>  am-&gt;mumin = mu;
+<a name="line946">946: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line947">947: </a>}
+
+<a name="line949">949: </a><font color="#B22222">/*@</font>
+<a name="line950">950: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerCoefficient.html">TaoADMMSetRegularizerCoefficient</a> - Set the regularization coefficient lambda for L1 norm regularization case</font>
+
+<a name="line952">952: </a><font color="#B22222">  Collective</font>
+
+<a name="line954">954: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line955">955: </a><font color="#B22222">+  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+<a name="line956">956: </a><font color="#B22222">-  lambda - L1-norm regularizer coefficient</font>
+
+<a name="line958">958: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line960">960: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>()`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line961">961: </a><font color="#B22222">@*/</font>
+<a name="line962">962: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegularizerCoefficient"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerCoefficient.html">TaoADMMSetRegularizerCoefficient</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> lambda)</font></strong>
+<a name="line963">963: </a>{
+<a name="line964">964: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line966">966: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line967">967: </a>  am-&gt;lambda = lambda;
+<a name="line968">968: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line969">969: </a>}
+
+<a name="line971">971: </a><font color="#B22222">/*@C</font>
+<a name="line972">972: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a> - Set the constraint matrix B for the `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>` algorithm. Matrix B constrains the z variable.</font>
+
+<a name="line974">974: </a><font color="#B22222">  Collective</font>
+
+<a name="line976">976: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line977">977: </a><font color="#B22222">+ tao - the <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> solver context</font>
+<a name="line978">978: </a><font color="#B22222">. J - user-created regularizer constraint Jacobian matrix</font>
+<a name="line979">979: </a><font color="#B22222">. Jpre - user-created regularizer Jacobian constraint matrix for constructing the preconditioner, often this is `J`</font>
+<a name="line980">980: </a><font color="#B22222">. func - function pointer for the regularizer constraint Jacobian update function</font>
+<a name="line981">981: </a><font color="#B22222">- ctx - user context for the regularizer Hessian</font>
+
+<a name="line983">983: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line985">985: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerCoefficient.html">TaoADMMSetRegularizerCoefficient</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>()`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line986">986: </a><font color="#B22222">@*/</font>
+<a name="line987">987: </a><strong><font color="#4169E1"><a name="TaoADMMSetMisfitConstraintJacobian"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> J, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Jpre, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (*func)(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, void *), void *ctx)</font></strong>
+<a name="line988">988: </a>{
+<a name="line989">989: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line991">991: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line993">993: </a>  <font color="#4169E1">if</font> (J) {
+<a name="line995">995: </a>    PetscCheckSameComm(tao, 1, J, 2);
+<a name="line996">996: </a>  }
+<a name="line997">997: </a>  <font color="#4169E1">if</font> (Jpre) {
+<a name="line999">999: </a>    PetscCheckSameComm(tao, 1, Jpre, 3);
+<a name="line1000">1000: </a>  }
+<a name="line1001">1001: </a>  <font color="#4169E1">if</font> (ctx) am-&gt;misfitjacobianP = ctx;
+<a name="line1002">1002: </a>  <font color="#4169E1">if</font> (func) am-&gt;ops-&gt;misfitjac = func;
+
+<a name="line1004">1004: </a>  <font color="#4169E1">if</font> (J) {
+<a name="line1005">1005: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)J));
+<a name="line1006">1006: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JA));
+<a name="line1007">1007: </a>    am-&gt;JA = J;
+<a name="line1008">1008: </a>  }
+<a name="line1009">1009: </a>  <font color="#4169E1">if</font> (Jpre) {
+<a name="line1010">1010: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Jpre));
+<a name="line1011">1011: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JApre));
+<a name="line1012">1012: </a>    am-&gt;JApre = Jpre;
+<a name="line1013">1013: </a>  }
+<a name="line1014">1014: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1015">1015: </a>}
+
+<a name="line1017">1017: </a><font color="#B22222">/*@C</font>
+<a name="line1018">1018: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a> - Set the constraint matrix B for `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>` algorithm. Matrix B constraints z variable.</font>
+
+<a name="line1020">1020: </a><font color="#B22222">  Collective</font>
+
+<a name="line1022">1022: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line1023">1023: </a><font color="#B22222">+ tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` solver context</font>
+<a name="line1024">1024: </a><font color="#B22222">. J - user-created regularizer constraint Jacobian matrix</font>
+<a name="line1025">1025: </a><font color="#B22222">. Jpre - user-created regularizer Jacobian constraint matrix for constructing the preconditioner, often this is `J`</font>
+<a name="line1026">1026: </a><font color="#B22222">. func - function pointer for the regularizer constraint Jacobian update function</font>
+<a name="line1027">1027: </a><font color="#B22222">- ctx - user context for the regularizer Hessian</font>
+
+<a name="line1029">1029: </a><font color="#B22222">  Level: advanced</font>
+
+<a name="line1031">1031: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerCoefficient.html">TaoADMMSetRegularizerCoefficient</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a>()`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1032">1032: </a><font color="#B22222">@*/</font>
+<a name="line1033">1033: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegularizerConstraintJacobian"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> J, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Jpre, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (*func)(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, void *), void *ctx)</font></strong>
+<a name="line1034">1034: </a>{
+<a name="line1035">1035: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line1037">1037: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1039">1039: </a>  <font color="#4169E1">if</font> (J) {
+<a name="line1041">1041: </a>    PetscCheckSameComm(tao, 1, J, 2);
+<a name="line1042">1042: </a>  }
+<a name="line1043">1043: </a>  <font color="#4169E1">if</font> (Jpre) {
+<a name="line1045">1045: </a>    PetscCheckSameComm(tao, 1, Jpre, 3);
+<a name="line1046">1046: </a>  }
+<a name="line1047">1047: </a>  <font color="#4169E1">if</font> (ctx) am-&gt;regjacobianP = ctx;
+<a name="line1048">1048: </a>  <font color="#4169E1">if</font> (func) am-&gt;ops-&gt;regjac = func;
+
+<a name="line1050">1050: </a>  <font color="#4169E1">if</font> (J) {
+<a name="line1051">1051: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)J));
+<a name="line1052">1052: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JB));
+<a name="line1053">1053: </a>    am-&gt;JB = J;
+<a name="line1054">1054: </a>  }
+<a name="line1055">1055: </a>  <font color="#4169E1">if</font> (Jpre) {
+<a name="line1056">1056: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Jpre));
+<a name="line1057">1057: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;JBpre));
+<a name="line1058">1058: </a>    am-&gt;JBpre = Jpre;
+<a name="line1059">1059: </a>  }
+<a name="line1060">1060: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1061">1061: </a>}
+
+<a name="line1063">1063: </a><font color="#B22222">/*@C</font>
+<a name="line1064">1064: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitObjectiveAndGradientRoutine.html">TaoADMMSetMisfitObjectiveAndGradientRoutine</a> - Sets the user-defined misfit call-back function</font>
+
+<a name="line1066">1066: </a><font color="#B22222">   Collective</font>
+
+<a name="line1068">1068: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1069">1069: </a><font color="#B22222">+    tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+<a name="line1070">1070: </a><font color="#B22222">.    func - function pointer for the misfit value and gradient evaluation</font>
+<a name="line1071">1071: </a><font color="#B22222">-    ctx - user context for the misfit</font>
+
+<a name="line1073">1073: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line1075">1075: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1076">1076: </a><font color="#B22222">@*/</font>
+<a name="line1077">1077: </a><strong><font color="#4169E1"><a name="TaoADMMSetMisfitObjectiveAndGradientRoutine"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitObjectiveAndGradientRoutine.html">TaoADMMSetMisfitObjectiveAndGradientRoutine</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (*func)(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, void *), void *ctx)</font></strong>
+<a name="line1078">1078: </a>{
+<a name="line1079">1079: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line1081">1081: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1083">1083: </a>  am-&gt;misfitobjgradP     = ctx;
+<a name="line1084">1084: </a>  am-&gt;ops-&gt;misfitobjgrad = func;
+<a name="line1085">1085: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1086">1086: </a>}
+
+<a name="line1088">1088: </a><font color="#B22222">/*@C</font>
+<a name="line1089">1089: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitHessianRoutine.html">TaoADMMSetMisfitHessianRoutine</a> - Sets the user-defined misfit Hessian call-back</font>
+<a name="line1090">1090: </a><font color="#B22222">   function into the algorithm, to be used for subsolverX.</font>
+
+<a name="line1092">1092: </a><font color="#B22222">   Collective</font>
+
+<a name="line1094">1094: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1095">1095: </a><font color="#B22222">+ tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+<a name="line1096">1096: </a><font color="#B22222">. H - user-created matrix for the Hessian of the misfit term</font>
+<a name="line1097">1097: </a><font color="#B22222">. Hpre - user-created matrix for the preconditioner of Hessian of the misfit term</font>
+<a name="line1098">1098: </a><font color="#B22222">. func - function pointer for the misfit Hessian evaluation</font>
+<a name="line1099">1099: </a><font color="#B22222">- ctx - user context for the misfit Hessian</font>
+
+<a name="line1101">1101: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line1103">1103: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1104">1104: </a><font color="#B22222">@*/</font>
+<a name="line1105">1105: </a><strong><font color="#4169E1"><a name="TaoADMMSetMisfitHessianRoutine"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetMisfitHessianRoutine.html">TaoADMMSetMisfitHessianRoutine</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (*func)(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, void *), void *ctx)</font></strong>
+<a name="line1106">1106: </a>{
+<a name="line1107">1107: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line1109">1109: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1111">1111: </a>  <font color="#4169E1">if</font> (H) {
+<a name="line1113">1113: </a>    PetscCheckSameComm(tao, 1, H, 2);
+<a name="line1114">1114: </a>  }
+<a name="line1115">1115: </a>  <font color="#4169E1">if</font> (Hpre) {
+<a name="line1117">1117: </a>    PetscCheckSameComm(tao, 1, Hpre, 3);
+<a name="line1118">1118: </a>  }
+<a name="line1119">1119: </a>  <font color="#4169E1">if</font> (ctx) am-&gt;misfithessP = ctx;
+<a name="line1120">1120: </a>  <font color="#4169E1">if</font> (func) am-&gt;ops-&gt;misfithess = func;
+<a name="line1121">1121: </a>  <font color="#4169E1">if</font> (H) {
+<a name="line1122">1122: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)H));
+<a name="line1123">1123: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hx));
+<a name="line1124">1124: </a>    am-&gt;Hx = H;
+<a name="line1125">1125: </a>  }
+<a name="line1126">1126: </a>  <font color="#4169E1">if</font> (Hpre) {
+<a name="line1127">1127: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Hpre));
+<a name="line1128">1128: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hxpre));
+<a name="line1129">1129: </a>    am-&gt;Hxpre = Hpre;
+<a name="line1130">1130: </a>  }
+<a name="line1131">1131: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1132">1132: </a>}
+
+<a name="line1134">1134: </a><font color="#B22222">/*@C</font>
+<a name="line1135">1135: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerObjectiveAndGradientRoutine.html">TaoADMMSetRegularizerObjectiveAndGradientRoutine</a> - Sets the user-defined regularizer call-back function</font>
+
+<a name="line1137">1137: </a><font color="#B22222">   Collective</font>
+
+<a name="line1139">1139: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1140">1140: </a><font color="#B22222">+ tao - the <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> context</font>
+<a name="line1141">1141: </a><font color="#B22222">. func - function pointer for the regularizer value and gradient evaluation</font>
+<a name="line1142">1142: </a><font color="#B22222">- ctx - user context for the regularizer</font>
+
+<a name="line1144">1144: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line1146">1146: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1147">1147: </a><font color="#B22222">@*/</font>
+<a name="line1148">1148: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegularizerObjectiveAndGradientRoutine"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerObjectiveAndGradientRoutine.html">TaoADMMSetRegularizerObjectiveAndGradientRoutine</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (*func)(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, void *), void *ctx)</font></strong>
+<a name="line1149">1149: </a>{
+<a name="line1150">1150: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line1152">1152: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1154">1154: </a>  am-&gt;regobjgradP     = ctx;
+<a name="line1155">1155: </a>  am-&gt;ops-&gt;regobjgrad = func;
+<a name="line1156">1156: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1157">1157: </a>}
+
+<a name="line1159">1159: </a><font color="#B22222">/*@C</font>
+<a name="line1160">1160: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerHessianRoutine.html">TaoADMMSetRegularizerHessianRoutine</a> - Sets the user-defined regularizer Hessian call-back</font>
+<a name="line1161">1161: </a><font color="#B22222">   function, to be used for subsolverZ.</font>
+
+<a name="line1163">1163: </a><font color="#B22222">   Collective</font>
+
+<a name="line1165">1165: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line1166">1166: </a><font color="#B22222">+ tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+<a name="line1167">1167: </a><font color="#B22222">. H - user-created matrix for the Hessian of the regularization term</font>
+<a name="line1168">1168: </a><font color="#B22222">. Hpre - user-created matrix for the preconditioner of Hessian of the regularization term</font>
+<a name="line1169">1169: </a><font color="#B22222">. func - function pointer for the regularizer Hessian evaluation</font>
+<a name="line1170">1170: </a><font color="#B22222">- ctx - user context for the regularizer Hessian</font>
+
+<a name="line1172">1172: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line1174">1174: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1175">1175: </a><font color="#B22222">@*/</font>
+<a name="line1176">1176: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegularizerHessianRoutine"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerHessianRoutine.html">TaoADMMSetRegularizerHessianRoutine</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (*func)(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>, void *), void *ctx)</font></strong>
+<a name="line1177">1177: </a>{
+<a name="line1178">1178: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line1180">1180: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1182">1182: </a>  <font color="#4169E1">if</font> (H) {
+<a name="line1184">1184: </a>    PetscCheckSameComm(tao, 1, H, 2);
+<a name="line1185">1185: </a>  }
+<a name="line1186">1186: </a>  <font color="#4169E1">if</font> (Hpre) {
+<a name="line1188">1188: </a>    PetscCheckSameComm(tao, 1, Hpre, 3);
+<a name="line1189">1189: </a>  }
+<a name="line1190">1190: </a>  <font color="#4169E1">if</font> (ctx) am-&gt;reghessP = ctx;
+<a name="line1191">1191: </a>  <font color="#4169E1">if</font> (func) am-&gt;ops-&gt;reghess = func;
+<a name="line1192">1192: </a>  <font color="#4169E1">if</font> (H) {
+<a name="line1193">1193: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)H));
+<a name="line1194">1194: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hz));
+<a name="line1195">1195: </a>    am-&gt;Hz = H;
+<a name="line1196">1196: </a>  }
+<a name="line1197">1197: </a>  <font color="#4169E1">if</font> (Hpre) {
+<a name="line1198">1198: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Hpre));
+<a name="line1199">1199: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;am-&gt;Hzpre));
+<a name="line1200">1200: </a>    am-&gt;Hzpre = Hpre;
+<a name="line1201">1201: </a>  }
+<a name="line1202">1202: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1203">1203: </a>}
+
+<a name="line1205">1205: </a><font color="#B22222">/*@</font>
+<a name="line1206">1206: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoGetADMMParentTao.html">TaoGetADMMParentTao</a> - Gets pointer to parent `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`, used by inner subsolver.</font>
+
+<a name="line1208">1208: </a><font color="#B22222">   Collective</font>
+
+<a name="line1210">1210: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line1211">1211: </a><font color="#B22222">. tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+
+<a name="line1213">1213: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line1214">1214: </a><font color="#B22222">. admm_tao - the parent `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+
+<a name="line1216">1216: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line1218">1218: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1219">1219: </a><font color="#B22222">@*/</font>
+<a name="line1220">1220: </a><strong><font color="#4169E1"><a name="TaoGetADMMParentTao"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoGetADMMParentTao.html">TaoGetADMMParentTao</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/Tao.html">Tao</a> *admm_tao)</font></strong>
+<a name="line1221">1221: </a>{
+<a name="line1222">1222: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1224">1224: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectQuery.html">PetscObjectQuery</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)tao, <font color="#666666">"TaoGetADMMParentTao_ADMM"</font>, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a> *)admm_tao));
+<a name="line1225">1225: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1226">1226: </a>}
+
+<a name="line1228">1228: </a><font color="#B22222">/*@</font>
+<a name="line1229">1229: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMGetDualVector.html">TaoADMMGetDualVector</a> - Returns the dual vector associated with the current `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>` state</font>
+
+<a name="line1231">1231: </a><font color="#B22222">  Not Collective</font>
+
+<a name="line1233">1233: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line1234">1234: </a><font color="#B22222">. tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+
+<a name="line1236">1236: </a><font color="#B22222">  Output Parameter:</font>
+<a name="line1237">1237: </a><font color="#B22222">. Y - the current solution</font>
+
+<a name="line1239">1239: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line1241">1241: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1242">1242: </a><font color="#B22222">@*/</font>
+<a name="line1243">1243: </a><strong><font color="#4169E1"><a name="TaoADMMGetDualVector"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMGetDualVector.html">TaoADMMGetDualVector</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> *Y)</font></strong>
+<a name="line1244">1244: </a>{
+<a name="line1245">1245: </a>  TAO_ADMM *am = (TAO_ADMM *)tao-&gt;data;
+
+<a name="line1247">1247: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1249">1249: </a>  *Y = am-&gt;y;
+<a name="line1250">1250: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1251">1251: </a>}
+
+<a name="line1253">1253: </a><font color="#B22222">/*@</font>
+<a name="line1254">1254: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerType.html">TaoADMMSetRegularizerType</a> - Set regularizer type for `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>` routine</font>
+
+<a name="line1256">1256: </a><font color="#B22222">  Not Collective</font>
+
+<a name="line1258">1258: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line1259">1259: </a><font color="#B22222">+ tao  - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+<a name="line1260">1260: </a><font color="#B22222">- type - regularizer type</font>
+
+<a name="line1262">1262: </a><font color="#B22222">  Options Database Key:</font>
+<a name="line1263">1263: </a><font color="#B22222">.  -tao_admm_regularizer_type &lt;admm_regularizer_user,admm_regularizer_soft_thresh&gt; - select the regularizer</font>
+
+<a name="line1265">1265: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line1267">1267: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMGetRegularizerType.html">TaoADMMGetRegularizerType</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a>`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1268">1268: </a><font color="#B22222">@*/</font>
+<a name="line1269">1269: </a><strong><font color="#4169E1"><a name="TaoADMMSetRegularizerType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerType.html">TaoADMMSetRegularizerType</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a> type)</font></strong>
+<a name="line1270">1270: </a>{
+<a name="line1271">1271: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1274">1274: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(tao, <font color="#666666">"TaoADMMSetRegularizerType_C"</font>, (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a>), (tao, type));
+<a name="line1275">1275: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1276">1276: </a>}
+
+<a name="line1278">1278: </a><font color="#B22222">/*@</font>
+<a name="line1279">1279: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoADMMGetRegularizerType.html">TaoADMMGetRegularizerType</a> - Gets the type of regularizer routine for `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+
+<a name="line1281">1281: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line1283">1283: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line1284">1284: </a><font color="#B22222">.  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+
+<a name="line1286">1286: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line1287">1287: </a><font color="#B22222">.  type - the type of regularizer</font>
+
+<a name="line1289">1289: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1291">1291: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetRegularizerType.html">TaoADMMSetRegularizerType</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a>`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1292">1292: </a><font color="#B22222">@*/</font>
+<a name="line1293">1293: </a><strong><font color="#4169E1"><a name="TaoADMMGetRegularizerType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMGetRegularizerType.html">TaoADMMGetRegularizerType</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a> *type)</font></strong>
+<a name="line1294">1294: </a>{
+<a name="line1295">1295: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1297">1297: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(tao, <font color="#666666">"TaoADMMGetRegularizerType_C"</font>, (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Tao/TaoADMMRegularizerType.html">TaoADMMRegularizerType</a> *), (tao, type));
+<a name="line1298">1298: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1299">1299: </a>}
+
+<a name="line1301">1301: </a><font color="#B22222">/*@</font>
+<a name="line1302">1302: </a><font color="#B22222">  <a href="../../../../../manualpages/Tao/TaoADMMSetUpdateType.html">TaoADMMSetUpdateType</a> - Set update routine for `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>` routine</font>
+
+<a name="line1304">1304: </a><font color="#B22222">  Not Collective</font>
+
+<a name="line1306">1306: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line1307">1307: </a><font color="#B22222">+ tao  - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+<a name="line1308">1308: </a><font color="#B22222">- type - spectral parameter update type</font>
+
+<a name="line1310">1310: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line1312">1312: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMGetUpdateType.html">TaoADMMGetUpdateType</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a>`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1313">1313: </a><font color="#B22222">@*/</font>
+<a name="line1314">1314: </a><strong><font color="#4169E1"><a name="TaoADMMSetUpdateType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMSetUpdateType.html">TaoADMMSetUpdateType</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a> type)</font></strong>
+<a name="line1315">1315: </a>{
+<a name="line1316">1316: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1319">1319: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(tao, <font color="#666666">"TaoADMMSetUpdateType_C"</font>, (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a>), (tao, type));
+<a name="line1320">1320: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1321">1321: </a>}
+
+<a name="line1323">1323: </a><font color="#B22222">/*@</font>
+<a name="line1324">1324: </a><font color="#B22222">   <a href="../../../../../manualpages/Tao/TaoADMMGetUpdateType.html">TaoADMMGetUpdateType</a> - Gets the type of spectral penalty update routine for `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+
+<a name="line1326">1326: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line1328">1328: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line1329">1329: </a><font color="#B22222">.  tao - the `<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>` context</font>
+
+<a name="line1331">1331: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line1332">1332: </a><font color="#B22222">.  type - the type of spectral penalty update routine</font>
+
+<a name="line1334">1334: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line1336">1336: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Tao/TaoADMMSetUpdateType.html">TaoADMMSetUpdateType</a>()`, `<a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a>`, `<a href="../../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>`</font>
+<a name="line1337">1337: </a><font color="#B22222">@*/</font>
+<a name="line1338">1338: </a><strong><font color="#4169E1"><a name="TaoADMMGetUpdateType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Tao/TaoADMMGetUpdateType.html">TaoADMMGetUpdateType</a>(<a href="../../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a> *type)</font></strong>
+<a name="line1339">1339: </a>{
+<a name="line1340">1340: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1342">1342: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(tao, <font color="#666666">"TaoADMMGetUpdateType_C"</font>, (<a href="../../../../../manualpages/Tao/Tao.html">Tao</a>, <a href="../../../../../manualpages/Tao/TaoADMMUpdateType.html">TaoADMMUpdateType</a> *), (tao, type));
+<a name="line1343">1343: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1344">1344: </a>}
+</pre>
+</body>
+
+</html>

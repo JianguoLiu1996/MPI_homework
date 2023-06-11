@@ -1,0 +1,483 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/mat/coarsen/impls/misk/misk.c">Actual source code: misk.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:10+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsc/private/matimpl.h.html">&lt;petsc/private/matimpl.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../impls/aij/seq/aij.h.html">&lt;../src/mat/impls/aij/seq/aij.h&gt;</A>
+<a name="line3">  3: </a>#include <A href="../../../impls/aij/mpi/mpiaij.h.html">&lt;../src/mat/impls/aij/mpi/mpiaij.h&gt;</A>
+<a name="line4">  4: </a>#include <A href="../../../../../include/petscsf.h.html">&lt;petscsf.h&gt;</A>
+
+<a name="line6">  6: </a><strong><font color="#228B22">#define MIS_NOT_DONE       -2</font></strong>
+<a name="line7">  7: </a><strong><font color="#228B22">#define MIS_DELETED        -1</font></strong>
+<a name="line8">  8: </a><strong><font color="#228B22">#define MIS_REMOVED        -3</font></strong>
+<a name="line9">  9: </a><strong><font color="#228B22">#define MIS_IS_SELECTED(s) (s &gt;= 0)</font></strong>
+
+<a name="line11"> 11: </a><font color="#B22222">/* edge for priority queue */</font>
+<a name="line12"> 12: </a><font color="#4169E1"><a name="edge_tag"></a>typedef struct edge_tag </font>{
+<a name="line13"> 13: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> weight;
+<a name="line14"> 14: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  lid0, gid1, cpid1;
+<a name="line15"> 15: </a>} Edge;
+
+<a name="line17"> 17: </a><strong><font color="#4169E1"><a name="PetscCoarsenDataView_private"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscCoarsenDataView_private(PetscCoarsenData *agg_lists, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line18"> 18: </a>{
+<a name="line19"> 19: </a>  PetscCDIntNd *pos, *pos2;
+
+<a name="line21"> 21: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line22"> 22: </a>  <font color="#4169E1">for</font> (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> kk = 0; kk &lt; agg_lists-&gt;size; kk++) {
+<a name="line23"> 23: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDGetHeadPos(agg_lists, kk, &amp;pos));
+<a name="line24"> 24: </a>    <font color="#4169E1">if</font> ((pos2 = pos)) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISynchronizedPrintf.html">PetscViewerASCIISynchronizedPrintf</a>(viewer, <font color="#666666">"selected local %d: "</font>, (int)kk));
+<a name="line25"> 25: </a>    <font color="#4169E1">while</font> (pos) {
+<a name="line26"> 26: </a>      <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> gid1;
+<a name="line27"> 27: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDIntNdGetID(pos, &amp;gid1));
+<a name="line28"> 28: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDGetNextPos(agg_lists, kk, &amp;pos));
+<a name="line29"> 29: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISynchronizedPrintf.html">PetscViewerASCIISynchronizedPrintf</a>(viewer, <font color="#666666">" %d "</font>, (int)gid1));
+<a name="line30"> 30: </a>    }
+<a name="line31"> 31: </a>    <font color="#4169E1">if</font> (pos2) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISynchronizedPrintf.html">PetscViewerASCIISynchronizedPrintf</a>(viewer, <font color="#666666">"\n"</font>));
+<a name="line32"> 32: </a>  }
+<a name="line33"> 33: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line34"> 34: </a>}
+
+<a name="line36"> 36: </a><font color="#B22222">/*</font>
+<a name="line37"> 37: </a><font color="#B22222">  MatCoarsenApply_MISK_private - parallel heavy edge matching</font>
+
+<a name="line39"> 39: </a><font color="#B22222">  Input Parameter:</font>
+<a name="line40"> 40: </a><font color="#B22222">   . perm - permutation</font>
+<a name="line41"> 41: </a><font color="#B22222">   . Gmat - global matrix of graph (data not defined)</font>
+
+<a name="line43"> 43: </a><font color="#B22222">  Output Parameter:</font>
+<a name="line44"> 44: </a><font color="#B22222">   . a_locals_llist - array of list of local nodes rooted at local node</font>
+<a name="line45"> 45: </a><font color="#B22222">*/</font>
+<a name="line46"> 46: </a><strong><font color="#4169E1"><a name="MatCoarsenApply_MISK_private"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatCoarsenApply_MISK_private(<a href="../../../../../manualpages/IS/IS.html">IS</a> perm, const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> misk, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> Gmat, PetscCoarsenData **a_locals_llist)</font></strong>
+<a name="line47"> 47: </a>{
+<a name="line48"> 48: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   isMPI;
+<a name="line49"> 49: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>    comm;
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> rank, size;
+<a name="line51"> 51: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>         cMat, Prols[5], Rtot;
+<a name="line52"> 52: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> one = 1;
+
+<a name="line54"> 54: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line58"> 58: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(misk &lt; 5 &amp;&amp; misk &gt; 0, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"too many/few levels: %d"</font>, (int)misk);
+<a name="line59"> 59: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectBaseTypeCompare.html">PetscObjectBaseTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Gmat, <a href="../../../../../manualpages/Mat/MATMPIAIJ.html">MATMPIAIJ</a>, &amp;isMPI));
+<a name="line60"> 60: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Gmat, &amp;comm));
+<a name="line61"> 61: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(comm, &amp;rank));
+<a name="line62"> 62: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm, &amp;size));
+<a name="line63"> 63: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(Gmat, <font color="#666666">"misk %d\n"</font>, (int)misk));
+<a name="line64"> 64: </a>  <font color="#B22222">/* make a copy of the graph, this gets destroyed in iterates */</font>
+<a name="line65"> 65: </a>  <font color="#4169E1">if</font> (misk &gt; 1) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDuplicate.html">MatDuplicate</a>(Gmat, <a href="../../../../../manualpages/Mat/MatDuplicateOption.html">MAT_COPY_VALUES</a>, &amp;cMat));
+<a name="line66"> 66: </a>  <font color="#4169E1">else</font> cMat = Gmat;
+<a name="line67"> 67: </a>  <font color="#4169E1">for</font> (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> iterIdx = 0; iterIdx &lt; misk; iterIdx++) {
+<a name="line68"> 68: </a>    Mat_SeqAIJ       *matA, *matB = NULL;
+<a name="line69"> 69: </a>    Mat_MPIAIJ       *mpimat = NULL;
+<a name="line70"> 70: </a>    const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   *perm_ix;
+<a name="line71"> 71: </a>    const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    nloc = cMat-&gt;rmap-&gt;n;
+<a name="line72"> 72: </a>    PetscCoarsenData *agg_lists;
+<a name="line73"> 73: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         *cpcol_gid = NULL, *cpcol_state, *lid_cprowID, *lid_state, *lid_parent_gid = NULL;
+<a name="line74"> 74: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>          num_fine_ghosts, kk, n, ix, j, *idx, *ai, Iend, my0, nremoved, gid, lid, cpid, lidj, sgid, t1, t2, slid, nDone, nselected = 0, state;
+<a name="line75"> 75: </a>    <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        *lid_removed, isOK;
+<a name="line76"> 76: </a>    <a href="../../../../../manualpages/IS/PetscLayout.html">PetscLayout</a>       layout;
+<a name="line77"> 77: </a>    <a href="../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>           sf;
+
+<a name="line79"> 79: </a>    <font color="#4169E1">if</font> (isMPI) {
+<a name="line80"> 80: </a>      mpimat = (Mat_MPIAIJ *)cMat-&gt;data;
+<a name="line81"> 81: </a>      matA   = (Mat_SeqAIJ *)mpimat-&gt;A-&gt;data;
+<a name="line82"> 82: </a>      matB   = (Mat_SeqAIJ *)mpimat-&gt;B-&gt;data;
+<a name="line83"> 83: </a>      <font color="#B22222">/* force compressed storage of B */</font>
+<a name="line84"> 84: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCheckCompressedRow.html">MatCheckCompressedRow</a>(mpimat-&gt;B, matB-&gt;nonzerorowcnt, &amp;matB-&gt;compressedrow, matB-&gt;i, cMat-&gt;rmap-&gt;n, -1.0));
+<a name="line85"> 85: </a>    } <font color="#4169E1">else</font> {
+<a name="line86"> 86: </a>      <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> isAIJ;
+<a name="line87"> 87: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectBaseTypeCompare.html">PetscObjectBaseTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)cMat, <a href="../../../../../manualpages/Mat/MATSEQAIJ.html">MATSEQAIJ</a>, &amp;isAIJ));
+<a name="line88"> 88: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(isAIJ, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER</a>, <font color="#666666">"Require AIJ matrix."</font>);
+<a name="line89"> 89: </a>      matA = (Mat_SeqAIJ *)cMat-&gt;data;
+<a name="line90"> 90: </a>    }
+<a name="line91"> 91: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRange.html">MatGetOwnershipRange</a>(cMat, &amp;my0, &amp;Iend));
+<a name="line92"> 92: </a>    <font color="#4169E1">if</font> (mpimat) {
+<a name="line93"> 93: </a>      <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *lid_gid;
+<a name="line94"> 94: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nloc, &amp;lid_gid)); <font color="#B22222">/* explicit array needed */</font>
+<a name="line95"> 95: </a>      <font color="#4169E1">for</font> (kk = 0, gid = my0; kk &lt; nloc; kk++, gid++) lid_gid[kk] = gid;
+<a name="line96"> 96: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(mpimat-&gt;lvec, &amp;num_fine_ghosts));
+<a name="line97"> 97: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(num_fine_ghosts, &amp;cpcol_gid));
+<a name="line98"> 98: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(num_fine_ghosts, &amp;cpcol_state));
+<a name="line99"> 99: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFCreate.html">PetscSFCreate</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)cMat), &amp;sf));
+<a name="line100">100: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetLayouts.html">MatGetLayouts</a>(cMat, &amp;layout, NULL));
+<a name="line101">101: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFSetGraphLayout.html">PetscSFSetGraphLayout</a>(sf, layout, num_fine_ghosts, NULL, <a href="../../../../../manualpages/Sys/PetscCopyMode.html">PETSC_COPY_VALUES</a>, mpimat-&gt;garray));
+<a name="line102">102: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFBcastBegin.html">PetscSFBcastBegin</a>(sf, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, lid_gid, cpcol_gid, MPI_REPLACE));
+<a name="line103">103: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFBcastEnd.html">PetscSFBcastEnd</a>(sf, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, lid_gid, cpcol_gid, MPI_REPLACE));
+<a name="line104">104: </a>      <font color="#4169E1">for</font> (kk = 0; kk &lt; num_fine_ghosts; kk++) cpcol_state[kk] = MIS_NOT_DONE;
+<a name="line105">105: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(lid_gid));
+<a name="line106">106: </a>    } <font color="#4169E1">else</font> num_fine_ghosts = 0;
+
+<a name="line108">108: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nloc, &amp;lid_cprowID));
+<a name="line109">109: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nloc, &amp;lid_removed)); <font color="#B22222">/* explicit array needed */</font>
+<a name="line110">110: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nloc, &amp;lid_parent_gid));
+<a name="line111">111: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nloc, &amp;lid_state));
+
+<a name="line113">113: </a>    <font color="#B22222">/* the data structure */</font>
+<a name="line114">114: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDCreate(nloc, &amp;agg_lists));
+<a name="line115">115: </a>    <font color="#B22222">/* need an inverse map - locals */</font>
+<a name="line116">116: </a>    <font color="#4169E1">for</font> (kk = 0; kk &lt; nloc; kk++) {
+<a name="line117">117: </a>      lid_cprowID[kk]    = -1;
+<a name="line118">118: </a>      lid_removed[kk]    = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line119">119: </a>      lid_parent_gid[kk] = -1.0;
+<a name="line120">120: </a>      lid_state[kk]      = MIS_NOT_DONE;
+<a name="line121">121: </a>    }
+<a name="line122">122: </a>    <font color="#B22222">/* set index into cmpressed row 'lid_cprowID' */</font>
+<a name="line123">123: </a>    <font color="#4169E1">if</font> (matB) {
+<a name="line124">124: </a>      <font color="#4169E1">for</font> (ix = 0; ix &lt; matB-&gt;compressedrow.nrows; ix++) {
+<a name="line125">125: </a>        lid              = matB-&gt;compressedrow.rindex[ix];
+<a name="line126">126: </a>        lid_cprowID[lid] = ix;
+<a name="line127">127: </a>      }
+<a name="line128">128: </a>    }
+<a name="line129">129: </a>    <font color="#B22222">/* MIS */</font>
+<a name="line130">130: </a>    nremoved = nDone = 0;
+<a name="line131">131: </a>    <font color="#4169E1">if</font> (!iterIdx) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISGetIndices.html">ISGetIndices</a>(perm, &amp;perm_ix)); // use permutation on first MIS
+<a name="line132">132: </a>    <font color="#4169E1">else</font> perm_ix = NULL;
+<a name="line133">133: </a>    <font color="#4169E1">while</font> (nDone &lt; nloc || <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>) { <font color="#B22222">/* asynchronous not implemented */</font>
+<a name="line134">134: </a>      <font color="#B22222">/* check all vertices */</font>
+<a name="line135">135: </a>      <font color="#4169E1">for</font> (kk = 0; kk &lt; nloc; kk++) {
+<a name="line136">136: </a>        lid   = perm_ix ? perm_ix[kk] : kk;
+<a name="line137">137: </a>        state = lid_state[lid];
+<a name="line138">138: </a>        <font color="#4169E1">if</font> (lid_removed[lid]) <font color="#4169E1">continue</font>;
+<a name="line139">139: </a>        <font color="#4169E1">if</font> (state == MIS_NOT_DONE) {
+<a name="line140">140: </a>          <font color="#B22222">/* parallel test, delete if selected ghost */</font>
+<a name="line141">141: </a>          isOK = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line142">142: </a>          <font color="#B22222">/* parallel test */</font>
+<a name="line143">143: </a>          <font color="#4169E1">if</font> ((ix = lid_cprowID[lid]) != -1) { <font color="#B22222">/* if I have any ghost neighbors */</font>
+<a name="line144">144: </a>            ai  = matB-&gt;compressedrow.i;
+<a name="line145">145: </a>            n   = ai[ix + 1] - ai[ix];
+<a name="line146">146: </a>            idx = matB-&gt;j + ai[ix];
+<a name="line147">147: </a>            <font color="#4169E1">for</font> (j = 0; j &lt; n; j++) {
+<a name="line148">148: </a>              cpid = idx[j]; <font color="#B22222">/* compressed row ID in B mat */</font>
+<a name="line149">149: </a>              gid  = cpcol_gid[cpid];
+<a name="line150">150: </a>              <font color="#4169E1">if</font> (cpcol_state[cpid] == MIS_NOT_DONE &amp;&amp; gid &gt;= Iend) { <font color="#B22222">/* or pe&gt;rank */</font>
+<a name="line151">151: </a>                isOK = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;                                   <font color="#B22222">/* can not delete */</font>
+<a name="line152">152: </a>                <font color="#4169E1">break</font>;
+<a name="line153">153: </a>              }
+<a name="line154">154: </a>            }
+<a name="line155">155: </a>          }
+<a name="line156">156: </a>          <font color="#4169E1">if</font> (isOK) { <font color="#B22222">/* select or remove this vertex if it is a true singleton like a BC */</font>
+<a name="line157">157: </a>            nDone++;
+<a name="line158">158: </a>            <font color="#B22222">/* check for singleton */</font>
+<a name="line159">159: </a>            ai = matA-&gt;i;
+<a name="line160">160: </a>            n  = ai[lid + 1] - ai[lid];
+<a name="line161">161: </a>            <font color="#4169E1">if</font> (n &lt; 2) {
+<a name="line162">162: </a>              <font color="#B22222">/* if I have any ghost adj then not a singleton */</font>
+<a name="line163">163: </a>              ix = lid_cprowID[lid];
+<a name="line164">164: </a>              <font color="#4169E1">if</font> (ix == -1 || !(matB-&gt;compressedrow.i[ix + 1] - matB-&gt;compressedrow.i[ix])) {
+<a name="line165">165: </a>                nremoved++;
+<a name="line166">166: </a>                lid_removed[lid] = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line167">167: </a>                <font color="#B22222">/* should select this because it is technically in the MIS but lets not */</font>
+<a name="line168">168: </a>                <font color="#4169E1">continue</font>; <font color="#B22222">/* one local adj (me) and no ghost - singleton */</font>
+<a name="line169">169: </a>              }
+<a name="line170">170: </a>            }
+<a name="line171">171: </a>            <font color="#B22222">/* SELECTED state encoded with global index */</font>
+<a name="line172">172: </a>            lid_state[lid] = nselected; // &gt;= 0  is selected, cache <font color="#4169E1">for</font> ordering coarse grid
+<a name="line173">173: </a>            nselected++;
+<a name="line174">174: </a>            <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDAppendID(agg_lists, lid, lid + my0));
+<a name="line175">175: </a>            <font color="#B22222">/* delete local adj */</font>
+<a name="line176">176: </a>            idx = matA-&gt;j + ai[lid];
+<a name="line177">177: </a>            <font color="#4169E1">for</font> (j = 0; j &lt; n; j++) {
+<a name="line178">178: </a>              lidj = idx[j];
+<a name="line179">179: </a>              <font color="#4169E1">if</font> (lid_state[lidj] == MIS_NOT_DONE) {
+<a name="line180">180: </a>                nDone++;
+<a name="line181">181: </a>                <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDAppendID(agg_lists, lid, lidj + my0));
+<a name="line182">182: </a>                lid_state[lidj] = MIS_DELETED; <font color="#B22222">/* delete this */</font>
+<a name="line183">183: </a>              }
+<a name="line184">184: </a>            }
+<a name="line185">185: </a>          } <font color="#B22222">/* selected */</font>
+<a name="line186">186: </a>        }   <font color="#B22222">/* not done vertex */</font>
+<a name="line187">187: </a>      }     <font color="#B22222">/* vertex loop */</font>
+
+<a name="line189">189: </a>      <font color="#B22222">/* update ghost states and count todos */</font>
+<a name="line190">190: </a>      <font color="#4169E1">if</font> (mpimat) {
+<a name="line191">191: </a>        <font color="#B22222">/* scatter states, check for done */</font>
+<a name="line192">192: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFBcastBegin.html">PetscSFBcastBegin</a>(sf, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, lid_state, cpcol_state, MPI_REPLACE));
+<a name="line193">193: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFBcastEnd.html">PetscSFBcastEnd</a>(sf, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, lid_state, cpcol_state, MPI_REPLACE));
+<a name="line194">194: </a>        ai = matB-&gt;compressedrow.i;
+<a name="line195">195: </a>        <font color="#4169E1">for</font> (ix = 0; ix &lt; matB-&gt;compressedrow.nrows; ix++) {
+<a name="line196">196: </a>          lid   = matB-&gt;compressedrow.rindex[ix]; <font color="#B22222">/* local boundary node */</font>
+<a name="line197">197: </a>          state = lid_state[lid];
+<a name="line198">198: </a>          <font color="#4169E1">if</font> (state == MIS_NOT_DONE) {
+<a name="line199">199: </a>            <font color="#B22222">/* look at ghosts */</font>
+<a name="line200">200: </a>            n   = ai[ix + 1] - ai[ix];
+<a name="line201">201: </a>            idx = matB-&gt;j + ai[ix];
+<a name="line202">202: </a>            <font color="#4169E1">for</font> (j = 0; j &lt; n; j++) {
+<a name="line203">203: </a>              cpid = idx[j];                            <font color="#B22222">/* compressed row ID in B mat */</font>
+<a name="line204">204: </a>              <font color="#4169E1">if</font> (MIS_IS_SELECTED(cpcol_state[cpid])) { <font color="#B22222">/* lid is now deleted by ghost */</font>
+<a name="line205">205: </a>                nDone++;
+<a name="line206">206: </a>                lid_state[lid]      = MIS_DELETED; <font color="#B22222">/* delete this */</font>
+<a name="line207">207: </a>                sgid                = cpcol_gid[cpid];
+<a name="line208">208: </a>                lid_parent_gid[lid] = sgid; <font color="#B22222">/* keep track of proc that I belong to */</font>
+<a name="line209">209: </a>                <font color="#4169E1">break</font>;
+<a name="line210">210: </a>              }
+<a name="line211">211: </a>            }
+<a name="line212">212: </a>          }
+<a name="line213">213: </a>        }
+<a name="line214">214: </a>        <font color="#B22222">/* all done? */</font>
+<a name="line215">215: </a>        t1 = nloc - nDone;
+<a name="line216">216: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(&amp;t1, &amp;t2, 1, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, MPI_SUM, comm)); <font color="#B22222">/* synchronous version */</font>
+<a name="line217">217: </a>        <font color="#4169E1">if</font> (!t2) <font color="#4169E1">break</font>;
+<a name="line218">218: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">break</font>; <font color="#B22222">/* no mpi - all done */</font>
+<a name="line219">219: </a>    }               <font color="#B22222">/* outer parallel MIS loop */</font>
+<a name="line220">220: </a>    <font color="#4169E1">if</font> (!iterIdx) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISRestoreIndices.html">ISRestoreIndices</a>(perm, &amp;perm_ix));
+<a name="line221">221: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(Gmat, <font color="#666666">"\t removed %"</font> PetscInt_FMT <font color="#666666">" of %"</font> PetscInt_FMT <font color="#666666">" vertices.  %"</font> PetscInt_FMT <font color="#666666">" selected.\n"</font>, nremoved, nloc, nselected));
+
+<a name="line223">223: </a>    <font color="#B22222">/* tell adj who my lid_parent_gid vertices belong to - fill in agg_lists selected ghost lists */</font>
+<a name="line224">224: </a>    <font color="#4169E1">if</font> (matB) {
+<a name="line225">225: </a>      <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *cpcol_sel_gid, *icpcol_gid;
+<a name="line226">226: </a>      <font color="#B22222">/* need to copy this to free buffer -- should do this globally */</font>
+<a name="line227">227: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(num_fine_ghosts, &amp;cpcol_sel_gid));
+<a name="line228">228: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(num_fine_ghosts, &amp;icpcol_gid));
+<a name="line229">229: </a>      <font color="#4169E1">for</font> (cpid = 0; cpid &lt; num_fine_ghosts; cpid++) icpcol_gid[cpid] = cpcol_gid[cpid];
+<a name="line230">230: </a>      <font color="#B22222">/* get proc of deleted ghost */</font>
+<a name="line231">231: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFBcastBegin.html">PetscSFBcastBegin</a>(sf, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, lid_parent_gid, cpcol_sel_gid, MPI_REPLACE));
+<a name="line232">232: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFBcastEnd.html">PetscSFBcastEnd</a>(sf, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, lid_parent_gid, cpcol_sel_gid, MPI_REPLACE));
+<a name="line233">233: </a>      <font color="#4169E1">for</font> (cpid = 0; cpid &lt; num_fine_ghosts; cpid++) {
+<a name="line234">234: </a>        sgid = cpcol_sel_gid[cpid];
+<a name="line235">235: </a>        gid  = icpcol_gid[cpid];
+<a name="line236">236: </a>        <font color="#4169E1">if</font> (sgid &gt;= my0 &amp;&amp; sgid &lt; Iend) { <font color="#B22222">/* I own this deleted */</font>
+<a name="line237">237: </a>          slid = sgid - my0;
+<a name="line238">238: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDAppendID(agg_lists, slid, gid));
+<a name="line239">239: </a>        }
+<a name="line240">240: </a>      }
+<a name="line241">241: </a>      // done - cleanup
+<a name="line242">242: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(icpcol_gid));
+<a name="line243">243: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(cpcol_sel_gid));
+<a name="line244">244: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/PetscSFDestroy.html">PetscSFDestroy</a>(&amp;sf));
+<a name="line245">245: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(cpcol_gid));
+<a name="line246">246: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(cpcol_state));
+<a name="line247">247: </a>    }
+<a name="line248">248: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(lid_cprowID));
+<a name="line249">249: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(lid_removed));
+<a name="line250">250: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(lid_parent_gid));
+<a name="line251">251: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(lid_state));
+
+<a name="line253">253: </a>    <font color="#B22222">/* MIS done - make projection matrix - P */</font>
+<a name="line254">254: </a>    <a href="../../../../../manualpages/Mat/MatType.html">MatType</a> jtype;
+<a name="line255">255: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetType.html">MatGetType</a>(Gmat, &amp;jtype));
+<a name="line256">256: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(comm, &amp;Prols[iterIdx]));
+<a name="line257">257: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetType.html">MatSetType</a>(Prols[iterIdx], jtype));
+<a name="line258">258: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetSizes.html">MatSetSizes</a>(Prols[iterIdx], nloc, nselected, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>));
+<a name="line259">259: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSeqAIJSetPreallocation.html">MatSeqAIJSetPreallocation</a>(Prols[iterIdx], 1, NULL));
+<a name="line260">260: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMPIAIJSetPreallocation.html">MatMPIAIJSetPreallocation</a>(Prols[iterIdx], 1, NULL, 1, NULL));
+<a name="line261">261: </a>    {
+<a name="line262">262: </a>      PetscCDIntNd *pos, *pos2;
+<a name="line263">263: </a>      <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>      colIndex, Iend, fgid;
+<a name="line264">264: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRangeColumn.html">MatGetOwnershipRangeColumn</a>(Prols[iterIdx], &amp;colIndex, &amp;Iend));
+<a name="line265">265: </a>      // TODO - order with permutation in lid_selected (reversed)
+<a name="line266">266: </a>      <font color="#4169E1">for</font> (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> lid = 0; lid &lt; agg_lists-&gt;size; lid++) {
+<a name="line267">267: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDGetHeadPos(agg_lists, lid, &amp;pos));
+<a name="line268">268: </a>        pos2 = pos;
+<a name="line269">269: </a>        <font color="#4169E1">while</font> (pos) {
+<a name="line270">270: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDIntNdGetID(pos, &amp;fgid));
+<a name="line271">271: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDGetNextPos(agg_lists, lid, &amp;pos));
+<a name="line272">272: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetValues.html">MatSetValues</a>(Prols[iterIdx], 1, &amp;fgid, 1, &amp;colIndex, &amp;one, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>));
+<a name="line273">273: </a>        }
+<a name="line274">274: </a>        <font color="#4169E1">if</font> (pos2) colIndex++;
+<a name="line275">275: </a>      }
+<a name="line276">276: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(Iend == colIndex, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Iend!=colIndex: %d %d"</font>, (int)Iend, (int)colIndex);
+<a name="line277">277: </a>    }
+<a name="line278">278: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(Prols[iterIdx], <a href="../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line279">279: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(Prols[iterIdx], <a href="../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line280">280: </a>    <font color="#B22222">/* project to make new graph for next MIS, skip if last */</font>
+<a name="line281">281: </a>    <font color="#4169E1">if</font> (iterIdx &lt; misk - 1) {
+<a name="line282">282: </a>      <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> new_mat;
+<a name="line283">283: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatPtAP.html">MatPtAP</a>(cMat, Prols[iterIdx], <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;new_mat));
+<a name="line284">284: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;cMat));
+<a name="line285">285: </a>      cMat = new_mat; // next iter
+<a name="line286">286: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (cMat != Gmat) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;cMat));
+<a name="line287">287: </a>    // cleanup
+<a name="line288">288: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDDestroy(agg_lists));
+<a name="line289">289: </a>  } <font color="#B22222">/* MIS-k iteration */</font>
+<a name="line290">290: </a>  <font color="#B22222">/* make total prolongator Rtot = P_0 * P_1 * ... */</font>
+<a name="line291">291: </a>  Rtot = Prols[misk - 1]; // compose P then transpose to get R
+<a name="line292">292: </a>  <font color="#4169E1">for</font> (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> iterIdx = misk - 1; iterIdx &gt; 0; iterIdx--) {
+<a name="line293">293: </a>    <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> P;
+<a name="line294">294: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMatMult.html">MatMatMult</a>(Prols[iterIdx - 1], Rtot, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;P));
+<a name="line295">295: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;Prols[iterIdx - 1]));
+<a name="line296">296: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;Rtot));
+<a name="line297">297: </a>    Rtot = P;
+<a name="line298">298: </a>  }
+<a name="line299">299: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatTranspose.html">MatTranspose</a>(Rtot, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INPLACE_MATRIX</a>, &amp;Rtot)); // R now
+<a name="line300">300: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatViewFromOptions.html">MatViewFromOptions</a>(Rtot, NULL, <font color="#666666">"-misk_aggregation_view"</font>));
+<a name="line301">301: </a>  <font color="#B22222">/* make aggregates with Rtot - could use Rtot directly in theory but have to go through the aggrate list data structure */</font>
+<a name="line302">302: </a>  {
+<a name="line303">303: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>          Istart, Iend, ncols, NN, MM, jj = 0, max_osz = 0;
+<a name="line304">304: </a>    const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    nloc = Gmat-&gt;rmap-&gt;n;
+<a name="line305">305: </a>    PetscCoarsenData *agg_lists;
+<a name="line306">306: </a>    <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>               mat;
+<a name="line307">307: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDCreate(nloc, &amp;agg_lists));
+<a name="line308">308: </a>    *a_locals_llist = agg_lists; // <font color="#4169E1">return</font>
+<a name="line309">309: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRange.html">MatGetOwnershipRange</a>(Rtot, &amp;Istart, &amp;Iend));
+<a name="line310">310: </a>    <font color="#4169E1">for</font> (int grow = Istart, lid = 0; grow &lt; Iend; grow++, lid++) {
+<a name="line311">311: </a>      const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *idx;
+<a name="line312">312: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRow.html">MatGetRow</a>(Rtot, grow, &amp;ncols, &amp;idx, NULL));
+<a name="line313">313: </a>      <font color="#4169E1">for</font> (int jj = 0; jj &lt; ncols; jj++) {
+<a name="line314">314: </a>        <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> gcol = idx[jj];
+<a name="line315">315: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDAppendID(agg_lists, lid, gcol)); // local row, global column
+<a name="line316">316: </a>      }
+<a name="line317">317: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatRestoreRow.html">MatRestoreRow</a>(Rtot, grow, &amp;ncols, &amp;idx, NULL));
+<a name="line318">318: </a>    }
+<a name="line319">319: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;Rtot));
+
+<a name="line321">321: </a>    <font color="#B22222">/* make fake matrix, get largest */</font>
+<a name="line322">322: </a>    <font color="#4169E1">for</font> (int lid = 0; lid &lt; nloc; lid++) {
+<a name="line323">323: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDSizeAt(agg_lists, lid, &amp;jj));
+<a name="line324">324: </a>      <font color="#4169E1">if</font> (jj &gt; max_osz) max_osz = jj;
+<a name="line325">325: </a>    }
+<a name="line326">326: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetSize.html">MatGetSize</a>(Gmat, &amp;MM, &amp;NN));
+<a name="line327">327: </a>    <font color="#4169E1">if</font> (max_osz &gt; MM - nloc) max_osz = MM - nloc;
+<a name="line328">328: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetOwnershipRange.html">MatGetOwnershipRange</a>(Gmat, &amp;Istart, NULL));
+<a name="line329">329: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateAIJ.html">MatCreateAIJ</a>(comm, nloc, nloc, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, <a href="../../../../../manualpages/Sys/PETSC_DETERMINE.html">PETSC_DETERMINE</a>, 0, NULL, max_osz, NULL, &amp;mat));
+<a name="line330">330: </a>    <font color="#4169E1">for</font> (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> lid = 0, gidi = Istart; lid &lt; nloc; lid++, gidi++) {
+<a name="line331">331: </a>      PetscCDIntNd *pos;
+<a name="line332">332: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDGetHeadPos(agg_lists, lid, &amp;pos));
+<a name="line333">333: </a>      <font color="#4169E1">while</font> (pos) {
+<a name="line334">334: </a>        <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> gidj;
+<a name="line335">335: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDIntNdGetID(pos, &amp;gidj));
+<a name="line336">336: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDGetNextPos(agg_lists, lid, &amp;pos));
+<a name="line337">337: </a>        <font color="#4169E1">if</font> (gidj &lt; Istart || gidj &gt;= Istart + nloc) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetValues.html">MatSetValues</a>(mat, 1, &amp;gidi, 1, &amp;gidj, &amp;one, <a href="../../../../../manualpages/Sys/ADD_VALUES.html">ADD_VALUES</a>));
+<a name="line338">338: </a>      }
+<a name="line339">339: </a>    }
+<a name="line340">340: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(mat, <a href="../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line341">341: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(mat, <a href="../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line342">342: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCDSetMat(agg_lists, mat));
+<a name="line343">343: </a>  }
+
+<a name="line345">345: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line346">346: </a>}
+
+<a name="line348">348: </a><font color="#B22222">/*</font>
+<a name="line349">349: </a><font color="#B22222">   Distance k MIS. k is in 'subctx'</font>
+<a name="line350">350: </a><font color="#B22222">*/</font>
+<a name="line351">351: </a><strong><font color="#4169E1"><a name="MatCoarsenApply_MISK"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatCoarsenApply_MISK(<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a> coarse)</font></strong>
+<a name="line352">352: </a>{
+<a name="line353">353: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>      mat = coarse-&gt;graph;
+<a name="line354">354: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> k;
+
+<a name="line356">356: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line357">357: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKGetDistance.html">MatCoarsenMISKGetDistance</a>(coarse, &amp;k));
+<a name="line358">358: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(k &gt; 0, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"too few levels: %d"</font>, (int)k);
+<a name="line359">359: </a>  <font color="#4169E1">if</font> (!coarse-&gt;perm) {
+<a name="line360">360: </a>    <a href="../../../../../manualpages/IS/IS.html">IS</a>       perm;
+<a name="line361">361: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> n, m;
+
+<a name="line363">363: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetLocalSize.html">MatGetLocalSize</a>(mat, &amp;m, &amp;n));
+<a name="line364">364: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISCreateStride.html">ISCreateStride</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)mat), m, 0, 1, &amp;perm));
+<a name="line365">365: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatCoarsenApply_MISK_private(perm, (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)k, mat, &amp;coarse-&gt;agg_lists));
+<a name="line366">366: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISDestroy.html">ISDestroy</a>(&amp;perm));
+<a name="line367">367: </a>  } <font color="#4169E1">else</font> {
+<a name="line368">368: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatCoarsenApply_MISK_private(coarse-&gt;perm, (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)k, mat, &amp;coarse-&gt;agg_lists));
+<a name="line369">369: </a>  }
+<a name="line370">370: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line371">371: </a>}
+
+<a name="line373">373: </a><strong><font color="#4169E1"><a name="MatCoarsenView_MISK"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatCoarsenView_MISK(<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a> coarse, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line374">374: </a>{
+<a name="line375">375: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> rank;
+<a name="line376">376: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   iascii;
+
+<a name="line378">378: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line379">379: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)coarse), &amp;rank));
+<a name="line380">380: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line381">381: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line382">382: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPushSynchronized.html">PetscViewerASCIIPushSynchronized</a>(viewer));
+<a name="line383">383: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISynchronizedPrintf.html">PetscViewerASCIISynchronizedPrintf</a>(viewer, <font color="#666666">"  [%d] MISK aggregator\n"</font>, rank));
+<a name="line384">384: </a>    <font color="#4169E1">if</font> (!rank) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscCoarsenDataView_private(coarse-&gt;agg_lists, viewer));
+<a name="line385">385: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerFlush.html">PetscViewerFlush</a>(viewer));
+<a name="line386">386: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPopSynchronized.html">PetscViewerASCIIPopSynchronized</a>(viewer));
+<a name="line387">387: </a>  }
+<a name="line388">388: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line389">389: </a>}
+
+<a name="line391">391: </a><strong><font color="#4169E1"><a name="MatCoarsenSetFromOptions_MISK"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatCoarsenSetFromOptions_MISK(<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a> coarse, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line392">392: </a>{
+<a name="line393">393: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  k = 1;
+<a name="line394">394: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> flg;
+<a name="line395">395: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line396">396: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a>-MISk options"</font>);
+<a name="line397">397: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-mat_coarsen_misk_distance"</font>, <font color="#666666">"k distance for MIS"</font>, <font color="#666666">""</font>, k, &amp;k, &amp;flg));
+<a name="line398">398: </a>  <font color="#4169E1">if</font> (flg) coarse-&gt;subctx = (void *)(size_t)k;
+<a name="line399">399: </a>  PetscOptionsHeadEnd();
+<a name="line400">400: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line401">401: </a>}
+
+<a name="line403">403: </a><font color="#B22222">/*MC</font>
+<a name="line404">404: </a><font color="#B22222">   <a href="../../../../../manualpages/MatOrderings/MATCOARSENMISK.html">MATCOARSENMISK</a> - A coarsener that uses MISK, a simple greedy coarsener</font>
+
+<a name="line406">406: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line408">408: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line409">409: </a><font color="#B22222">.   -mat_coarsen_misk_distance &lt;k&gt; - distance for MIS</font>
+
+<a name="line411">411: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a>`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKSetDistance.html">MatCoarsenMISKSetDistance</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenApply.html">MatCoarsenApply</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenSetType.html">MatCoarsenSetType</a>()`, `<a href="../../../../../manualpages/Mat/MatCoarsenType.html">MatCoarsenType</a>`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenCreate.html">MatCoarsenCreate</a>()`</font>
+<a name="line412">412: </a><font color="#B22222">M*/</font>
+
+<a name="line414">414: </a><strong><font color="#4169E1"><a name="MatCoarsenCreate_MISK"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatCoarsenCreate_MISK(<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a> coarse)</font></strong>
+<a name="line415">415: </a>{
+<a name="line416">416: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line417">417: </a>  coarse-&gt;ops-&gt;apply          = MatCoarsenApply_MISK;
+<a name="line418">418: </a>  coarse-&gt;ops-&gt;view           = MatCoarsenView_MISK;
+<a name="line419">419: </a>  coarse-&gt;subctx              = (void *)(size_t)1;
+<a name="line420">420: </a>  coarse-&gt;ops-&gt;setfromoptions = MatCoarsenSetFromOptions_MISK;
+<a name="line421">421: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line422">422: </a>}
+
+<a name="line424">424: </a><font color="#B22222">/*@</font>
+<a name="line425">425: </a><font color="#B22222">   <a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKSetDistance.html">MatCoarsenMISKSetDistance</a> - the distance to be used by MISK</font>
+
+<a name="line427">427: </a><font color="#B22222">   Collective</font>
+
+<a name="line429">429: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line430">430: </a><font color="#B22222">+   coarsen - the coarsen</font>
+<a name="line431">431: </a><font color="#B22222">-   k - the distance</font>
+
+<a name="line433">433: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line434">434: </a><font color="#B22222">.   -mat_coarsen_misk_distance &lt;k&gt; - distance for MIS</font>
+
+<a name="line436">436: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line438">438: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/MatOrderings/MATCOARSENMISK.html">MATCOARSENMISK</a>`, `<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a>`, `MatCoarseSetFromOptions()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenSetType.html">MatCoarsenSetType</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenRegister.html">MatCoarsenRegister</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenCreate.html">MatCoarsenCreate</a>()`,</font>
+<a name="line439">439: </a><font color="#B22222">          `<a href="../../../../../manualpages/MatOrderings/MatCoarsenDestroy.html">MatCoarsenDestroy</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenSetAdjacency.html">MatCoarsenSetAdjacency</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKGetDistance.html">MatCoarsenMISKGetDistance</a>()`</font>
+<a name="line440">440: </a><font color="#B22222">          `<a href="../../../../../manualpages/MatOrderings/MatCoarsenGetData.html">MatCoarsenGetData</a>()`</font>
+<a name="line441">441: </a><font color="#B22222">@*/</font>
+<a name="line442">442: </a><strong><font color="#4169E1"><a name="MatCoarsenMISKSetDistance"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKSetDistance.html">MatCoarsenMISKSetDistance</a>(<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a> crs, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> k)</font></strong>
+<a name="line443">443: </a>{
+<a name="line444">444: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line445">445: </a>  crs-&gt;subctx = (void *)(size_t)k;
+<a name="line446">446: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line447">447: </a>}
+
+<a name="line449">449: </a><font color="#B22222">/*@</font>
+<a name="line450">450: </a><font color="#B22222">   <a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKGetDistance.html">MatCoarsenMISKGetDistance</a> - gets the distance to be used by MISK</font>
+
+<a name="line452">452: </a><font color="#B22222">   Collective</font>
+
+<a name="line454">454: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line455">455: </a><font color="#B22222">.   coarsen - the coarsen</font>
+
+<a name="line457">457: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line458">458: </a><font color="#B22222">.   k - the distance</font>
+
+<a name="line460">460: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line462">462: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/MatOrderings/MATCOARSENMISK.html">MATCOARSENMISK</a>`, `<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a>`, `MatCoarseSetFromOptions()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenSetType.html">MatCoarsenSetType</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenRegister.html">MatCoarsenRegister</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenCreate.html">MatCoarsenCreate</a>()`,</font>
+<a name="line463">463: </a><font color="#B22222">          `<a href="../../../../../manualpages/MatOrderings/MatCoarsenDestroy.html">MatCoarsenDestroy</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenSetAdjacency.html">MatCoarsenSetAdjacency</a>()`, `<a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKGetDistance.html">MatCoarsenMISKGetDistance</a>()`</font>
+<a name="line464">464: </a><font color="#B22222">          `<a href="../../../../../manualpages/MatOrderings/MatCoarsenGetData.html">MatCoarsenGetData</a>()`</font>
+<a name="line465">465: </a><font color="#B22222">@*/</font>
+<a name="line466">466: </a><strong><font color="#4169E1"><a name="MatCoarsenMISKGetDistance"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/MatOrderings/MatCoarsenMISKGetDistance.html">MatCoarsenMISKGetDistance</a>(<a href="../../../../../manualpages/Mat/MatCoarsen.html">MatCoarsen</a> crs, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *k)</font></strong>
+<a name="line467">467: </a>{
+<a name="line468">468: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line469">469: </a>  *k = (<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)(size_t)crs-&gt;subctx;
+<a name="line470">470: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line471">471: </a>}
+</pre>
+</body>
+
+</html>

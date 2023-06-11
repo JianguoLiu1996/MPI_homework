@@ -1,0 +1,1240 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/snes/tutorials/ex19.c">Actual source code: ex19.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:28+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a><font color="#B22222">/* Portions of this code are under:</font>
+<a name="line2">  2: </a><font color="#B22222">   Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.</font>
+<a name="line3">  3: </a><font color="#B22222">*/</font>
+<a name="line4">  4: </a>static char help[] = <font color="#666666">"Nonlinear driven cavity with multigrid in 2d.\n \</font>
+<a name="line5">  5: </a><font color="#666666">  \n\</font>
+<a name="line6">  6: </a><font color="#666666">The 2D driven cavity problem is solved in a velocity-vorticity formulation.\n\</font>
+<a name="line7">  7: </a><font color="#666666">The flow can be driven with the lid or with buoyancy or both:\n\</font>
+<a name="line8">  8: </a><font color="#666666">  -lidvelocity &amp;ltlid&amp;gt, where &amp;ltlid&amp;gt = dimensionless velocity of lid\n\</font>
+<a name="line9">  9: </a><font color="#666666">  -grashof &amp;ltgr&amp;gt, where &amp;ltgr&amp;gt = dimensionless temperature gradent\n\</font>
+<a name="line10"> 10: </a><font color="#666666">  -prandtl &amp;ltpr&amp;gt, where &amp;ltpr&amp;gt = dimensionless thermal/momentum diffusity ratio\n\</font>
+<a name="line11"> 11: </a><font color="#666666"> -contours : draw contour plots of solution\n\n"</font>;
+<a name="line12"> 12: </a><font color="#B22222">/* in HTML, '&amp;lt' = '&lt;' and '&amp;gt' = '&gt;' */</font>
+
+<a name="line14"> 14: </a><font color="#B22222">/*</font>
+<a name="line15"> 15: </a><font color="#B22222">      See src/ksp/ksp/tutorials/ex45.c</font>
+<a name="line16"> 16: </a><font color="#B22222">*/</font>
+
+<a name="line18"> 18: </a><font color="#B22222">/*F-----------------------------------------------------------------------</font>
+
+<a name="line20"> 20: </a><font color="#B22222">    We thank David E. Keyes for contributing the driven cavity discretization within this example code.</font>
+
+<a name="line22"> 22: </a><font color="#B22222">    This problem is modeled by the partial differential equation system</font>
+
+<a name="line24"> 24: </a><font color="#B22222">\begin{eqnarray}</font>
+<a name="line25"> 25: </a><font color="#B22222">        - \triangle U - \nabla_y \Omega &amp; = &amp; 0  \\</font>
+<a name="line26"> 26: </a><font color="#B22222">        - \triangle V + \nabla_x\Omega &amp; = &amp; 0  \\</font>
+<a name="line27"> 27: </a><font color="#B22222">        - \triangle \Omega + \nabla \cdot ([U*\Omega,V*\Omega]) - GR* \nabla_x T &amp; = &amp; 0  \\</font>
+<a name="line28"> 28: </a><font color="#B22222">        - \triangle T + PR* \nabla \cdot ([U*T,V*T]) &amp; = &amp; 0</font>
+<a name="line29"> 29: </a><font color="#B22222">\end{eqnarray}</font>
+
+<a name="line31"> 31: </a><font color="#B22222">    in the unit square, which is uniformly discretized in each of x and y in this simple encoding.</font>
+
+<a name="line33"> 33: </a><font color="#B22222">    No-slip, rigid-wall Dirichlet conditions are used for $ [U,V]$.</font>
+<a name="line34"> 34: </a><font color="#B22222">    Dirichlet conditions are used for Omega, based on the definition of</font>
+<a name="line35"> 35: </a><font color="#B22222">    vorticity: $ \Omega = - \nabla_y U + \nabla_x V$, where along each</font>
+<a name="line36"> 36: </a><font color="#B22222">    constant coordinate boundary, the tangential derivative is zero.</font>
+<a name="line37"> 37: </a><font color="#B22222">    Dirichlet conditions are used for T on the left and right walls,</font>
+<a name="line38"> 38: </a><font color="#B22222">    and insulation homogeneous Neumann conditions are used for T on</font>
+<a name="line39"> 39: </a><font color="#B22222">    the top and bottom walls.</font>
+
+<a name="line41"> 41: </a><font color="#B22222">    A finite difference approximation with the usual 5-point stencil</font>
+<a name="line42"> 42: </a><font color="#B22222">    is used to discretize the boundary value problem to obtain a</font>
+<a name="line43"> 43: </a><font color="#B22222">    nonlinear system of equations.  Upwinding is used for the divergence</font>
+<a name="line44"> 44: </a><font color="#B22222">    (convective) terms and central for the gradient (source) terms.</font>
+
+<a name="line46"> 46: </a><font color="#B22222">    The Jacobian can be either</font>
+<a name="line47"> 47: </a><font color="#B22222">      * formed via finite differencing using coloring (the default), or</font>
+<a name="line48"> 48: </a><font color="#B22222">      * applied matrix-free via the option -snes_mf</font>
+<a name="line49"> 49: </a><font color="#B22222">        (for larger grid problems this variant may not converge</font>
+<a name="line50"> 50: </a><font color="#B22222">        without a preconditioner due to ill-conditioning).</font>
+
+<a name="line52"> 52: </a><font color="#B22222">  ------------------------------------------------------------------------F*/</font>
+
+<a name="line54"> 54: </a><font color="#B22222">/*</font>
+<a name="line55"> 55: </a><font color="#B22222">   Include "petscdmda.h" so that we can use distributed arrays (DMDAs).</font>
+<a name="line56"> 56: </a><font color="#B22222">   Include "petscsnes.h" so that we can use <a href="../../../manualpages/SNES/SNES.html">SNES</a> solvers.  Note that this</font>
+<a name="line57"> 57: </a><font color="#B22222">   file automatically includes:</font>
+<a name="line58"> 58: </a><font color="#B22222">     petscsys.h       - base PETSc routines   petscvec.h - vectors</font>
+<a name="line59"> 59: </a><font color="#B22222">     petscmat.h - matrices</font>
+<a name="line60"> 60: </a><font color="#B22222">     petscis.h     - index sets            petscksp.h - Krylov subspace methods</font>
+<a name="line61"> 61: </a><font color="#B22222">     petscviewer.h - viewers               petscpc.h  - preconditioners</font>
+<a name="line62"> 62: </a><font color="#B22222">     petscksp.h   - linear solvers</font>
+<a name="line63"> 63: </a><font color="#B22222">*/</font>
+<a name="line64"> 64: </a><font color="#A020F0">#if defined(PETSC_APPLE_FRAMEWORK)</font>
+<a name="line65"> 65: </a><font color="#A020F0">  #import &lt;PETSc/petscsnes.h&gt;</font>
+<a name="line66"> 66: </a><font color="#A020F0">  #import &lt;PETSc/petscdmda.h&gt;</font>
+<a name="line67"> 67: </a><font color="#A020F0">#else</font>
+<a name="line68"> 68: </a>#include <A href="../../../include/petscsnes.h.html">&lt;petscsnes.h&gt;</A>
+<a name="line69"> 69: </a>#include <A href="../../../include/petscdm.h.html">&lt;petscdm.h&gt;</A>
+<a name="line70"> 70: </a>#include <A href="../../../include/petscdmda.h.html">&lt;petscdmda.h&gt;</A>
+<a name="line71"> 71: </a><font color="#A020F0">#endif</font>
+
+<a name="line73"> 73: </a><font color="#B22222">/*</font>
+<a name="line74"> 74: </a><font color="#B22222">   User-defined routines and data structures</font>
+<a name="line75"> 75: </a><font color="#B22222">*/</font>
+<a name="line76"> 76: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line77"> 77: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> u, v, omega, temp;
+<a name="line78"> 78: </a>} Field;
+
+<a name="line80"> 80: </a><strong><font color="#4169E1"><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormFunctionLocal(<a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> *, Field **, Field **, void *)</font></strong>;
+
+<a name="line82"> 82: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line83"> 83: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> lidvelocity, prandtl, grashof; <font color="#B22222">/* physical parameters */</font>
+<a name="line84"> 84: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a> draw_contours;                 <font color="#B22222">/* flag - 1 indicates drawing contours */</font>
+<a name="line85"> 85: </a>} AppCtx;
+
+<a name="line87"> 87: </a><strong><font color="#4169E1">extern <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormInitialGuess(AppCtx *, <a href="../../../manualpages/DM/DM.html">DM</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>)</font></strong>;
+<a name="line88"> 88: </a><strong><font color="#4169E1">extern <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> NonlinearGS(<a href="../../../manualpages/SNES/SNES.html">SNES</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../manualpages/Vec/Vec.html">Vec</a>, void *)</font></strong>;
+
+<a name="line90"> 90: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc, char **argv)</font></strong>
+<a name="line91"> 91: </a>{
+<a name="line92"> 92: </a>  AppCtx   user; <font color="#B22222">/* user-defined work context */</font>
+<a name="line93"> 93: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> mx, my, its;
+<a name="line94"> 94: </a>  <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm;
+<a name="line95"> 95: </a>  <a href="../../../manualpages/SNES/SNES.html">SNES</a>     snes;
+<a name="line96"> 96: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>       da;
+<a name="line97"> 97: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>      x;
+
+<a name="line99"> 99: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line100">100: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>(&amp;argc, &amp;argv, (char *)0, help));
+<a name="line101">101: </a>  comm = <a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>;
+<a name="line102">102: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESCreate.html">SNESCreate</a>(comm, &amp;snes));
+
+<a name="line104">104: </a>  <font color="#B22222">/*</font>
+<a name="line105">105: </a><font color="#B22222">      Create distributed array object to manage parallel grid and vectors</font>
+<a name="line106">106: </a><font color="#B22222">      for principal unknowns (x) and governing residuals (f)</font>
+<a name="line107">107: </a><font color="#B22222">  */</font>
+<a name="line108">108: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDACreate2d.html">DMDACreate2d</a>(<a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <a href="../../../manualpages/DM/DMBoundaryType.html">DM_BOUNDARY_NONE</a>, <a href="../../../manualpages/DM/DMBoundaryType.html">DM_BOUNDARY_NONE</a>, <a href="../../../manualpages/DMDA/DMDAStencilType.html">DMDA_STENCIL_STAR</a>, 4, 4, <a href="../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, 4, 1, 0, 0, &amp;da));
+<a name="line109">109: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMSetFromOptions.html">DMSetFromOptions</a>(da));
+<a name="line110">110: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMSetUp.html">DMSetUp</a>(da));
+<a name="line111">111: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESSetDM.html">SNESSetDM</a>(snes, (<a href="../../../manualpages/DM/DM.html">DM</a>)da));
+<a name="line112">112: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESSetNGS.html">SNESSetNGS</a>(snes, NonlinearGS, (void *)&amp;user));
+
+<a name="line114">114: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(da, 0, &amp;mx, &amp;my, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>, <a href="../../../manualpages/Sys/PETSC_IGNORE.html">PETSC_IGNORE</a>));
+<a name="line115">115: </a>  <font color="#B22222">/*</font>
+<a name="line116">116: </a><font color="#B22222">     Problem parameters (velocity of lid, prandtl, and grashof numbers)</font>
+<a name="line117">117: </a><font color="#B22222">  */</font>
+<a name="line118">118: </a>  user.lidvelocity = 1.0 / (mx * my);
+<a name="line119">119: </a>  user.prandtl     = 1.0;
+<a name="line120">120: </a>  user.grashof     = 1.0;
+
+<a name="line122">122: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-lidvelocity"</font>, &amp;user.lidvelocity, NULL));
+<a name="line123">123: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-prandtl"</font>, &amp;user.prandtl, NULL));
+<a name="line124">124: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(NULL, NULL, <font color="#666666">"-grashof"</font>, &amp;user.grashof, NULL));
+<a name="line125">125: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsHasName.html">PetscOptionsHasName</a>(NULL, NULL, <font color="#666666">"-contours"</font>, &amp;user.draw_contours));
+
+<a name="line127">127: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 0, <font color="#666666">"x_velocity"</font>));
+<a name="line128">128: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 1, <font color="#666666">"y_velocity"</font>));
+<a name="line129">129: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 2, <font color="#666666">"Omega"</font>));
+<a name="line130">130: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDASetFieldName.html">DMDASetFieldName</a>(da, 3, <font color="#666666">"temperature"</font>));
+
+<a name="line132">132: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line133">133: </a><font color="#B22222">     Create user context, set problem data, create vector data structures.</font>
+<a name="line134">134: </a><font color="#B22222">     Also, compute the initial guess.</font>
+<a name="line135">135: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line137">137: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line138">138: </a><font color="#B22222">     Create nonlinear solver context</font>
+
+<a name="line140">140: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line141">141: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMSetApplicationContext.html">DMSetApplicationContext</a>(da, &amp;user));
+<a name="line142">142: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/DMDASNESSetFunctionLocal.html">DMDASNESSetFunctionLocal</a>(da, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, (<a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a>(*)(<a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> *, void *, void *, void *))FormFunctionLocal, &amp;user));
+<a name="line143">143: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESSetFromOptions.html">SNESSetFromOptions</a>(snes));
+<a name="line144">144: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(comm, <font color="#666666">"lid velocity = %g, prandtl # = %g, grashof # = %g\n"</font>, (double)user.lidvelocity, (double)user.prandtl, (double)user.grashof));
+
+<a name="line146">146: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line147">147: </a><font color="#B22222">     Solve the nonlinear system</font>
+<a name="line148">148: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line149">149: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMCreateGlobalVector.html">DMCreateGlobalVector</a>(da, &amp;x));
+<a name="line150">150: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(FormInitialGuess(&amp;user, da, x));
+
+<a name="line152">152: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESSolve.html">SNESSolve</a>(snes, NULL, x));
+
+<a name="line154">154: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESGetIterationNumber.html">SNESGetIterationNumber</a>(snes, &amp;its));
+<a name="line155">155: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(comm, <font color="#666666">"Number of <a href="../../../manualpages/SNES/SNES.html">SNES</a> iterations = %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, its));
+
+<a name="line157">157: </a>  <font color="#B22222">/*</font>
+<a name="line158">158: </a><font color="#B22222">     Visualize solution</font>
+<a name="line159">159: </a><font color="#B22222">  */</font>
+<a name="line160">160: </a>  <font color="#4169E1">if</font> (user.draw_contours) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecView.html">VecView</a>(x, <a href="../../../manualpages/Viewer/PETSC_VIEWER_DRAW_WORLD.html">PETSC_VIEWER_DRAW_WORLD</a>));
+
+<a name="line162">162: </a>  <font color="#B22222">/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</font>
+<a name="line163">163: </a><font color="#B22222">     Free work space.  All PETSc objects should be destroyed when they</font>
+<a name="line164">164: </a><font color="#B22222">     are no longer needed.</font>
+<a name="line165">165: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line166">166: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;x));
+<a name="line167">167: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMDestroy.html">DMDestroy</a>(&amp;da));
+<a name="line168">168: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESDestroy.html">SNESDestroy</a>(&amp;snes));
+<a name="line169">169: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a>());
+<a name="line170">170: </a>  <font color="#4169E1">return</font> 0;
+<a name="line171">171: </a>}
+
+<a name="line173">173: </a><font color="#B22222">/* ------------------------------------------------------------------- */</font>
+
+<a name="line175">175: </a><font color="#B22222">/*</font>
+<a name="line176">176: </a><font color="#B22222">   FormInitialGuess - Forms initial approximation.</font>
+
+<a name="line178">178: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line179">179: </a><font color="#B22222">   user - user-defined application context</font>
+<a name="line180">180: </a><font color="#B22222">   X - vector</font>
+
+<a name="line182">182: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line183">183: </a><font color="#B22222">   X - vector</font>
+<a name="line184">184: </a><font color="#B22222">*/</font>
+<a name="line185">185: </a><strong><font color="#4169E1"><a name="FormInitialGuess"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormInitialGuess(AppCtx *user, <a href="../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../manualpages/Vec/Vec.html">Vec</a> X)</font></strong>
+<a name="line186">186: </a>{
+<a name="line187">187: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>  i, j, mx, xs, ys, xm, ym;
+<a name="line188">188: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> grashof, dx;
+<a name="line189">189: </a>  Field   **x;
+
+<a name="line191">191: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line192">192: </a>  grashof = user-&gt;grashof;
+
+<a name="line194">194: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(da, 0, &amp;mx, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+<a name="line195">195: </a>  dx = 1.0 / (mx - 1);
+
+<a name="line197">197: </a>  <font color="#B22222">/*</font>
+<a name="line198">198: </a><font color="#B22222">     Get local grid boundaries (for 2-dimensional <a href="../../../manualpages/DMDA/DMDA.html">DMDA</a>):</font>
+<a name="line199">199: </a><font color="#B22222">       xs, ys   - starting grid indices (no ghost points)</font>
+<a name="line200">200: </a><font color="#B22222">       xm, ym   - widths of local grid (no ghost points)</font>
+<a name="line201">201: </a><font color="#B22222">  */</font>
+<a name="line202">202: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetCorners.html">DMDAGetCorners</a>(da, &amp;xs, &amp;ys, NULL, &amp;xm, &amp;ym, NULL));
+
+<a name="line204">204: </a>  <font color="#B22222">/*</font>
+<a name="line205">205: </a><font color="#B22222">     Get a pointer to vector data.</font>
+<a name="line206">206: </a><font color="#B22222">       - For default PETSc vectors, <a href="../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>() returns a pointer to</font>
+<a name="line207">207: </a><font color="#B22222">         the data array.  Otherwise, the routine is implementation dependent.</font>
+<a name="line208">208: </a><font color="#B22222">       - You MUST call <a href="../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>() when you no longer need access to</font>
+<a name="line209">209: </a><font color="#B22222">         the array.</font>
+<a name="line210">210: </a><font color="#B22222">  */</font>
+<a name="line211">211: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArrayWrite.html">DMDAVecGetArrayWrite</a>(da, X, &amp;x));
+
+<a name="line213">213: </a>  <font color="#B22222">/*</font>
+<a name="line214">214: </a><font color="#B22222">     Compute initial guess over the locally owned part of the grid</font>
+<a name="line215">215: </a><font color="#B22222">     Initial condition is motionless fluid and equilibrium temperature</font>
+<a name="line216">216: </a><font color="#B22222">  */</font>
+<a name="line217">217: </a>  <font color="#4169E1">for</font> (j = ys; j &lt; ys + ym; j++) {
+<a name="line218">218: </a>    <font color="#4169E1">for</font> (i = xs; i &lt; xs + xm; i++) {
+<a name="line219">219: </a>      x[j][i].u     = 0.0;
+<a name="line220">220: </a>      x[j][i].v     = 0.0;
+<a name="line221">221: </a>      x[j][i].omega = 0.0;
+<a name="line222">222: </a>      x[j][i].temp  = (grashof &gt; 0) * i * dx;
+<a name="line223">223: </a>    }
+<a name="line224">224: </a>  }
+
+<a name="line226">226: </a>  <font color="#B22222">/*</font>
+<a name="line227">227: </a><font color="#B22222">     Restore vector</font>
+<a name="line228">228: </a><font color="#B22222">  */</font>
+<a name="line229">229: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArrayWrite.html">DMDAVecRestoreArrayWrite</a>(da, X, &amp;x));
+<a name="line230">230: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line231">231: </a>}
+
+<a name="line233">233: </a><strong><font color="#4169E1"><a name="FormFunctionLocal"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FormFunctionLocal(<a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> *info, Field **x, Field **f, void *ptr)</font></strong>
+<a name="line234">234: </a>{
+<a name="line235">235: </a>  AppCtx     *user = (AppCtx *)ptr;
+<a name="line236">236: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>    xints, xinte, yints, yinte, i, j;
+<a name="line237">237: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>   hx, hy, dhx, dhy, hxdhy, hydhx;
+<a name="line238">238: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>   grashof, prandtl, lid;
+<a name="line239">239: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> u, uxx, uyy, vx, vy, avx, avy, vxp, vxm, vyp, vym;
+
+<a name="line241">241: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line242">242: </a>  grashof = user-&gt;grashof;
+<a name="line243">243: </a>  prandtl = user-&gt;prandtl;
+<a name="line244">244: </a>  lid     = user-&gt;lidvelocity;
+
+<a name="line246">246: </a>  <font color="#B22222">/*</font>
+<a name="line247">247: </a><font color="#B22222">     Define mesh intervals ratios for uniform grid.</font>
+
+<a name="line249">249: </a><font color="#B22222">     Note: FD formulae below are normalized by multiplying through by</font>
+<a name="line250">250: </a><font color="#B22222">     local volume element (i.e. hx*hy) to obtain coefficients O(1) in two dimensions.</font>
+
+<a name="line252">252: </a><font color="#B22222">  */</font>
+<a name="line253">253: </a>  dhx   = (<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(info-&gt;mx - 1);
+<a name="line254">254: </a>  dhy   = (<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(info-&gt;my - 1);
+<a name="line255">255: </a>  hx    = 1.0 / dhx;
+<a name="line256">256: </a>  hy    = 1.0 / dhy;
+<a name="line257">257: </a>  hxdhy = hx * dhy;
+<a name="line258">258: </a>  hydhx = hy * dhx;
+
+<a name="line260">260: </a>  xints = info-&gt;xs;
+<a name="line261">261: </a>  xinte = info-&gt;xs + info-&gt;xm;
+<a name="line262">262: </a>  yints = info-&gt;ys;
+<a name="line263">263: </a>  yinte = info-&gt;ys + info-&gt;ym;
+
+<a name="line265">265: </a>  <font color="#B22222">/* Test whether we are on the bottom edge of the global array */</font>
+<a name="line266">266: </a>  <font color="#4169E1">if</font> (yints == 0) {
+<a name="line267">267: </a>    j     = 0;
+<a name="line268">268: </a>    yints = yints + 1;
+<a name="line269">269: </a>    <font color="#B22222">/* bottom edge */</font>
+<a name="line270">270: </a>    <font color="#4169E1">for</font> (i = info-&gt;xs; i &lt; info-&gt;xs + info-&gt;xm; i++) {
+<a name="line271">271: </a>      f[j][i].u     = x[j][i].u;
+<a name="line272">272: </a>      f[j][i].v     = x[j][i].v;
+<a name="line273">273: </a>      f[j][i].omega = x[j][i].omega + (x[j + 1][i].u - x[j][i].u) * dhy;
+<a name="line274">274: </a>      f[j][i].temp  = x[j][i].temp - x[j + 1][i].temp;
+<a name="line275">275: </a>    }
+<a name="line276">276: </a>  }
+
+<a name="line278">278: </a>  <font color="#B22222">/* Test whether we are on the top edge of the global array */</font>
+<a name="line279">279: </a>  <font color="#4169E1">if</font> (yinte == info-&gt;my) {
+<a name="line280">280: </a>    j     = info-&gt;my - 1;
+<a name="line281">281: </a>    yinte = yinte - 1;
+<a name="line282">282: </a>    <font color="#B22222">/* top edge */</font>
+<a name="line283">283: </a>    <font color="#4169E1">for</font> (i = info-&gt;xs; i &lt; info-&gt;xs + info-&gt;xm; i++) {
+<a name="line284">284: </a>      f[j][i].u     = x[j][i].u - lid;
+<a name="line285">285: </a>      f[j][i].v     = x[j][i].v;
+<a name="line286">286: </a>      f[j][i].omega = x[j][i].omega + (x[j][i].u - x[j - 1][i].u) * dhy;
+<a name="line287">287: </a>      f[j][i].temp  = x[j][i].temp - x[j - 1][i].temp;
+<a name="line288">288: </a>    }
+<a name="line289">289: </a>  }
+
+<a name="line291">291: </a>  <font color="#B22222">/* Test whether we are on the left edge of the global array */</font>
+<a name="line292">292: </a>  <font color="#4169E1">if</font> (xints == 0) {
+<a name="line293">293: </a>    i     = 0;
+<a name="line294">294: </a>    xints = xints + 1;
+<a name="line295">295: </a>    <font color="#B22222">/* left edge */</font>
+<a name="line296">296: </a>    <font color="#4169E1">for</font> (j = info-&gt;ys; j &lt; info-&gt;ys + info-&gt;ym; j++) {
+<a name="line297">297: </a>      f[j][i].u     = x[j][i].u;
+<a name="line298">298: </a>      f[j][i].v     = x[j][i].v;
+<a name="line299">299: </a>      f[j][i].omega = x[j][i].omega - (x[j][i + 1].v - x[j][i].v) * dhx;
+<a name="line300">300: </a>      f[j][i].temp  = x[j][i].temp;
+<a name="line301">301: </a>    }
+<a name="line302">302: </a>  }
+
+<a name="line304">304: </a>  <font color="#B22222">/* Test whether we are on the right edge of the global array */</font>
+<a name="line305">305: </a>  <font color="#4169E1">if</font> (xinte == info-&gt;mx) {
+<a name="line306">306: </a>    i     = info-&gt;mx - 1;
+<a name="line307">307: </a>    xinte = xinte - 1;
+<a name="line308">308: </a>    <font color="#B22222">/* right edge */</font>
+<a name="line309">309: </a>    <font color="#4169E1">for</font> (j = info-&gt;ys; j &lt; info-&gt;ys + info-&gt;ym; j++) {
+<a name="line310">310: </a>      f[j][i].u     = x[j][i].u;
+<a name="line311">311: </a>      f[j][i].v     = x[j][i].v;
+<a name="line312">312: </a>      f[j][i].omega = x[j][i].omega - (x[j][i].v - x[j][i - 1].v) * dhx;
+<a name="line313">313: </a>      f[j][i].temp  = x[j][i].temp - (<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(grashof &gt; 0);
+<a name="line314">314: </a>    }
+<a name="line315">315: </a>  }
+
+<a name="line317">317: </a>  <font color="#B22222">/* Compute over the interior points */</font>
+<a name="line318">318: </a>  <font color="#4169E1">for</font> (j = yints; j &lt; yinte; j++) {
+<a name="line319">319: </a>    <font color="#4169E1">for</font> (i = xints; i &lt; xinte; i++) {
+<a name="line320">320: </a>      <font color="#B22222">/*</font>
+<a name="line321">321: </a><font color="#B22222">       convective coefficients for upwinding</font>
+<a name="line322">322: </a><font color="#B22222">      */</font>
+<a name="line323">323: </a>      vx  = x[j][i].u;
+<a name="line324">324: </a>      avx = PetscAbsScalar(vx);
+<a name="line325">325: </a>      vxp = .5 * (vx + avx);
+<a name="line326">326: </a>      vxm = .5 * (vx - avx);
+<a name="line327">327: </a>      vy  = x[j][i].v;
+<a name="line328">328: </a>      avy = PetscAbsScalar(vy);
+<a name="line329">329: </a>      vyp = .5 * (vy + avy);
+<a name="line330">330: </a>      vym = .5 * (vy - avy);
+
+<a name="line332">332: </a>      <font color="#B22222">/* U velocity */</font>
+<a name="line333">333: </a>      u         = x[j][i].u;
+<a name="line334">334: </a>      uxx       = (2.0 * u - x[j][i - 1].u - x[j][i + 1].u) * hydhx;
+<a name="line335">335: </a>      uyy       = (2.0 * u - x[j - 1][i].u - x[j + 1][i].u) * hxdhy;
+<a name="line336">336: </a>      f[j][i].u = uxx + uyy - .5 * (x[j + 1][i].omega - x[j - 1][i].omega) * hx;
+
+<a name="line338">338: </a>      <font color="#B22222">/* V velocity */</font>
+<a name="line339">339: </a>      u         = x[j][i].v;
+<a name="line340">340: </a>      uxx       = (2.0 * u - x[j][i - 1].v - x[j][i + 1].v) * hydhx;
+<a name="line341">341: </a>      uyy       = (2.0 * u - x[j - 1][i].v - x[j + 1][i].v) * hxdhy;
+<a name="line342">342: </a>      f[j][i].v = uxx + uyy + .5 * (x[j][i + 1].omega - x[j][i - 1].omega) * hy;
+
+<a name="line344">344: </a>      <font color="#B22222">/* Omega */</font>
+<a name="line345">345: </a>      u             = x[j][i].omega;
+<a name="line346">346: </a>      uxx           = (2.0 * u - x[j][i - 1].omega - x[j][i + 1].omega) * hydhx;
+<a name="line347">347: </a>      uyy           = (2.0 * u - x[j - 1][i].omega - x[j + 1][i].omega) * hxdhy;
+<a name="line348">348: </a>      f[j][i].omega = uxx + uyy + (vxp * (u - x[j][i - 1].omega) + vxm * (x[j][i + 1].omega - u)) * hy + (vyp * (u - x[j - 1][i].omega) + vym * (x[j + 1][i].omega - u)) * hx - .5 * grashof * (x[j][i + 1].temp - x[j][i - 1].temp) * hy;
+
+<a name="line350">350: </a>      <font color="#B22222">/* Temperature */</font>
+<a name="line351">351: </a>      u            = x[j][i].temp;
+<a name="line352">352: </a>      uxx          = (2.0 * u - x[j][i - 1].temp - x[j][i + 1].temp) * hydhx;
+<a name="line353">353: </a>      uyy          = (2.0 * u - x[j - 1][i].temp - x[j + 1][i].temp) * hxdhy;
+<a name="line354">354: </a>      f[j][i].temp = uxx + uyy + prandtl * ((vxp * (u - x[j][i - 1].temp) + vxm * (x[j][i + 1].temp - u)) * hy + (vyp * (u - x[j - 1][i].temp) + vym * (x[j + 1][i].temp - u)) * hx);
+<a name="line355">355: </a>    }
+<a name="line356">356: </a>  }
+
+<a name="line358">358: </a>  <font color="#B22222">/*</font>
+<a name="line359">359: </a><font color="#B22222">     Flop count (multiply-adds are counted as 2 operations)</font>
+<a name="line360">360: </a><font color="#B22222">  */</font>
+<a name="line361">361: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>(84.0 * info-&gt;ym * info-&gt;xm));
+<a name="line362">362: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line363">363: </a>}
+
+<a name="line365">365: </a><font color="#B22222">/*</font>
+<a name="line366">366: </a><font color="#B22222">    Performs sweeps of point block nonlinear Gauss-Seidel on all the local grid points</font>
+<a name="line367">367: </a><font color="#B22222">*/</font>
+<a name="line368">368: </a><strong><font color="#4169E1"><a name="NonlinearGS"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> NonlinearGS(<a href="../../../manualpages/SNES/SNES.html">SNES</a> snes, <a href="../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../manualpages/Vec/Vec.html">Vec</a> B, void *ctx)</font></strong>
+<a name="line369">369: </a>{
+<a name="line370">370: </a>  <a href="../../../manualpages/DMDA/DMDALocalInfo.html">DMDALocalInfo</a> info;
+<a name="line371">371: </a>  Field       **x, **b;
+<a name="line372">372: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>           localX, localB;
+<a name="line373">373: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>            da;
+<a name="line374">374: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>      xints, xinte, yints, yinte, i, j, k, l;
+<a name="line375">375: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>      max_its, tot_its;
+<a name="line376">376: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>      sweeps;
+<a name="line377">377: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>     rtol, atol, stol;
+<a name="line378">378: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>     hx, hy, dhx, dhy, hxdhy, hydhx;
+<a name="line379">379: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>     grashof, prandtl, lid;
+<a name="line380">380: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   u, uxx, uyy, vx, vy, avx, avy, vxp, vxm, vyp, vym;
+<a name="line381">381: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   fu, fv, fomega, ftemp;
+<a name="line382">382: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   dfudu;
+<a name="line383">383: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   dfvdv;
+<a name="line384">384: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   dfodu, dfodv, dfodo;
+<a name="line385">385: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   dftdu, dftdv, dftdt;
+<a name="line386">386: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   yu = 0, yv = 0, yo = 0, yt = 0;
+<a name="line387">387: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>   bjiu, bjiv, bjiomega, bjitemp;
+<a name="line388">388: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a>     ptconverged;
+<a name="line389">389: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>     pfnorm, pfnorm0, pynorm, pxnorm;
+<a name="line390">390: </a>  AppCtx       *user = (AppCtx *)ctx;
+
+<a name="line392">392: </a>  <a href="../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line393">393: </a>  grashof = user-&gt;grashof;
+<a name="line394">394: </a>  prandtl = user-&gt;prandtl;
+<a name="line395">395: </a>  lid     = user-&gt;lidvelocity;
+<a name="line396">396: </a>  tot_its = 0;
+<a name="line397">397: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESNGSGetTolerances.html">SNESNGSGetTolerances</a>(snes, &amp;rtol, &amp;atol, &amp;stol, &amp;max_its));
+<a name="line398">398: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESNGSGetSweeps.html">SNESNGSGetSweeps</a>(snes, &amp;sweeps));
+<a name="line399">399: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/SNES/SNESGetDM.html">SNESGetDM</a>(snes, (<a href="../../../manualpages/DM/DM.html">DM</a> *)&amp;da));
+<a name="line400">400: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGetLocalVector.html">DMGetLocalVector</a>(da, &amp;localX));
+<a name="line401">401: </a>  <font color="#4169E1">if</font> (B) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGetLocalVector.html">DMGetLocalVector</a>(da, &amp;localB));
+<a name="line402">402: </a>  <font color="#B22222">/*</font>
+<a name="line403">403: </a><font color="#B22222">     Scatter ghost points to local vector, using the 2-step process</font>
+<a name="line404">404: </a><font color="#B22222">        <a href="../../../manualpages/DM/DMGlobalToLocalBegin.html">DMGlobalToLocalBegin</a>(), <a href="../../../manualpages/DM/DMGlobalToLocalEnd.html">DMGlobalToLocalEnd</a>().</font>
+<a name="line405">405: </a><font color="#B22222">  */</font>
+<a name="line406">406: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalBegin.html">DMGlobalToLocalBegin</a>(da, X, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, localX));
+<a name="line407">407: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalEnd.html">DMGlobalToLocalEnd</a>(da, X, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, localX));
+<a name="line408">408: </a>  <font color="#4169E1">if</font> (B) {
+<a name="line409">409: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalBegin.html">DMGlobalToLocalBegin</a>(da, B, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, localB));
+<a name="line410">410: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalEnd.html">DMGlobalToLocalEnd</a>(da, B, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, localB));
+<a name="line411">411: </a>  }
+<a name="line412">412: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetLocalInfo.html">DMDAGetLocalInfo</a>(da, &amp;info));
+<a name="line413">413: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArrayWrite.html">DMDAVecGetArrayWrite</a>(da, localX, &amp;x));
+<a name="line414">414: </a>  <font color="#4169E1">if</font> (B) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecGetArrayRead.html">DMDAVecGetArrayRead</a>(da, localB, &amp;b));
+<a name="line415">415: </a>  <font color="#B22222">/* looks like a combination of the formfunction / formjacobian routines */</font>
+<a name="line416">416: </a>  dhx   = (<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(info.mx - 1);
+<a name="line417">417: </a>  dhy   = (<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(info.my - 1);
+<a name="line418">418: </a>  hx    = 1.0 / dhx;
+<a name="line419">419: </a>  hy    = 1.0 / dhy;
+<a name="line420">420: </a>  hxdhy = hx * dhy;
+<a name="line421">421: </a>  hydhx = hy * dhx;
+
+<a name="line423">423: </a>  xints = info.xs;
+<a name="line424">424: </a>  xinte = info.xs + info.xm;
+<a name="line425">425: </a>  yints = info.ys;
+<a name="line426">426: </a>  yinte = info.ys + info.ym;
+
+<a name="line428">428: </a>  <font color="#B22222">/* Set the boundary conditions on the momentum equations */</font>
+<a name="line429">429: </a>  <font color="#B22222">/* Test whether we are on the bottom edge of the global array */</font>
+<a name="line430">430: </a>  <font color="#4169E1">if</font> (yints == 0) {
+<a name="line431">431: </a>    j = 0;
+<a name="line432">432: </a>    <font color="#B22222">/* bottom edge */</font>
+<a name="line433">433: </a>    <font color="#4169E1">for</font> (i = info.xs; i &lt; info.xs + info.xm; i++) {
+<a name="line434">434: </a>      <font color="#4169E1">if</font> (B) {
+<a name="line435">435: </a>        bjiu = b[j][i].u;
+<a name="line436">436: </a>        bjiv = b[j][i].v;
+<a name="line437">437: </a>      } <font color="#4169E1">else</font> {
+<a name="line438">438: </a>        bjiu = 0.0;
+<a name="line439">439: </a>        bjiv = 0.0;
+<a name="line440">440: </a>      }
+<a name="line441">441: </a>      x[j][i].u = 0.0 + bjiu;
+<a name="line442">442: </a>      x[j][i].v = 0.0 + bjiv;
+<a name="line443">443: </a>    }
+<a name="line444">444: </a>  }
+
+<a name="line446">446: </a>  <font color="#B22222">/* Test whether we are on the top edge of the global array */</font>
+<a name="line447">447: </a>  <font color="#4169E1">if</font> (yinte == info.my) {
+<a name="line448">448: </a>    j = info.my - 1;
+<a name="line449">449: </a>    <font color="#B22222">/* top edge */</font>
+<a name="line450">450: </a>    <font color="#4169E1">for</font> (i = info.xs; i &lt; info.xs + info.xm; i++) {
+<a name="line451">451: </a>      <font color="#4169E1">if</font> (B) {
+<a name="line452">452: </a>        bjiu = b[j][i].u;
+<a name="line453">453: </a>        bjiv = b[j][i].v;
+<a name="line454">454: </a>      } <font color="#4169E1">else</font> {
+<a name="line455">455: </a>        bjiu = 0.0;
+<a name="line456">456: </a>        bjiv = 0.0;
+<a name="line457">457: </a>      }
+<a name="line458">458: </a>      x[j][i].u = lid + bjiu;
+<a name="line459">459: </a>      x[j][i].v = bjiv;
+<a name="line460">460: </a>    }
+<a name="line461">461: </a>  }
+
+<a name="line463">463: </a>  <font color="#B22222">/* Test whether we are on the left edge of the global array */</font>
+<a name="line464">464: </a>  <font color="#4169E1">if</font> (xints == 0) {
+<a name="line465">465: </a>    i = 0;
+<a name="line466">466: </a>    <font color="#B22222">/* left edge */</font>
+<a name="line467">467: </a>    <font color="#4169E1">for</font> (j = info.ys; j &lt; info.ys + info.ym; j++) {
+<a name="line468">468: </a>      <font color="#4169E1">if</font> (B) {
+<a name="line469">469: </a>        bjiu = b[j][i].u;
+<a name="line470">470: </a>        bjiv = b[j][i].v;
+<a name="line471">471: </a>      } <font color="#4169E1">else</font> {
+<a name="line472">472: </a>        bjiu = 0.0;
+<a name="line473">473: </a>        bjiv = 0.0;
+<a name="line474">474: </a>      }
+<a name="line475">475: </a>      x[j][i].u = 0.0 + bjiu;
+<a name="line476">476: </a>      x[j][i].v = 0.0 + bjiv;
+<a name="line477">477: </a>    }
+<a name="line478">478: </a>  }
+
+<a name="line480">480: </a>  <font color="#B22222">/* Test whether we are on the right edge of the global array */</font>
+<a name="line481">481: </a>  <font color="#4169E1">if</font> (xinte == info.mx) {
+<a name="line482">482: </a>    i = info.mx - 1;
+<a name="line483">483: </a>    <font color="#B22222">/* right edge */</font>
+<a name="line484">484: </a>    <font color="#4169E1">for</font> (j = info.ys; j &lt; info.ys + info.ym; j++) {
+<a name="line485">485: </a>      <font color="#4169E1">if</font> (B) {
+<a name="line486">486: </a>        bjiu = b[j][i].u;
+<a name="line487">487: </a>        bjiv = b[j][i].v;
+<a name="line488">488: </a>      } <font color="#4169E1">else</font> {
+<a name="line489">489: </a>        bjiu = 0.0;
+<a name="line490">490: </a>        bjiv = 0.0;
+<a name="line491">491: </a>      }
+<a name="line492">492: </a>      x[j][i].u = 0.0 + bjiu;
+<a name="line493">493: </a>      x[j][i].v = 0.0 + bjiv;
+<a name="line494">494: </a>    }
+<a name="line495">495: </a>  }
+
+<a name="line497">497: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; sweeps; k++) {
+<a name="line498">498: </a>    <font color="#4169E1">for</font> (j = info.ys; j &lt; info.ys + info.ym; j++) {
+<a name="line499">499: </a>      <font color="#4169E1">for</font> (i = info.xs; i &lt; info.xs + info.xm; i++) {
+<a name="line500">500: </a>        ptconverged = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line501">501: </a>        pfnorm0     = 0.0;
+<a name="line502">502: </a>        fu          = 0.0;
+<a name="line503">503: </a>        fv          = 0.0;
+<a name="line504">504: </a>        fomega      = 0.0;
+<a name="line505">505: </a>        ftemp       = 0.0;
+<a name="line506">506: </a>        <font color="#B22222">/*  Run Newton's method on a single grid point */</font>
+<a name="line507">507: </a>        <font color="#4169E1">for</font> (l = 0; l &lt; max_its &amp;&amp; !ptconverged; l++) {
+<a name="line508">508: </a>          <font color="#4169E1">if</font> (B) {
+<a name="line509">509: </a>            bjiu     = b[j][i].u;
+<a name="line510">510: </a>            bjiv     = b[j][i].v;
+<a name="line511">511: </a>            bjiomega = b[j][i].omega;
+<a name="line512">512: </a>            bjitemp  = b[j][i].temp;
+<a name="line513">513: </a>          } <font color="#4169E1">else</font> {
+<a name="line514">514: </a>            bjiu     = 0.0;
+<a name="line515">515: </a>            bjiv     = 0.0;
+<a name="line516">516: </a>            bjiomega = 0.0;
+<a name="line517">517: </a>            bjitemp  = 0.0;
+<a name="line518">518: </a>          }
+
+<a name="line520">520: </a>          <font color="#4169E1">if</font> (i != 0 &amp;&amp; i != info.mx - 1 &amp;&amp; j != 0 &amp;&amp; j != info.my - 1) {
+<a name="line521">521: </a>            <font color="#B22222">/* U velocity */</font>
+<a name="line522">522: </a>            u     = x[j][i].u;
+<a name="line523">523: </a>            uxx   = (2.0 * u - x[j][i - 1].u - x[j][i + 1].u) * hydhx;
+<a name="line524">524: </a>            uyy   = (2.0 * u - x[j - 1][i].u - x[j + 1][i].u) * hxdhy;
+<a name="line525">525: </a>            fu    = uxx + uyy - .5 * (x[j + 1][i].omega - x[j - 1][i].omega) * hx - bjiu;
+<a name="line526">526: </a>            dfudu = 2.0 * (hydhx + hxdhy);
+<a name="line527">527: </a>            <font color="#B22222">/* V velocity */</font>
+<a name="line528">528: </a>            u     = x[j][i].v;
+<a name="line529">529: </a>            uxx   = (2.0 * u - x[j][i - 1].v - x[j][i + 1].v) * hydhx;
+<a name="line530">530: </a>            uyy   = (2.0 * u - x[j - 1][i].v - x[j + 1][i].v) * hxdhy;
+<a name="line531">531: </a>            fv    = uxx + uyy + .5 * (x[j][i + 1].omega - x[j][i - 1].omega) * hy - bjiv;
+<a name="line532">532: </a>            dfvdv = 2.0 * (hydhx + hxdhy);
+<a name="line533">533: </a>            <font color="#B22222">/*</font>
+<a name="line534">534: </a><font color="#B22222">             convective coefficients for upwinding</font>
+<a name="line535">535: </a><font color="#B22222">             */</font>
+<a name="line536">536: </a>            vx  = x[j][i].u;
+<a name="line537">537: </a>            avx = PetscAbsScalar(vx);
+<a name="line538">538: </a>            vxp = .5 * (vx + avx);
+<a name="line539">539: </a>            vxm = .5 * (vx - avx);
+<a name="line540">540: </a>            vy  = x[j][i].v;
+<a name="line541">541: </a>            avy = PetscAbsScalar(vy);
+<a name="line542">542: </a>            vyp = .5 * (vy + avy);
+<a name="line543">543: </a>            vym = .5 * (vy - avy);
+<a name="line544">544: </a>            <font color="#B22222">/* Omega */</font>
+<a name="line545">545: </a>            u      = x[j][i].omega;
+<a name="line546">546: </a>            uxx    = (2.0 * u - x[j][i - 1].omega - x[j][i + 1].omega) * hydhx;
+<a name="line547">547: </a>            uyy    = (2.0 * u - x[j - 1][i].omega - x[j + 1][i].omega) * hxdhy;
+<a name="line548">548: </a>            fomega = uxx + uyy + (vxp * (u - x[j][i - 1].omega) + vxm * (x[j][i + 1].omega - u)) * hy + (vyp * (u - x[j - 1][i].omega) + vym * (x[j + 1][i].omega - u)) * hx - .5 * grashof * (x[j][i + 1].temp - x[j][i - 1].temp) * hy - bjiomega;
+<a name="line549">549: </a>            <font color="#B22222">/* convective coefficient derivatives */</font>
+<a name="line550">550: </a>            dfodo = 2.0 * (hydhx + hxdhy) + ((vxp - vxm) * hy + (vyp - vym) * hx);
+<a name="line551">551: </a>            <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(vx) &gt; 0.0) dfodu = (u - x[j][i - 1].omega) * hy;
+<a name="line552">552: </a>            <font color="#4169E1">else</font> dfodu = (x[j][i + 1].omega - u) * hy;
+
+<a name="line554">554: </a>            <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(vy) &gt; 0.0) dfodv = (u - x[j - 1][i].omega) * hx;
+<a name="line555">555: </a>            <font color="#4169E1">else</font> dfodv = (x[j + 1][i].omega - u) * hx;
+
+<a name="line557">557: </a>            <font color="#B22222">/* Temperature */</font>
+<a name="line558">558: </a>            u     = x[j][i].temp;
+<a name="line559">559: </a>            uxx   = (2.0 * u - x[j][i - 1].temp - x[j][i + 1].temp) * hydhx;
+<a name="line560">560: </a>            uyy   = (2.0 * u - x[j - 1][i].temp - x[j + 1][i].temp) * hxdhy;
+<a name="line561">561: </a>            ftemp = uxx + uyy + prandtl * ((vxp * (u - x[j][i - 1].temp) + vxm * (x[j][i + 1].temp - u)) * hy + (vyp * (u - x[j - 1][i].temp) + vym * (x[j + 1][i].temp - u)) * hx) - bjitemp;
+<a name="line562">562: </a>            dftdt = 2.0 * (hydhx + hxdhy) + prandtl * ((vxp - vxm) * hy + (vyp - vym) * hx);
+<a name="line563">563: </a>            <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(vx) &gt; 0.0) dftdu = prandtl * (u - x[j][i - 1].temp) * hy;
+<a name="line564">564: </a>            <font color="#4169E1">else</font> dftdu = prandtl * (x[j][i + 1].temp - u) * hy;
+
+<a name="line566">566: </a>            <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(vy) &gt; 0.0) dftdv = prandtl * (u - x[j - 1][i].temp) * hx;
+<a name="line567">567: </a>            <font color="#4169E1">else</font> dftdv = prandtl * (x[j + 1][i].temp - u) * hx;
+
+<a name="line569">569: </a>            <font color="#B22222">/* invert the system:</font>
+<a name="line570">570: </a><font color="#B22222">             [ dfu / du     0        0        0    ][yu] = [fu]</font>
+<a name="line571">571: </a><font color="#B22222">             [     0    dfv / dv     0        0    ][yv]   [fv]</font>
+<a name="line572">572: </a><font color="#B22222">             [ dfo / du dfo / dv dfo / do     0    ][yo]   [fo]</font>
+<a name="line573">573: </a><font color="#B22222">             [ dft / du dft / dv     0    dft / dt ][yt]   [ft]</font>
+<a name="line574">574: </a><font color="#B22222">             by simple back-substitution</font>
+<a name="line575">575: </a><font color="#B22222">           */</font>
+<a name="line576">576: </a>            yu = fu / dfudu;
+<a name="line577">577: </a>            yv = fv / dfvdv;
+<a name="line578">578: </a>            yo = (fomega - (dfodu * yu + dfodv * yv)) / dfodo;
+<a name="line579">579: </a>            yt = (ftemp - (dftdu * yu + dftdv * yv)) / dftdt;
+
+<a name="line581">581: </a>            x[j][i].u     = x[j][i].u - yu;
+<a name="line582">582: </a>            x[j][i].v     = x[j][i].v - yv;
+<a name="line583">583: </a>            x[j][i].temp  = x[j][i].temp - yt;
+<a name="line584">584: </a>            x[j][i].omega = x[j][i].omega - yo;
+<a name="line585">585: </a>          }
+<a name="line586">586: </a>          <font color="#4169E1">if</font> (i == 0) {
+<a name="line587">587: </a>            fomega        = x[j][i].omega - (x[j][i + 1].v - x[j][i].v) * dhx - bjiomega;
+<a name="line588">588: </a>            ftemp         = x[j][i].temp - bjitemp;
+<a name="line589">589: </a>            yo            = fomega;
+<a name="line590">590: </a>            yt            = ftemp;
+<a name="line591">591: </a>            x[j][i].omega = x[j][i].omega - fomega;
+<a name="line592">592: </a>            x[j][i].temp  = x[j][i].temp - ftemp;
+<a name="line593">593: </a>          }
+<a name="line594">594: </a>          <font color="#4169E1">if</font> (i == info.mx - 1) {
+<a name="line595">595: </a>            fomega        = x[j][i].omega - (x[j][i].v - x[j][i - 1].v) * dhx - bjiomega;
+<a name="line596">596: </a>            ftemp         = x[j][i].temp - (<a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>)(grashof &gt; 0) - bjitemp;
+<a name="line597">597: </a>            yo            = fomega;
+<a name="line598">598: </a>            yt            = ftemp;
+<a name="line599">599: </a>            x[j][i].omega = x[j][i].omega - fomega;
+<a name="line600">600: </a>            x[j][i].temp  = x[j][i].temp - ftemp;
+<a name="line601">601: </a>          }
+<a name="line602">602: </a>          <font color="#4169E1">if</font> (j == 0) {
+<a name="line603">603: </a>            fomega        = x[j][i].omega + (x[j + 1][i].u - x[j][i].u) * dhy - bjiomega;
+<a name="line604">604: </a>            ftemp         = x[j][i].temp - x[j + 1][i].temp - bjitemp;
+<a name="line605">605: </a>            yo            = fomega;
+<a name="line606">606: </a>            yt            = ftemp;
+<a name="line607">607: </a>            x[j][i].omega = x[j][i].omega - fomega;
+<a name="line608">608: </a>            x[j][i].temp  = x[j][i].temp - ftemp;
+<a name="line609">609: </a>          }
+<a name="line610">610: </a>          <font color="#4169E1">if</font> (j == info.my - 1) {
+<a name="line611">611: </a>            fomega        = x[j][i].omega + (x[j][i].u - x[j - 1][i].u) * dhy - bjiomega;
+<a name="line612">612: </a>            ftemp         = x[j][i].temp - x[j - 1][i].temp - bjitemp;
+<a name="line613">613: </a>            yo            = fomega;
+<a name="line614">614: </a>            yt            = ftemp;
+<a name="line615">615: </a>            x[j][i].omega = x[j][i].omega - fomega;
+<a name="line616">616: </a>            x[j][i].temp  = x[j][i].temp - ftemp;
+<a name="line617">617: </a>          }
+<a name="line618">618: </a>          tot_its++;
+<a name="line619">619: </a>          pfnorm = <a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(fu * fu + fv * fv + fomega * fomega + ftemp * ftemp);
+<a name="line620">620: </a>          pfnorm = PetscSqrtReal(pfnorm);
+<a name="line621">621: </a>          pynorm = <a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(yu * yu + yv * yv + yo * yo + yt * yt);
+<a name="line622">622: </a>          pynorm = PetscSqrtReal(pynorm);
+<a name="line623">623: </a>          pxnorm = <a href="../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(x[j][i].u * x[j][i].u + x[j][i].v * x[j][i].v + x[j][i].omega * x[j][i].omega + x[j][i].temp * x[j][i].temp);
+<a name="line624">624: </a>          pxnorm = PetscSqrtReal(pxnorm);
+<a name="line625">625: </a>          <font color="#4169E1">if</font> (l == 0) pfnorm0 = pfnorm;
+<a name="line626">626: </a>          <font color="#4169E1">if</font> (rtol * pfnorm0 &gt; pfnorm || atol &gt; pfnorm || pxnorm * stol &gt; pynorm) ptconverged = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line627">627: </a>        }
+<a name="line628">628: </a>      }
+<a name="line629">629: </a>    }
+<a name="line630">630: </a>  }
+<a name="line631">631: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArrayWrite.html">DMDAVecRestoreArrayWrite</a>(da, localX, &amp;x));
+<a name="line632">632: </a>  <font color="#4169E1">if</font> (B) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAVecRestoreArrayRead.html">DMDAVecRestoreArrayRead</a>(da, localB, &amp;b));
+<a name="line633">633: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMLocalToGlobalBegin.html">DMLocalToGlobalBegin</a>(da, localX, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, X));
+<a name="line634">634: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMLocalToGlobalEnd.html">DMLocalToGlobalEnd</a>(da, localX, <a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, X));
+<a name="line635">635: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>(tot_its * (84.0 + 41.0 + 26.0)));
+<a name="line636">636: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMRestoreLocalVector.html">DMRestoreLocalVector</a>(da, &amp;localX));
+<a name="line637">637: </a>  <font color="#4169E1">if</font> (B) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMRestoreLocalVector.html">DMRestoreLocalVector</a>(da, &amp;localB));
+<a name="line638">638: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line639">639: </a>}
+
+<a name="line641">641: </a><font color="#B22222">/*TEST</font>
+
+<a name="line643">643: </a><font color="#B22222">   test:</font>
+<a name="line644">644: </a><font color="#B22222">      nsize: 2</font>
+<a name="line645">645: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg -ksp_type fgmres -pc_mg_type full</font>
+<a name="line646">646: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line648">648: </a><font color="#B22222">   test:</font>
+<a name="line649">649: </a><font color="#B22222">      suffix: 10</font>
+<a name="line650">650: </a><font color="#B22222">      nsize: 3</font>
+<a name="line651">651: </a><font color="#B22222">      args: -snes_monitor_short -ksp_monitor_short -pc_type fieldsplit -pc_fieldsplit_type symmetric_multiplicative -snes_view -da_refine 1 -ksp_type fgmres</font>
+<a name="line652">652: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line654">654: </a><font color="#B22222">   test:</font>
+<a name="line655">655: </a><font color="#B22222">      suffix: 11</font>
+<a name="line656">656: </a><font color="#B22222">      nsize: 4</font>
+<a name="line657">657: </a><font color="#B22222">      requires: pastix</font>
+<a name="line658">658: </a><font color="#B22222">      args: -snes_monitor_short -pc_type redundant -dm_mat_type mpiaij -redundant_pc_factor_mat_solver_type pastix -pc_redundant_number 2 -da_refine 4 -ksp_type fgmres</font>
+
+<a name="line660">660: </a><font color="#B22222">   test:</font>
+<a name="line661">661: </a><font color="#B22222">      suffix: 12</font>
+<a name="line662">662: </a><font color="#B22222">      nsize: 12</font>
+<a name="line663">663: </a><font color="#B22222">      requires: pastix</font>
+<a name="line664">664: </a><font color="#B22222">      args: -snes_monitor_short -pc_type redundant -dm_mat_type mpiaij -redundant_pc_factor_mat_solver_type pastix -pc_redundant_number 5 -da_refine 4 -ksp_type fgmres</font>
+
+<a name="line666">666: </a><font color="#B22222">   test:</font>
+<a name="line667">667: </a><font color="#B22222">      suffix: 13</font>
+<a name="line668">668: </a><font color="#B22222">      nsize: 3</font>
+<a name="line669">669: </a><font color="#B22222">      args: -snes_monitor_short -ksp_monitor_short -pc_type fieldsplit -pc_fieldsplit_type multiplicative -snes_view -da_refine 1 -ksp_type fgmres -snes_mf_operator</font>
+<a name="line670">670: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line672">672: </a><font color="#B22222">   test:</font>
+<a name="line673">673: </a><font color="#B22222">      suffix: 14</font>
+<a name="line674">674: </a><font color="#B22222">      nsize: 4</font>
+<a name="line675">675: </a><font color="#B22222">      args: -snes_monitor_short -pc_type mg -dm_mat_type baij -mg_coarse_pc_type bjacobi -da_refine 3 -ksp_type fgmres</font>
+<a name="line676">676: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line678">678: </a><font color="#B22222">   test:</font>
+<a name="line679">679: </a><font color="#B22222">      suffix: 14_ds</font>
+<a name="line680">680: </a><font color="#B22222">      nsize: 4</font>
+<a name="line681">681: </a><font color="#B22222">      args: -snes_converged_reason -pc_type mg -dm_mat_type baij -mg_coarse_pc_type bjacobi -da_refine 3 -ksp_type fgmres -mat_fd_type ds</font>
+<a name="line682">682: </a><font color="#B22222">      output_file: output/ex19_2.out</font>
+<a name="line683">683: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line685">685: </a><font color="#B22222">   test:</font>
+<a name="line686">686: </a><font color="#B22222">      suffix: 17</font>
+<a name="line687">687: </a><font color="#B22222">      args: -snes_monitor_short -ksp_pc_side right</font>
+<a name="line688">688: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line690">690: </a><font color="#B22222">   test:</font>
+<a name="line691">691: </a><font color="#B22222">      suffix: 18</font>
+<a name="line692">692: </a><font color="#B22222">      args: -snes_monitor_ksp draw::draw_lg -ksp_pc_side right</font>
+<a name="line693">693: </a><font color="#B22222">      requires: x !single</font>
+
+<a name="line695">695: </a><font color="#B22222">   test:</font>
+<a name="line696">696: </a><font color="#B22222">      suffix: 19</font>
+<a name="line697">697: </a><font color="#B22222">      nsize: 2</font>
+<a name="line698">698: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg -ksp_type fgmres -pc_mg_type full -snes_type newtontrdc</font>
+<a name="line699">699: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line701">701: </a><font color="#B22222">   test:</font>
+<a name="line702">702: </a><font color="#B22222">      suffix: 20</font>
+<a name="line703">703: </a><font color="#B22222">      nsize: 2</font>
+<a name="line704">704: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg -ksp_type fgmres -pc_mg_type full -snes_type newtontrdc -snes_trdc_use_cauchy false</font>
+<a name="line705">705: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line707">707: </a><font color="#B22222">   test:</font>
+<a name="line708">708: </a><font color="#B22222">      suffix: 2</font>
+<a name="line709">709: </a><font color="#B22222">      nsize: 4</font>
+<a name="line710">710: </a><font color="#B22222">      args: -da_refine 3 -snes_converged_reason -pc_type mg -mat_fd_type ds</font>
+<a name="line711">711: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line713">713: </a><font color="#B22222">   test:</font>
+<a name="line714">714: </a><font color="#B22222">      suffix: 2_bcols1</font>
+<a name="line715">715: </a><font color="#B22222">      nsize: 4</font>
+<a name="line716">716: </a><font color="#B22222">      args: -da_refine 3 -snes_converged_reason -pc_type mg -mat_fd_type ds -mat_fd_coloring_bcols</font>
+<a name="line717">717: </a><font color="#B22222">      output_file: output/ex19_2.out</font>
+<a name="line718">718: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line720">720: </a><font color="#B22222">   test:</font>
+<a name="line721">721: </a><font color="#B22222">      suffix: 3</font>
+<a name="line722">722: </a><font color="#B22222">      nsize: 4</font>
+<a name="line723">723: </a><font color="#B22222">      requires: mumps</font>
+<a name="line724">724: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type redundant -dm_mat_type mpiaij -redundant_ksp_type preonly -redundant_pc_factor_mat_solver_type mumps -pc_redundant_number 2</font>
+
+<a name="line726">726: </a><font color="#B22222">   test:</font>
+<a name="line727">727: </a><font color="#B22222">      suffix: 4</font>
+<a name="line728">728: </a><font color="#B22222">      nsize: 12</font>
+<a name="line729">729: </a><font color="#B22222">      requires: mumps</font>
+<a name="line730">730: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type redundant -dm_mat_type mpiaij -redundant_ksp_type preonly -redundant_pc_factor_mat_solver_type mumps -pc_redundant_number 5</font>
+<a name="line731">731: </a><font color="#B22222">      output_file: output/ex19_3.out</font>
+
+<a name="line733">733: </a><font color="#B22222">   test:</font>
+<a name="line734">734: </a><font color="#B22222">      suffix: 6</font>
+<a name="line735">735: </a><font color="#B22222">      args: -snes_monitor_short -ksp_monitor_short -pc_type fieldsplit -snes_view -ksp_type fgmres -da_refine 1</font>
+<a name="line736">736: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line738">738: </a><font color="#B22222">   test:</font>
+<a name="line739">739: </a><font color="#B22222">      suffix: 7</font>
+<a name="line740">740: </a><font color="#B22222">      nsize: 3</font>
+<a name="line741">741: </a><font color="#B22222">      args: -snes_monitor_short -ksp_monitor_short -pc_type fieldsplit -snes_view -da_refine 1 -ksp_type fgmres</font>
+
+<a name="line743">743: </a><font color="#B22222">      requires: !single</font>
+<a name="line744">744: </a><font color="#B22222">   test:</font>
+<a name="line745">745: </a><font color="#B22222">      suffix: 8</font>
+<a name="line746">746: </a><font color="#B22222">      args: -snes_monitor_short -ksp_monitor_short -pc_type fieldsplit -pc_fieldsplit_block_size 2 -pc_fieldsplit_0_fields 0,1 -pc_fieldsplit_1_fields 0,1 -pc_fieldsplit_type multiplicative -snes_view -fieldsplit_pc_type lu -da_refine 1 -ksp_type fgmres</font>
+<a name="line747">747: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line749">749: </a><font color="#B22222">   test:</font>
+<a name="line750">750: </a><font color="#B22222">      suffix: 9</font>
+<a name="line751">751: </a><font color="#B22222">      nsize: 3</font>
+<a name="line752">752: </a><font color="#B22222">      args: -snes_monitor_short -ksp_monitor_short -pc_type fieldsplit -pc_fieldsplit_type multiplicative -snes_view -da_refine 1 -ksp_type fgmres</font>
+<a name="line753">753: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line755">755: </a><font color="#B22222">   test:</font>
+<a name="line756">756: </a><font color="#B22222">      suffix: aspin</font>
+<a name="line757">757: </a><font color="#B22222">      nsize: 4</font>
+<a name="line758">758: </a><font color="#B22222">      args: -da_refine 3 -da_overlap 2 -snes_monitor_short -snes_type aspin -grashof 4e4 -lidvelocity 100 -ksp_monitor_short</font>
+<a name="line759">759: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line761">761: </a><font color="#B22222">   test:</font>
+<a name="line762">762: </a><font color="#B22222">      suffix: bcgsl</font>
+<a name="line763">763: </a><font color="#B22222">      nsize: 2</font>
+<a name="line764">764: </a><font color="#B22222">      args: -ksp_type bcgsl -ksp_monitor_short -da_refine 2 -ksp_bcgsl_ell 3 -snes_view</font>
+<a name="line765">765: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line767">767: </a><font color="#B22222">   test:</font>
+<a name="line768">768: </a><font color="#B22222">      suffix: bcols1</font>
+<a name="line769">769: </a><font color="#B22222">      nsize: 2</font>
+<a name="line770">770: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg -ksp_type fgmres -pc_mg_type full -mat_fd_coloring_bcols 1</font>
+<a name="line771">771: </a><font color="#B22222">      output_file: output/ex19_1.out</font>
+<a name="line772">772: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line774">774: </a><font color="#B22222">   test:</font>
+<a name="line775">775: </a><font color="#B22222">      suffix: bjacobi</font>
+<a name="line776">776: </a><font color="#B22222">      nsize: 4</font>
+<a name="line777">777: </a><font color="#B22222">      args: -da_refine 4 -ksp_type fgmres -pc_type bjacobi -pc_bjacobi_blocks 2 -sub_ksp_type gmres -sub_ksp_max_it 2 -sub_pc_type bjacobi -sub_sub_ksp_type preonly -sub_sub_pc_type ilu -snes_monitor_short</font>
+<a name="line778">778: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line780">780: </a><font color="#B22222">   test:</font>
+<a name="line781">781: </a><font color="#B22222">      suffix: cgne</font>
+<a name="line782">782: </a><font color="#B22222">      args: -da_refine 2 -pc_type lu -ksp_type cgne -ksp_monitor_short -ksp_converged_reason -ksp_view -ksp_norm_type unpreconditioned</font>
+<a name="line783">783: </a><font color="#B22222">      filter: grep -v HERMITIAN</font>
+<a name="line784">784: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line786">786: </a><font color="#B22222">   test:</font>
+<a name="line787">787: </a><font color="#B22222">      suffix: cgs</font>
+<a name="line788">788: </a><font color="#B22222">      args: -da_refine 1 -ksp_monitor_short -ksp_type cgs</font>
+<a name="line789">789: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line791">791: </a><font color="#B22222">   test:</font>
+<a name="line792">792: </a><font color="#B22222">      suffix: composite_fieldsplit</font>
+<a name="line793">793: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type composite -pc_composite_type MULTIPLICATIVE -pc_composite_pcs fieldsplit,none -sub_0_pc_fieldsplit_block_size 4 -sub_0_pc_fieldsplit_type additive -sub_0_pc_fieldsplit_0_fields 0,1,2 -sub_0_pc_fieldsplit_1_fields 3 -snes_monitor_short -ksp_monitor_short</font>
+<a name="line794">794: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line796">796: </a><font color="#B22222">   test:</font>
+<a name="line797">797: </a><font color="#B22222">      suffix: composite_fieldsplit_bjacobi</font>
+<a name="line798">798: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type composite -pc_composite_type MULTIPLICATIVE -pc_composite_pcs fieldsplit,bjacobi -sub_0_pc_fieldsplit_block_size 4 -sub_0_pc_fieldsplit_type additive -sub_0_pc_fieldsplit_0_fields 0,1,2 -sub_0_pc_fieldsplit_1_fields 3 -sub_1_pc_bjacobi_blocks 16 -sub_1_sub_pc_type lu -snes_monitor_short -ksp_monitor_short</font>
+<a name="line799">799: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line801">801: </a><font color="#B22222">   test:</font>
+<a name="line802">802: </a><font color="#B22222">      suffix: composite_fieldsplit_bjacobi_2</font>
+<a name="line803">803: </a><font color="#B22222">      nsize: 4</font>
+<a name="line804">804: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type composite -pc_composite_type MULTIPLICATIVE -pc_composite_pcs fieldsplit,bjacobi -sub_0_pc_fieldsplit_block_size 4 -sub_0_pc_fieldsplit_type additive -sub_0_pc_fieldsplit_0_fields 0,1,2 -sub_0_pc_fieldsplit_1_fields 3 -sub_1_pc_bjacobi_blocks 16 -sub_1_sub_pc_type lu -snes_monitor_short -ksp_monitor_short</font>
+<a name="line805">805: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line807">807: </a><font color="#B22222">   test:</font>
+<a name="line808">808: </a><font color="#B22222">      suffix: composite_gs_newton</font>
+<a name="line809">809: </a><font color="#B22222">      nsize: 2</font>
+<a name="line810">810: </a><font color="#B22222">      args: -da_refine 3 -grashof 4e4 -lidvelocity 100 -snes_monitor_short -snes_type composite -snes_composite_type additiveoptimal -snes_composite_sneses ngs,newtonls -sub_0_snes_max_it 20 -sub_1_pc_type mg</font>
+<a name="line811">811: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line813">813: </a><font color="#B22222">   test:</font>
+<a name="line814">814: </a><font color="#B22222">      suffix: cuda</font>
+<a name="line815">815: </a><font color="#B22222">      requires: cuda !single</font>
+<a name="line816">816: </a><font color="#B22222">      args: -dm_vec_type cuda -dm_mat_type aijcusparse -pc_type none -ksp_type fgmres -snes_monitor_short -snes_rtol 1.e-5</font>
+
+<a name="line818">818: </a><font color="#B22222">   test:</font>
+<a name="line819">819: </a><font color="#B22222">      suffix: hip</font>
+<a name="line820">820: </a><font color="#B22222">      requires: hip !single</font>
+<a name="line821">821: </a><font color="#B22222">      args: -dm_vec_type hip -dm_mat_type aijhipsparse -pc_type none -ksp_type fgmres -snes_monitor_short -snes_rtol 1.e-5</font>
+
+<a name="line823">823: </a><font color="#B22222">   test:</font>
+<a name="line824">824: </a><font color="#B22222">      suffix: draw</font>
+<a name="line825">825: </a><font color="#B22222">      args: -pc_type fieldsplit -snes_view draw -fieldsplit_x_velocity_pc_type mg -fieldsplit_x_velocity_pc_mg_galerkin pmat -fieldsplit_x_velocity_pc_mg_levels 2 -da_refine 1 -fieldsplit_x_velocity_mg_coarse_pc_type svd</font>
+<a name="line826">826: </a><font color="#B22222">      requires: x !single</font>
+
+<a name="line828">828: </a><font color="#B22222">   test:</font>
+<a name="line829">829: </a><font color="#B22222">      suffix: drawports</font>
+<a name="line830">830: </a><font color="#B22222">      args: -snes_monitor_solution draw::draw_ports -da_refine 1</font>
+<a name="line831">831: </a><font color="#B22222">      output_file: output/ex19_draw.out</font>
+<a name="line832">832: </a><font color="#B22222">      requires: x !single</font>
+
+<a name="line834">834: </a><font color="#B22222">   test:</font>
+<a name="line835">835: </a><font color="#B22222">      suffix: fas</font>
+<a name="line836">836: </a><font color="#B22222">      args: -da_refine 4 -snes_monitor_short -snes_type fas -fas_levels_snes_type ngs -fas_levels_snes_ngs_sweeps 3 -fas_levels_snes_ngs_atol 0.0 -fas_levels_snes_ngs_stol 0.0 -grashof 4e4 -snes_fas_smoothup 6 -snes_fas_smoothdown 6 -lidvelocity 100</font>
+<a name="line837">837: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line839">839: </a><font color="#B22222">   test:</font>
+<a name="line840">840: </a><font color="#B22222">      suffix: fas_full</font>
+<a name="line841">841: </a><font color="#B22222">      args: -da_refine 4 -snes_monitor_short -snes_type fas -snes_fas_type full -snes_fas_full_downsweep -fas_levels_snes_type ngs -fas_levels_snes_ngs_sweeps 3 -fas_levels_snes_ngs_atol 0.0 -fas_levels_snes_ngs_stol 0.0 -grashof 4e4 -snes_fas_smoothup 6 -snes_fas_smoothdown 6 -lidvelocity 100</font>
+<a name="line842">842: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line844">844: </a><font color="#B22222">   test:</font>
+<a name="line845">845: </a><font color="#B22222">      suffix: fdcoloring_ds</font>
+<a name="line846">846: </a><font color="#B22222">      args: -da_refine 3 -snes_converged_reason -pc_type mg -mat_fd_type ds</font>
+<a name="line847">847: </a><font color="#B22222">      output_file: output/ex19_2.out</font>
+<a name="line848">848: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line850">850: </a><font color="#B22222">   test:</font>
+<a name="line851">851: </a><font color="#B22222">      suffix: fdcoloring_ds_baij</font>
+<a name="line852">852: </a><font color="#B22222">      args: -da_refine 3 -snes_converged_reason -pc_type mg -mat_fd_type ds -dm_mat_type baij</font>
+<a name="line853">853: </a><font color="#B22222">      output_file: output/ex19_2.out</font>
+<a name="line854">854: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line856">856: </a><font color="#B22222">   test:</font>
+<a name="line857">857: </a><font color="#B22222">      suffix: fdcoloring_ds_bcols1</font>
+<a name="line858">858: </a><font color="#B22222">      args: -da_refine 3 -snes_converged_reason -pc_type mg -mat_fd_type ds -mat_fd_coloring_bcols 1</font>
+<a name="line859">859: </a><font color="#B22222">      output_file: output/ex19_2.out</font>
+<a name="line860">860: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line862">862: </a><font color="#B22222">   test:</font>
+<a name="line863">863: </a><font color="#B22222">      suffix: fdcoloring_wp</font>
+<a name="line864">864: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg</font>
+<a name="line865">865: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line867">867: </a><font color="#B22222">   test:</font>
+<a name="line868">868: </a><font color="#B22222">      suffix: fdcoloring_wp_baij</font>
+<a name="line869">869: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg -dm_mat_type baij</font>
+<a name="line870">870: </a><font color="#B22222">      output_file: output/ex19_fdcoloring_wp.out</font>
+<a name="line871">871: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line873">873: </a><font color="#B22222">   test:</font>
+<a name="line874">874: </a><font color="#B22222">      suffix: fdcoloring_wp_bcols1</font>
+<a name="line875">875: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type mg -mat_fd_coloring_bcols 1</font>
+<a name="line876">876: </a><font color="#B22222">      output_file: output/ex19_fdcoloring_wp.out</font>
+<a name="line877">877: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line879">879: </a><font color="#B22222">   test:</font>
+<a name="line880">880: </a><font color="#B22222">      suffix: fieldsplit_2</font>
+<a name="line881">881: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type fieldsplit -pc_fieldsplit_block_size 4 -pc_fieldsplit_type additive -pc_fieldsplit_0_fields 0,1,2 -pc_fieldsplit_1_fields 3 -snes_monitor_short -ksp_monitor_short</font>
+<a name="line882">882: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line884">884: </a><font color="#B22222">   test:</font>
+<a name="line885">885: </a><font color="#B22222">      suffix: fieldsplit_3</font>
+<a name="line886">886: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type fieldsplit -pc_fieldsplit_block_size 4 -pc_fieldsplit_type additive -pc_fieldsplit_0_fields 0,1,2 -pc_fieldsplit_1_fields 3 -fieldsplit_0_pc_type lu -fieldsplit_1_pc_type lu -snes_monitor_short -ksp_monitor_short</font>
+<a name="line887">887: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line889">889: </a><font color="#B22222">   test:</font>
+<a name="line890">890: </a><font color="#B22222">      suffix: fieldsplit_4</font>
+<a name="line891">891: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type fieldsplit -pc_fieldsplit_block_size 4 -pc_fieldsplit_type SCHUR -pc_fieldsplit_0_fields 0,1,2 -pc_fieldsplit_1_fields 3 -fieldsplit_0_pc_type lu -fieldsplit_1_pc_type lu -snes_monitor_short -ksp_monitor_short</font>
+<a name="line892">892: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line894">894: </a><font color="#B22222">   # HYPRE PtAP broken with complex numbers</font>
+<a name="line895">895: </a><font color="#B22222">   test:</font>
+<a name="line896">896: </a><font color="#B22222">      suffix: fieldsplit_hypre</font>
+<a name="line897">897: </a><font color="#B22222">      nsize: 2</font>
+<a name="line898">898: </a><font color="#B22222">      requires: hypre mumps !complex !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line899">899: </a><font color="#B22222">      args: -pc_type fieldsplit -pc_fieldsplit_block_size 4 -pc_fieldsplit_type SCHUR -pc_fieldsplit_0_fields 0,1,2 -pc_fieldsplit_1_fields 3 -fieldsplit_0_pc_type lu -fieldsplit_0_pc_factor_mat_solver_type mumps -fieldsplit_1_pc_type hypre -fieldsplit_1_pc_hypre_type boomeramg -snes_monitor_short -ksp_monitor_short</font>
+
+<a name="line901">901: </a><font color="#B22222">   test:</font>
+<a name="line902">902: </a><font color="#B22222">      suffix: fieldsplit_mumps</font>
+<a name="line903">903: </a><font color="#B22222">      nsize: 2</font>
+<a name="line904">904: </a><font color="#B22222">      requires: mumps</font>
+<a name="line905">905: </a><font color="#B22222">      args: -pc_type fieldsplit -pc_fieldsplit_block_size 4 -pc_fieldsplit_type SCHUR -pc_fieldsplit_0_fields 0,1,2 -pc_fieldsplit_1_fields 3 -fieldsplit_0_pc_type lu -fieldsplit_1_pc_type lu -snes_monitor_short -ksp_monitor_short -fieldsplit_0_pc_factor_mat_solver_type mumps -fieldsplit_1_pc_factor_mat_solver_type mumps</font>
+<a name="line906">906: </a><font color="#B22222">      output_file: output/ex19_fieldsplit_5.out</font>
+
+<a name="line908">908: </a><font color="#B22222">   test:</font>
+<a name="line909">909: </a><font color="#B22222">      suffix: greedy_coloring</font>
+<a name="line910">910: </a><font color="#B22222">      nsize: 2</font>
+<a name="line911">911: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -snes_fd_color -snes_fd_color_use_mat -mat_coloring_type greedy -mat_coloring_weight_type lf -mat_coloring_view&gt; ex19_greedy_coloring.tmp 2&gt;&amp;1</font>
+<a name="line912">912: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line914">914: </a><font color="#B22222">   # HYPRE PtAP broken with complex numbers</font>
+<a name="line915">915: </a><font color="#B22222">   test:</font>
+<a name="line916">916: </a><font color="#B22222">      suffix: hypre</font>
+<a name="line917">917: </a><font color="#B22222">      nsize: 2</font>
+<a name="line918">918: </a><font color="#B22222">      requires: hypre !complex !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line919">919: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type hypre -ksp_norm_type unpreconditioned</font>
+
+<a name="line921">921: </a><font color="#B22222">   # ibcgs is broken when using device vectors</font>
+<a name="line922">922: </a><font color="#B22222">   test:</font>
+<a name="line923">923: </a><font color="#B22222">      suffix: ibcgs</font>
+<a name="line924">924: </a><font color="#B22222">      nsize: 2</font>
+<a name="line925">925: </a><font color="#B22222">      args: -ksp_type ibcgs -ksp_monitor_short -da_refine 2 -snes_view</font>
+<a name="line926">926: </a><font color="#B22222">      requires: !complex !single</font>
+
+<a name="line928">928: </a><font color="#B22222">   test:</font>
+<a name="line929">929: </a><font color="#B22222">      suffix: kaczmarz</font>
+<a name="line930">930: </a><font color="#B22222">      nsize: 2</font>
+<a name="line931">931: </a><font color="#B22222">      args: -pc_type kaczmarz -ksp_monitor_short -snes_monitor_short -snes_view</font>
+<a name="line932">932: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line934">934: </a><font color="#B22222">   test:</font>
+<a name="line935">935: </a><font color="#B22222">      suffix: klu</font>
+<a name="line936">936: </a><font color="#B22222">      requires: suitesparse</font>
+<a name="line937">937: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type klu</font>
+<a name="line938">938: </a><font color="#B22222">      output_file: output/ex19_superlu.out</font>
+
+<a name="line940">940: </a><font color="#B22222">   test:</font>
+<a name="line941">941: </a><font color="#B22222">      suffix: klu_2</font>
+<a name="line942">942: </a><font color="#B22222">      requires: suitesparse</font>
+<a name="line943">943: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type klu -pc_factor_mat_ordering_type nd</font>
+<a name="line944">944: </a><font color="#B22222">      output_file: output/ex19_superlu.out</font>
+
+<a name="line946">946: </a><font color="#B22222">   test:</font>
+<a name="line947">947: </a><font color="#B22222">      suffix: klu_3</font>
+<a name="line948">948: </a><font color="#B22222">      requires: suitesparse</font>
+<a name="line949">949: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type klu -mat_klu_use_btf 0</font>
+<a name="line950">950: </a><font color="#B22222">      output_file: output/ex19_superlu.out</font>
+
+<a name="line952">952: </a><font color="#B22222">   test:</font>
+<a name="line953">953: </a><font color="#B22222">      suffix: ml</font>
+<a name="line954">954: </a><font color="#B22222">      nsize: 2</font>
+<a name="line955">955: </a><font color="#B22222">      requires: ml</font>
+<a name="line956">956: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -pc_type ml</font>
+
+<a name="line958">958: </a><font color="#B22222">   test:</font>
+<a name="line959">959: </a><font color="#B22222">      suffix: ngmres_fas</font>
+<a name="line960">960: </a><font color="#B22222">      args: -da_refine 4 -snes_monitor_short -snes_type ngmres -npc_fas_levels_snes_type ngs -npc_fas_levels_snes_ngs_sweeps 3 -npc_fas_levels_snes_ngs_atol 0.0 -npc_fas_levels_snes_ngs_stol 0.0 -npc_snes_type fas -npc_fas_levels_snes_type ngs -npc_snes_max_it 1 -npc_snes_fas_smoothup 6 -npc_snes_fas_smoothdown 6 -lidvelocity 100 -grashof 4e4</font>
+<a name="line961">961: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line963">963: </a><font color="#B22222">   test:</font>
+<a name="line964">964: </a><font color="#B22222">      suffix: ngmres_fas_gssecant</font>
+<a name="line965">965: </a><font color="#B22222">      args: -da_refine 3 -snes_monitor_short -snes_type ngmres -npc_snes_type fas -npc_fas_levels_snes_type ngs -npc_fas_levels_snes_max_it 6 -npc_fas_levels_snes_ngs_secant -npc_fas_levels_snes_ngs_max_it 1 -npc_fas_coarse_snes_max_it 1 -lidvelocity 100 -grashof 4e4</font>
+<a name="line966">966: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line968">968: </a><font color="#B22222">   test:</font>
+<a name="line969">969: </a><font color="#B22222">      suffix: ngmres_fas_ms</font>
+<a name="line970">970: </a><font color="#B22222">      nsize: 2</font>
+<a name="line971">971: </a><font color="#B22222">      args: -snes_grid_sequence 2 -lidvelocity 200 -grashof 1e4 -snes_monitor_short -snes_view -snes_converged_reason -snes_type ngmres -npc_snes_type fas -npc_fas_coarse_snes_type newtonls -npc_fas_coarse_ksp_type preonly -npc_snes_max_it 1</font>
+<a name="line972">972: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line974">974: </a><font color="#B22222">   test:</font>
+<a name="line975">975: </a><font color="#B22222">      suffix: ngmres_nasm</font>
+<a name="line976">976: </a><font color="#B22222">      nsize: 4</font>
+<a name="line977">977: </a><font color="#B22222">      args: -da_refine 4 -da_overlap 2 -snes_monitor_short -snes_type ngmres -snes_max_it 10 -npc_snes_type nasm -npc_snes_nasm_type basic -grashof 4e4 -lidvelocity 100</font>
+<a name="line978">978: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line980">980: </a><font color="#B22222">   test:</font>
+<a name="line981">981: </a><font color="#B22222">      suffix: ngs</font>
+<a name="line982">982: </a><font color="#B22222">      args: -snes_type ngs -snes_view -snes_monitor -snes_rtol 1e-4</font>
+<a name="line983">983: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line985">985: </a><font color="#B22222">   test:</font>
+<a name="line986">986: </a><font color="#B22222">      suffix: ngs_fd</font>
+<a name="line987">987: </a><font color="#B22222">      args: -snes_type ngs -snes_ngs_secant -snes_view -snes_monitor -snes_rtol 1e-4</font>
+<a name="line988">988: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line990">990: </a><font color="#B22222">   test:</font>
+<a name="line991">991: </a><font color="#B22222">      suffix: parms</font>
+<a name="line992">992: </a><font color="#B22222">      nsize: 2</font>
+<a name="line993">993: </a><font color="#B22222">      requires: parms</font>
+<a name="line994">994: </a><font color="#B22222">      args: -pc_type parms -ksp_monitor_short -snes_view</font>
+
+<a name="line996">996: </a><font color="#B22222">   test:</font>
+<a name="line997">997: </a><font color="#B22222">      suffix: superlu</font>
+<a name="line998">998: </a><font color="#B22222">      requires: superlu</font>
+<a name="line999">999: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type superlu</font>
+
+<a name="line1001">1001: </a><font color="#B22222">   test:</font>
+<a name="line1002">1002: </a><font color="#B22222">      suffix: superlu_sell</font>
+<a name="line1003">1003: </a><font color="#B22222">      requires: superlu</font>
+<a name="line1004">1004: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type superlu -dm_mat_type sell -pc_factor_mat_ordering_type natural</font>
+<a name="line1005">1005: </a><font color="#B22222">      output_file: output/ex19_superlu.out</font>
+
+<a name="line1007">1007: </a><font color="#B22222">   test:</font>
+<a name="line1008">1008: </a><font color="#B22222">      suffix: superlu_dist</font>
+<a name="line1009">1009: </a><font color="#B22222">      requires: superlu_dist</font>
+<a name="line1010">1010: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type superlu_dist</font>
+<a name="line1011">1011: </a><font color="#B22222">      output_file: output/ex19_superlu.out</font>
+
+<a name="line1013">1013: </a><font color="#B22222">   test:</font>
+<a name="line1014">1014: </a><font color="#B22222">      suffix: superlu_dist_2</font>
+<a name="line1015">1015: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1016">1016: </a><font color="#B22222">      requires: superlu_dist</font>
+<a name="line1017">1017: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type superlu_dist</font>
+<a name="line1018">1018: </a><font color="#B22222">      output_file: output/ex19_superlu.out</font>
+
+<a name="line1020">1020: </a><font color="#B22222">   test:</font>
+<a name="line1021">1021: </a><font color="#B22222">      suffix: superlu_dist_3d</font>
+<a name="line1022">1022: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1023">1023: </a><font color="#B22222">      requires: superlu_dist !defined(PETSCTEST_VALGRIND)</font>
+<a name="line1024">1024: </a><font color="#B22222">      filter: grep -v iam | grep -v openMP</font>
+<a name="line1025">1025: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -pc_type lu -pc_factor_mat_solver_type superlu_dist -mat_superlu_dist_3d -mat_superlu_dist_d 2 -snes_view -snes_monitor -ksp_monitor</font>
+
+<a name="line1027">1027: </a><font color="#B22222">   test:</font>
+<a name="line1028">1028: </a><font color="#B22222">      suffix: superlu_equil</font>
+<a name="line1029">1029: </a><font color="#B22222">      requires: superlu</font>
+<a name="line1030">1030: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -{snes,ksp}_monitor_short -pc_type lu -pc_factor_mat_solver_type superlu -mat_superlu_equil</font>
+
+<a name="line1032">1032: </a><font color="#B22222">   test:</font>
+<a name="line1033">1033: </a><font color="#B22222">      suffix: superlu_equil_sell</font>
+<a name="line1034">1034: </a><font color="#B22222">      requires: superlu</font>
+<a name="line1035">1035: </a><font color="#B22222">      args: -da_grid_x 20 -da_grid_y 20 -{snes,ksp}_monitor_short -pc_type lu -pc_factor_mat_solver_type superlu -mat_superlu_equil -dm_mat_type sell -pc_factor_mat_ordering_type natural</font>
+<a name="line1036">1036: </a><font color="#B22222">      output_file: output/ex19_superlu_equil.out</font>
+
+<a name="line1038">1038: </a><font color="#B22222">   test:</font>
+<a name="line1039">1039: </a><font color="#B22222">      suffix: tcqmr</font>
+<a name="line1040">1040: </a><font color="#B22222">      args: -da_refine 1 -ksp_monitor_short -ksp_type tcqmr</font>
+<a name="line1041">1041: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line1043">1043: </a><font color="#B22222">   test:</font>
+<a name="line1044">1044: </a><font color="#B22222">      suffix: tfqmr</font>
+<a name="line1045">1045: </a><font color="#B22222">      args: -da_refine 1 -ksp_monitor_short -ksp_type tfqmr</font>
+<a name="line1046">1046: </a><font color="#B22222">      requires: !single</font>
+
+<a name="line1048">1048: </a><font color="#B22222">   test:</font>
+<a name="line1049">1049: </a><font color="#B22222">      suffix: umfpack</font>
+<a name="line1050">1050: </a><font color="#B22222">      requires: suitesparse</font>
+<a name="line1051">1051: </a><font color="#B22222">      args: -da_refine 2 -pc_type lu -pc_factor_mat_solver_type umfpack -snes_view -snes_monitor_short -ksp_monitor_short -pc_factor_mat_ordering_type external</font>
+
+<a name="line1053">1053: </a><font color="#B22222">   test:</font>
+<a name="line1054">1054: </a><font color="#B22222">      suffix: tut_1</font>
+<a name="line1055">1055: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1056">1056: </a><font color="#B22222">      requires: !single</font>
+<a name="line1057">1057: </a><font color="#B22222">      args: -da_refine 5 -snes_monitor -ksp_monitor -snes_view</font>
+
+<a name="line1059">1059: </a><font color="#B22222">   test:</font>
+<a name="line1060">1060: </a><font color="#B22222">      suffix: tut_2</font>
+<a name="line1061">1061: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1062">1062: </a><font color="#B22222">      requires: !single</font>
+<a name="line1063">1063: </a><font color="#B22222">      args: -da_refine 5 -snes_monitor -ksp_monitor -snes_view -pc_type mg</font>
+
+<a name="line1065">1065: </a><font color="#B22222">   # HYPRE PtAP broken with complex numbers</font>
+<a name="line1066">1066: </a><font color="#B22222">   test:</font>
+<a name="line1067">1067: </a><font color="#B22222">      suffix: tut_3</font>
+<a name="line1068">1068: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1069">1069: </a><font color="#B22222">      requires: hypre !single !complex !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line1070">1070: </a><font color="#B22222">      args: -da_refine 5 -snes_monitor -ksp_monitor -snes_view -pc_type hypre</font>
+
+<a name="line1072">1072: </a><font color="#B22222">   test:</font>
+<a name="line1073">1073: </a><font color="#B22222">      suffix: tut_8</font>
+<a name="line1074">1074: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1075">1075: </a><font color="#B22222">      requires: ml !single</font>
+<a name="line1076">1076: </a><font color="#B22222">      args: -da_refine 5 -snes_monitor -ksp_monitor -snes_view -pc_type ml</font>
+
+<a name="line1078">1078: </a><font color="#B22222">   test:</font>
+<a name="line1079">1079: </a><font color="#B22222">      suffix: tut_4</font>
+<a name="line1080">1080: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1081">1081: </a><font color="#B22222">      requires: !single</font>
+<a name="line1082">1082: </a><font color="#B22222">      args: -da_refine 5 -log_view</font>
+<a name="line1083">1083: </a><font color="#B22222">      filter: head -n 2</font>
+<a name="line1084">1084: </a><font color="#B22222">      filter_output: head -n 2</font>
+
+<a name="line1086">1086: </a><font color="#B22222">   test:</font>
+<a name="line1087">1087: </a><font color="#B22222">      suffix: tut_5</font>
+<a name="line1088">1088: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1089">1089: </a><font color="#B22222">      requires: !single</font>
+<a name="line1090">1090: </a><font color="#B22222">      args: -da_refine 5 -log_view -pc_type mg</font>
+<a name="line1091">1091: </a><font color="#B22222">      filter: head -n 2</font>
+<a name="line1092">1092: </a><font color="#B22222">      filter_output: head -n 2</font>
+
+<a name="line1094">1094: </a><font color="#B22222">   test:</font>
+<a name="line1095">1095: </a><font color="#B22222">      suffix: tut_6</font>
+<a name="line1096">1096: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1097">1097: </a><font color="#B22222">      requires: !single</font>
+<a name="line1098">1098: </a><font color="#B22222">      args: -da_refine 5 -log_view</font>
+<a name="line1099">1099: </a><font color="#B22222">      filter: head -n 2</font>
+<a name="line1100">1100: </a><font color="#B22222">      filter_output: head -n 2</font>
+
+<a name="line1102">1102: </a><font color="#B22222">   test:</font>
+<a name="line1103">1103: </a><font color="#B22222">      suffix: tut_7</font>
+<a name="line1104">1104: </a><font color="#B22222">      nsize: 4</font>
+<a name="line1105">1105: </a><font color="#B22222">      requires: !single</font>
+<a name="line1106">1106: </a><font color="#B22222">      args: -da_refine 5 -log_view -pc_type mg</font>
+<a name="line1107">1107: </a><font color="#B22222">      filter: head -n 2</font>
+<a name="line1108">1108: </a><font color="#B22222">      filter_output: head -n 2</font>
+
+<a name="line1110">1110: </a><font color="#B22222">   test:</font>
+<a name="line1111">1111: </a><font color="#B22222">      suffix: cuda_1</font>
+<a name="line1112">1112: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1113">1113: </a><font color="#B22222">      requires: cuda</font>
+<a name="line1114">1114: </a><font color="#B22222">      args: -snes_monitor -dm_mat_type seqaijcusparse -dm_vec_type seqcuda -pc_type gamg -pc_gamg_esteig_ksp_max_it 10 -ksp_monitor -mg_levels_ksp_max_it 3</font>
+
+<a name="line1116">1116: </a><font color="#B22222">   test:</font>
+<a name="line1117">1117: </a><font color="#B22222">      suffix: cuda_2</font>
+<a name="line1118">1118: </a><font color="#B22222">      nsize: 3</font>
+<a name="line1119">1119: </a><font color="#B22222">      requires: cuda !single</font>
+<a name="line1120">1120: </a><font color="#B22222">      args: -snes_monitor -dm_mat_type mpiaijcusparse -dm_vec_type mpicuda -pc_type gamg -pc_gamg_esteig_ksp_max_it 10 -ksp_monitor  -mg_levels_ksp_max_it 3</font>
+
+<a name="line1122">1122: </a><font color="#B22222">   test:</font>
+<a name="line1123">1123: </a><font color="#B22222">      suffix: cuda_dm_bind_below</font>
+<a name="line1124">1124: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1125">1125: </a><font color="#B22222">      requires: cuda defined(PETSC_USE_LOG)</font>
+<a name="line1126">1126: </a><font color="#B22222">      args: -dm_mat_type aijcusparse -dm_vec_type cuda -da_refine 3 -pc_type mg -mg_levels_ksp_type chebyshev -mg_levels_pc_type jacobi -log_view -pc_mg_log -dm_bind_below 10000</font>
+<a name="line1127">1127: </a><font color="#B22222">      filter: awk "/Level/ {print \$NF}"</font>
+
+<a name="line1129">1129: </a><font color="#B22222">   test:</font>
+<a name="line1130">1130: </a><font color="#B22222">      suffix: hip_1</font>
+<a name="line1131">1131: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1132">1132: </a><font color="#B22222">      requires: hip</font>
+<a name="line1133">1133: </a><font color="#B22222">      args: -snes_monitor -dm_mat_type mpiaijhipsparse -dm_vec_type hip -pc_type gamg -pc_gamg_esteig_ksp_max_it 10 -ksp_monitor -mg_levels_ksp_max_it 3</font>
+
+<a name="line1135">1135: </a><font color="#B22222">   test:</font>
+<a name="line1136">1136: </a><font color="#B22222">      suffix: hip_2</font>
+<a name="line1137">1137: </a><font color="#B22222">      nsize: 3</font>
+<a name="line1138">1138: </a><font color="#B22222">      requires: hip !single</font>
+<a name="line1139">1139: </a><font color="#B22222">      args: -snes_monitor -dm_mat_type mpiaijhipsparse -dm_vec_type mpihip -pc_type gamg -pc_gamg_esteig_ksp_max_it 10 -ksp_monitor  -mg_levels_ksp_max_it 3</font>
+
+<a name="line1141">1141: </a><font color="#B22222">   test:</font>
+<a name="line1142">1142: </a><font color="#B22222">      suffix: hip_dm_bind_below</font>
+<a name="line1143">1143: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1144">1144: </a><font color="#B22222">      requires: hip</font>
+<a name="line1145">1145: </a><font color="#B22222">      args: -dm_mat_type aijhipsparse -dm_vec_type hip -da_refine 3 -pc_type mg -mg_levels_ksp_type chebyshev -mg_levels_pc_type jacobi -log_view -pc_mg_log -dm_bind_below 10000</font>
+<a name="line1146">1146: </a><font color="#B22222">      filter: awk "/Level/ {print \$NF}"</font>
+
+<a name="line1148">1148: </a><font color="#B22222">   test:</font>
+<a name="line1149">1149: </a><font color="#B22222">      suffix: viennacl_dm_bind_below</font>
+<a name="line1150">1150: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1151">1151: </a><font color="#B22222">      requires: viennacl</font>
+<a name="line1152">1152: </a><font color="#B22222">      args: -dm_mat_type aijviennacl -dm_vec_type viennacl -da_refine 3 -pc_type mg -mg_levels_ksp_type chebyshev -mg_levels_pc_type jacobi -log_view -pc_mg_log -dm_bind_below 10000</font>
+<a name="line1153">1153: </a><font color="#B22222">      filter: awk "/Level/ {print \$NF}"</font>
+
+<a name="line1155">1155: </a><font color="#B22222">   test:</font>
+<a name="line1156">1156: </a><font color="#B22222">      suffix: seqbaijmkl</font>
+<a name="line1157">1157: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1158">1158: </a><font color="#B22222">      requires: defined(PETSC_HAVE_MKL_SPARSE_OPTIMIZE)</font>
+<a name="line1159">1159: </a><font color="#B22222">      args: -dm_mat_type baij -snes_monitor -ksp_monitor -snes_view</font>
+
+<a name="line1161">1161: </a><font color="#B22222">   test:</font>
+<a name="line1162">1162: </a><font color="#B22222">      suffix: mpibaijmkl</font>
+<a name="line1163">1163: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1164">1164: </a><font color="#B22222">      requires:  defined(PETSC_HAVE_MKL_SPARSE_OPTIMIZE)</font>
+<a name="line1165">1165: </a><font color="#B22222">      args: -dm_mat_type baij -snes_monitor -ksp_monitor -snes_view</font>
+
+<a name="line1167">1167: </a><font color="#B22222">   test:</font>
+<a name="line1168">1168: </a><font color="#B22222">     suffix: cpardiso</font>
+<a name="line1169">1169: </a><font color="#B22222">     nsize: 4</font>
+<a name="line1170">1170: </a><font color="#B22222">     requires: mkl_cpardiso</font>
+<a name="line1171">1171: </a><font color="#B22222">     args: -pc_type lu -pc_factor_mat_solver_type mkl_cpardiso -ksp_monitor</font>
+
+<a name="line1173">1173: </a><font color="#B22222">   test:</font>
+<a name="line1174">1174: </a><font color="#B22222">     suffix: logviewmemory</font>
+<a name="line1175">1175: </a><font color="#B22222">     requires: defined(PETSC_USE_LOG) !defined(PETSC_HAVE_THREADSAFETY)</font>
+<a name="line1176">1176: </a><font color="#B22222">     args: -log_view -log_view_memory -da_refine 4</font>
+<a name="line1177">1177: </a><font color="#B22222">     filter: grep MatFDColorSetUp | wc -w | xargs  -I % sh -c "expr % \&gt; 21"</font>
+
+<a name="line1179">1179: </a><font color="#B22222">   test:</font>
+<a name="line1180">1180: </a><font color="#B22222">     suffix: fs</font>
+<a name="line1181">1181: </a><font color="#B22222">     args: -pc_type fieldsplit -da_refine 3  -all_ksp_monitor -fieldsplit_y_velocity_pc_type lu  -fieldsplit_temperature_pc_type lu -fieldsplit_x_velocity_pc_type lu  -snes_view</font>
+
+<a name="line1183">1183: </a><font color="#B22222">   test:</font>
+<a name="line1184">1184: </a><font color="#B22222">     suffix: asm_matconvert</font>
+<a name="line1185">1185: </a><font color="#B22222">     args: -mat_type aij -pc_type asm -pc_asm_sub_mat_type dense -snes_view</font>
+
+<a name="line1187">1187: </a><font color="#B22222">   test:</font>
+<a name="line1188">1188: </a><font color="#B22222">      suffix: euclid</font>
+<a name="line1189">1189: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1190">1190: </a><font color="#B22222">      requires: hypre !single !complex !defined(PETSC_HAVE_HYPRE_MIXEDINT) !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line1191">1191: </a><font color="#B22222">      args: -da_refine 2 -ksp_monitor -snes_monitor -snes_view -pc_type hypre -pc_hypre_type euclid</font>
+
+<a name="line1193">1193: </a><font color="#B22222">   test:</font>
+<a name="line1194">1194: </a><font color="#B22222">      suffix: euclid_bj</font>
+<a name="line1195">1195: </a><font color="#B22222">      nsize: 2</font>
+<a name="line1196">1196: </a><font color="#B22222">      requires: hypre !single !complex !defined(PETSC_HAVE_HYPRE_MIXEDINT) !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line1197">1197: </a><font color="#B22222">      args: -da_refine 2 -ksp_monitor -snes_monitor -snes_view -pc_type hypre -pc_hypre_type euclid -pc_hypre_euclid_bj</font>
+
+<a name="line1199">1199: </a><font color="#B22222">   test:</font>
+<a name="line1200">1200: </a><font color="#B22222">      suffix: euclid_droptolerance</font>
+<a name="line1201">1201: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1202">1202: </a><font color="#B22222">      requires: hypre !single !complex !defined(PETSC_HAVE_HYPRE_MIXEDINT) !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line1203">1203: </a><font color="#B22222">      args: -da_refine 2 -ksp_monitor -snes_monitor -snes_view -pc_type hypre -pc_hypre_type euclid -pc_hypre_euclid_droptolerance .1</font>
+
+<a name="line1205">1205: </a><font color="#B22222">   test:</font>
+<a name="line1206">1206: </a><font color="#B22222">      suffix: failure_size</font>
+<a name="line1207">1207: </a><font color="#B22222">      nsize: 1</font>
+<a name="line1208">1208: </a><font color="#B22222">      requires: !defined(PETSC_USE_64BIT_INDICES) !defined(PETSCTEST_VALGRIND)</font>
+<a name="line1209">1209: </a><font color="#B22222">      args: -da_refine 100 -petsc_ci_portable_error_output -error_output_stdout</font>
+<a name="line1210">1210: </a><font color="#B22222">      filter: grep -E -v "(options_left|memory block|leaked context|not freed before <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>|Could be the program crashed)"</font>
+
+<a name="line1212">1212: </a><font color="#B22222">   testset:</font>
+<a name="line1213">1213: </a><font color="#B22222">      requires: hpddm cuda</font>
+<a name="line1214">1214: </a><font color="#B22222">      args: -snes_monitor -ksp_converged_reason -ksp_type hpddm -pc_type jacobi -dm_mat_type aijcusparse -dm_vec_type cuda</font>
+<a name="line1215">1215: </a><font color="#B22222">      test:</font>
+<a name="line1216">1216: </a><font color="#B22222">        suffix: hpddm_cuda</font>
+<a name="line1217">1217: </a><font color="#B22222">        filter: sed -e "s/Linear solve converged due to CONVERGED_RTOL iterations 15/Linear solve converged due to CONVERGED_RTOL iterations 14/g"</font>
+<a name="line1218">1218: </a><font color="#B22222">        args: -ksp_hpddm_type {{gmres gcrodr}separate output} -ksp_hpddm_precision {{single double}shared output}</font>
+<a name="line1219">1219: </a><font color="#B22222">      test:</font>
+<a name="line1220">1220: </a><font color="#B22222">        suffix: hpddm_cuda_right</font>
+<a name="line1221">1221: </a><font color="#B22222">        filter: sed -e "s/Linear solve converged due to CONVERGED_RTOL iterations 15/Linear solve converged due to CONVERGED_RTOL iterations 14/g"</font>
+<a name="line1222">1222: </a><font color="#B22222">        args: -ksp_hpddm_type gcrodr -ksp_pc_side right</font>
+<a name="line1223">1223: </a><font color="#B22222">        output_file: output/ex19_hpddm_cuda_ksp_hpddm_type-gcrodr.out</font>
+
+<a name="line1225">1225: </a><font color="#B22222">TEST*/</font>
+</pre>
+</body>
+
+</html>

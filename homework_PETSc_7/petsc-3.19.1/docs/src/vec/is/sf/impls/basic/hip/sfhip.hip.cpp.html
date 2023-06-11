@@ -1,0 +1,1159 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/vec/is/sf/impls/basic/hip/sfhip.hip.cpp">Actual source code: sfhip.hip.cpp</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:23+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../sfpack.h.html">&lt;../src/vec/is/sf/impls/basic/sfpack.h&gt;</A>
+<a name="line2">  2: </a><font color="#A020F0">#include &lt;petscpkg_version.h&gt;</font>
+
+<a name="line4">  4: </a><font color="#B22222">/* compilation issues on SPOCK */</font>
+<a name="line5">  5: </a><strong><font color="#228B22">#undef PETSC_HAVE_COMPLEX</font></strong>
+
+<a name="line7">  7: </a><font color="#B22222">/* Map a thread id to an index in root/leaf space through a series of 3D subdomains. See PetscSFPackOpt. */</font>
+<a name="line8">  8: </a><strong><font color="#4169E1"><a name="MapTidToIndex"></a>__device__ static inline <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> MapTidToIndex(const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *opt, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> tid)</font></strong>
+<a name="line9">  9: </a>{
+<a name="line10"> 10: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        i, j, k, m, n, r;
+<a name="line11"> 11: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *offset, *start, *dx, *dy, *X, *Y;
+
+<a name="line13"> 13: </a>  n      = opt[0];
+<a name="line14"> 14: </a>  offset = opt + 1;
+<a name="line15"> 15: </a>  start  = opt + n + 2;
+<a name="line16"> 16: </a>  dx     = opt + 2 * n + 2;
+<a name="line17"> 17: </a>  dy     = opt + 3 * n + 2;
+<a name="line18"> 18: </a>  X      = opt + 5 * n + 2;
+<a name="line19"> 19: </a>  Y      = opt + 6 * n + 2;
+<a name="line20"> 20: </a>  <font color="#4169E1">for</font> (r = 0; r &lt; n; r++) {
+<a name="line21"> 21: </a>    <font color="#4169E1">if</font> (tid &lt; offset[r + 1]) <font color="#4169E1">break</font>;
+<a name="line22"> 22: </a>  }
+<a name="line23"> 23: </a>  m = (tid - offset[r]);
+<a name="line24"> 24: </a>  k = m / (dx[r] * dy[r]);
+<a name="line25"> 25: </a>  j = (m - k * dx[r] * dy[r]) / dx[r];
+<a name="line26"> 26: </a>  i = m - k * dx[r] * dy[r] - j * dx[r];
+
+<a name="line28"> 28: </a>  <font color="#4169E1">return</font> (start[r] + k * X[r] * Y[r] + j * X[r] + i);
+<a name="line29"> 29: </a>}
+
+<a name="line31"> 31: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line32"> 32: </a><font color="#B22222">/*  Templated HIP kernels for pack/unpack. The Op can be regular or atomic           */</font>
+<a name="line33"> 33: </a><font color="#B22222">/*====================================================================================*/</font>
+
+<a name="line35"> 35: </a><font color="#B22222">/* Suppose user calls PetscSFReduce(sf,unit,...) and &lt;unit&gt; is an MPI data type made of 16 PetscReals, then</font>
+<a name="line36"> 36: </a><font color="#B22222">   &lt;Type&gt; is <a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, which is the primitive type we operate on.</font>
+<a name="line37"> 37: </a><font color="#B22222">   &lt;bs&gt;   is 16, which says &lt;unit&gt; contains 16 primitive types.</font>
+<a name="line38"> 38: </a><font color="#B22222">   &lt;BS&gt;   is 8, which is the maximal SIMD width we will try to vectorize operations on &lt;unit&gt;.</font>
+<a name="line39"> 39: </a><font color="#B22222">   &lt;EQ&gt;   is 0, which is (bs == BS ? 1 : 0)</font>
+
+<a name="line41"> 41: </a><font color="#B22222">  If instead, &lt;unit&gt; has 8 PetscReals, then bs=8, BS=8, EQ=1, rendering MBS below to a compile time constant.</font>
+<a name="line42"> 42: </a><font color="#B22222">  For the common case in <a href="../../../../../../../manualpages/PetscSF/VecScatter.html">VecScatter</a>, bs=1, BS=1, EQ=1, MBS=1, the inner for-loops below will be totally unrolled.</font>
+<a name="line43"> 43: </a><font color="#B22222">*/</font>
+<a name="line44"> 44: </a>template &lt;class Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line45"> 45: </a><strong><font color="#4169E1"><a name="d_Pack"></a>__global__ static void d_Pack(<a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bs, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> start, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *opt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *idx, const Type *data, Type *buf)</font></strong>
+<a name="line46"> 46: </a>{
+<a name="line47"> 47: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i, s, t, tid = blockIdx.x * blockDim.x + threadIdx.x;
+<a name="line48"> 48: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> grid_size = gridDim.x * blockDim.x;
+<a name="line49"> 49: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> M         = (EQ) ? 1 : bs / BS; <font color="#B22222">/* If EQ, then M=1 enables compiler's const-propagation */</font>
+<a name="line50"> 50: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> MBS       = M * BS;             <font color="#B22222">/* MBS=bs. We turn MBS into a compile-time const when EQ=1. */</font>
+
+<a name="line52"> 52: </a>  <font color="#4169E1">for</font> (; tid &lt; count; tid += grid_size) {
+<a name="line53"> 53: </a>    <font color="#B22222">/* opt != NULL ==&gt; idx == NULL, i.e., the indices have patterns but not contiguous;</font>
+<a name="line54"> 54: </a><font color="#B22222">       opt == NULL &amp;&amp; idx == NULL ==&gt; the indices are contiguous;</font>
+<a name="line55"> 55: </a><font color="#B22222">     */</font>
+<a name="line56"> 56: </a>    t = (opt ? MapTidToIndex(opt, tid) : (idx ? idx[tid] : start + tid)) * MBS;
+<a name="line57"> 57: </a>    s = tid * MBS;
+<a name="line58"> 58: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; MBS; i++) buf[s + i] = data[t + i];
+<a name="line59"> 59: </a>  }
+<a name="line60"> 60: </a>}
+
+<a name="line62"> 62: </a>template &lt;class Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line63"> 63: </a><strong><font color="#4169E1"><a name="d_UnpackAndOp"></a>__global__ static void d_UnpackAndOp(<a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bs, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> start, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *opt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *idx, Type *data, const Type *buf)</font></strong>
+<a name="line64"> 64: </a>{
+<a name="line65"> 65: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i, s, t, tid = blockIdx.x * blockDim.x + threadIdx.x;
+<a name="line66"> 66: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> grid_size = gridDim.x * blockDim.x;
+<a name="line67"> 67: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> M = (EQ) ? 1 : bs / BS, MBS = M * BS;
+<a name="line68"> 68: </a>  Op             op;
+
+<a name="line70"> 70: </a>  <font color="#4169E1">for</font> (; tid &lt; count; tid += grid_size) {
+<a name="line71"> 71: </a>    t = (opt ? MapTidToIndex(opt, tid) : (idx ? idx[tid] : start + tid)) * MBS;
+<a name="line72"> 72: </a>    s = tid * MBS;
+<a name="line73"> 73: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; MBS; i++) op(data[t + i], buf[s + i]);
+<a name="line74"> 74: </a>  }
+<a name="line75"> 75: </a>}
+
+<a name="line77"> 77: </a>template &lt;class Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line78"> 78: </a><strong><font color="#4169E1"><a name="d_FetchAndOp"></a>__global__ static void d_FetchAndOp(<a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bs, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> rootstart, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rootopt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rootidx, Type *rootdata, Type *leafbuf)</font></strong>
+<a name="line79"> 79: </a>{
+<a name="line80"> 80: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i, l, r, tid = blockIdx.x * blockDim.x + threadIdx.x;
+<a name="line81"> 81: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> grid_size = gridDim.x * blockDim.x;
+<a name="line82"> 82: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> M = (EQ) ? 1 : bs / BS, MBS = M * BS;
+<a name="line83"> 83: </a>  Op             op;
+
+<a name="line85"> 85: </a>  <font color="#4169E1">for</font> (; tid &lt; count; tid += grid_size) {
+<a name="line86"> 86: </a>    r = (rootopt ? MapTidToIndex(rootopt, tid) : (rootidx ? rootidx[tid] : rootstart + tid)) * MBS;
+<a name="line87"> 87: </a>    l = tid * MBS;
+<a name="line88"> 88: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; MBS; i++) leafbuf[l + i] = op(rootdata[r + i], leafbuf[l + i]);
+<a name="line89"> 89: </a>  }
+<a name="line90"> 90: </a>}
+
+<a name="line92"> 92: </a>template &lt;class Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line93"> 93: </a><strong><font color="#4169E1"><a name="d_ScatterAndOp"></a>__global__ static void d_ScatterAndOp(<a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bs, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcx, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcy, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcX, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcY, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcStart, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *srcIdx, const Type *src, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dstx, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dsty, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dstX, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dstY, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dstStart, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *dstIdx, Type *dst)</font></strong>
+<a name="line94"> 94: </a>{
+<a name="line95"> 95: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i, j, k, s, t, tid = blockIdx.x * blockDim.x + threadIdx.x;
+<a name="line96"> 96: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> grid_size = gridDim.x * blockDim.x;
+<a name="line97"> 97: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> M = (EQ) ? 1 : bs / BS, MBS = M * BS;
+<a name="line98"> 98: </a>  Op             op;
+
+<a name="line100">100: </a>  <font color="#4169E1">for</font> (; tid &lt; count; tid += grid_size) {
+<a name="line101">101: </a>    <font color="#4169E1">if</font> (!srcIdx) { <font color="#B22222">/* src is either contiguous or 3D */</font>
+<a name="line102">102: </a>      k = tid / (srcx * srcy);
+<a name="line103">103: </a>      j = (tid - k * srcx * srcy) / srcx;
+<a name="line104">104: </a>      i = tid - k * srcx * srcy - j * srcx;
+<a name="line105">105: </a>      s = srcStart + k * srcX * srcY + j * srcX + i;
+<a name="line106">106: </a>    } <font color="#4169E1">else</font> {
+<a name="line107">107: </a>      s = srcIdx[tid];
+<a name="line108">108: </a>    }
+
+<a name="line110">110: </a>    <font color="#4169E1">if</font> (!dstIdx) { <font color="#B22222">/* dst is either contiguous or 3D */</font>
+<a name="line111">111: </a>      k = tid / (dstx * dsty);
+<a name="line112">112: </a>      j = (tid - k * dstx * dsty) / dstx;
+<a name="line113">113: </a>      i = tid - k * dstx * dsty - j * dstx;
+<a name="line114">114: </a>      t = dstStart + k * dstX * dstY + j * dstX + i;
+<a name="line115">115: </a>    } <font color="#4169E1">else</font> {
+<a name="line116">116: </a>      t = dstIdx[tid];
+<a name="line117">117: </a>    }
+
+<a name="line119">119: </a>    s *= MBS;
+<a name="line120">120: </a>    t *= MBS;
+<a name="line121">121: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; MBS; i++) op(dst[t + i], src[s + i]);
+<a name="line122">122: </a>  }
+<a name="line123">123: </a>}
+
+<a name="line125">125: </a>template &lt;class Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line126">126: </a><strong><font color="#4169E1"><a name="d_FetchAndOpLocal"></a>__global__ static void d_FetchAndOpLocal(<a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bs, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> rootstart, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rootopt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rootidx, Type *rootdata, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> leafstart, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *leafopt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *leafidx, const Type *leafdata, Type *leafupdate)</font></strong>
+<a name="line127">127: </a>{
+<a name="line128">128: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i, l, r, tid = blockIdx.x * blockDim.x + threadIdx.x;
+<a name="line129">129: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> grid_size = gridDim.x * blockDim.x;
+<a name="line130">130: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> M = (EQ) ? 1 : bs / BS, MBS = M * BS;
+<a name="line131">131: </a>  Op             op;
+
+<a name="line133">133: </a>  <font color="#4169E1">for</font> (; tid &lt; count; tid += grid_size) {
+<a name="line134">134: </a>    r = (rootopt ? MapTidToIndex(rootopt, tid) : (rootidx ? rootidx[tid] : rootstart + tid)) * MBS;
+<a name="line135">135: </a>    l = (leafopt ? MapTidToIndex(leafopt, tid) : (leafidx ? leafidx[tid] : leafstart + tid)) * MBS;
+<a name="line136">136: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; MBS; i++) leafupdate[l + i] = op(rootdata[r + i], leafdata[l + i]);
+<a name="line137">137: </a>  }
+<a name="line138">138: </a>}
+
+<a name="line140">140: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line141">141: </a><font color="#B22222">/*                             Regular operations on device                           */</font>
+<a name="line142">142: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line143">143: </a>template &lt;typename Type&gt;
+<a name="line144">144: </a><font color="#4169E1"><a name="Insert"></a>struct Insert </font>{
+<a name="line145">145: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line146">146: </a>  {
+<a name="line147">147: </a>    Type old = x;
+<a name="line148">148: </a>    x        = y;
+<a name="line149">149: </a>    <font color="#4169E1">return</font> old;
+<a name="line150">150: </a>  }
+<a name="line151">151: </a>};
+<a name="line152">152: </a>template &lt;typename Type&gt;
+<a name="line153">153: </a><font color="#4169E1"><a name="Add"></a>struct Add </font>{
+<a name="line154">154: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line155">155: </a>  {
+<a name="line156">156: </a>    Type old = x;
+<a name="line157">157: </a>    x += y;
+<a name="line158">158: </a>    <font color="#4169E1">return</font> old;
+<a name="line159">159: </a>  }
+<a name="line160">160: </a>};
+<a name="line161">161: </a>template &lt;typename Type&gt;
+<a name="line162">162: </a><font color="#4169E1"><a name="Mult"></a>struct Mult </font>{
+<a name="line163">163: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line164">164: </a>  {
+<a name="line165">165: </a>    Type old = x;
+<a name="line166">166: </a>    x *= y;
+<a name="line167">167: </a>    <font color="#4169E1">return</font> old;
+<a name="line168">168: </a>  }
+<a name="line169">169: </a>};
+<a name="line170">170: </a>template &lt;typename Type&gt;
+<a name="line171">171: </a><font color="#4169E1"><a name="Min"></a>struct Min </font>{
+<a name="line172">172: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line173">173: </a>  {
+<a name="line174">174: </a>    Type old = x;
+<a name="line175">175: </a>    x        = <a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(x, y);
+<a name="line176">176: </a>    <font color="#4169E1">return</font> old;
+<a name="line177">177: </a>  }
+<a name="line178">178: </a>};
+<a name="line179">179: </a>template &lt;typename Type&gt;
+<a name="line180">180: </a><font color="#4169E1"><a name="Max"></a>struct Max </font>{
+<a name="line181">181: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line182">182: </a>  {
+<a name="line183">183: </a>    Type old = x;
+<a name="line184">184: </a>    x        = <a href="../../../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(x, y);
+<a name="line185">185: </a>    <font color="#4169E1">return</font> old;
+<a name="line186">186: </a>  }
+<a name="line187">187: </a>};
+<a name="line188">188: </a>template &lt;typename Type&gt;
+<a name="line189">189: </a><font color="#4169E1"><a name="LAND"></a>struct LAND </font>{
+<a name="line190">190: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line191">191: </a>  {
+<a name="line192">192: </a>    Type old = x;
+<a name="line193">193: </a>    x        = x &amp;&amp; y;
+<a name="line194">194: </a>    <font color="#4169E1">return</font> old;
+<a name="line195">195: </a>  }
+<a name="line196">196: </a>};
+<a name="line197">197: </a>template &lt;typename Type&gt;
+<a name="line198">198: </a><font color="#4169E1"><a name="LOR"></a>struct LOR </font>{
+<a name="line199">199: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line200">200: </a>  {
+<a name="line201">201: </a>    Type old = x;
+<a name="line202">202: </a>    x        = x || y;
+<a name="line203">203: </a>    <font color="#4169E1">return</font> old;
+<a name="line204">204: </a>  }
+<a name="line205">205: </a>};
+<a name="line206">206: </a>template &lt;typename Type&gt;
+<a name="line207">207: </a><font color="#4169E1"><a name="LXOR"></a>struct LXOR </font>{
+<a name="line208">208: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line209">209: </a>  {
+<a name="line210">210: </a>    Type old = x;
+<a name="line211">211: </a>    x        = !x != !y;
+<a name="line212">212: </a>    <font color="#4169E1">return</font> old;
+<a name="line213">213: </a>  }
+<a name="line214">214: </a>};
+<a name="line215">215: </a>template &lt;typename Type&gt;
+<a name="line216">216: </a><font color="#4169E1"><a name="BAND"></a>struct BAND </font>{
+<a name="line217">217: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line218">218: </a>  {
+<a name="line219">219: </a>    Type old = x;
+<a name="line220">220: </a>    x        = x &amp; y;
+<a name="line221">221: </a>    <font color="#4169E1">return</font> old;
+<a name="line222">222: </a>  }
+<a name="line223">223: </a>};
+<a name="line224">224: </a>template &lt;typename Type&gt;
+<a name="line225">225: </a><font color="#4169E1"><a name="BOR"></a>struct BOR </font>{
+<a name="line226">226: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line227">227: </a>  {
+<a name="line228">228: </a>    Type old = x;
+<a name="line229">229: </a>    x        = x | y;
+<a name="line230">230: </a>    <font color="#4169E1">return</font> old;
+<a name="line231">231: </a>  }
+<a name="line232">232: </a>};
+<a name="line233">233: </a>template &lt;typename Type&gt;
+<a name="line234">234: </a><font color="#4169E1"><a name="BXOR"></a>struct BXOR </font>{
+<a name="line235">235: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line236">236: </a>  {
+<a name="line237">237: </a>    Type old = x;
+<a name="line238">238: </a>    x        = x ^ y;
+<a name="line239">239: </a>    <font color="#4169E1">return</font> old;
+<a name="line240">240: </a>  }
+<a name="line241">241: </a>};
+<a name="line242">242: </a>template &lt;typename Type&gt;
+<a name="line243">243: </a><font color="#4169E1"><a name="Minloc"></a>struct Minloc </font>{
+<a name="line244">244: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line245">245: </a>  {
+<a name="line246">246: </a>    Type old = x;
+<a name="line247">247: </a>    <font color="#4169E1">if</font> (y.a &lt; x.a) x = y;
+<a name="line248">248: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (y.a == x.a) x.b = min(x.b, y.b);
+<a name="line249">249: </a>    <font color="#4169E1">return</font> old;
+<a name="line250">250: </a>  }
+<a name="line251">251: </a>};
+<a name="line252">252: </a>template &lt;typename Type&gt;
+<a name="line253">253: </a><font color="#4169E1"><a name="Maxloc"></a>struct Maxloc </font>{
+<a name="line254">254: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line255">255: </a>  {
+<a name="line256">256: </a>    Type old = x;
+<a name="line257">257: </a>    <font color="#4169E1">if</font> (y.a &gt; x.a) x = y;
+<a name="line258">258: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (y.a == x.a) x.b = min(x.b, y.b); <font color="#B22222">/* See MPI MAXLOC */</font>
+<a name="line259">259: </a>    <font color="#4169E1">return</font> old;
+<a name="line260">260: </a>  }
+<a name="line261">261: </a>};
+
+<a name="line263">263: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line264">264: </a><font color="#B22222">/*                             Atomic operations on device                            */</font>
+<a name="line265">265: </a><font color="#B22222">/*====================================================================================*/</font>
+
+<a name="line267">267: </a><font color="#B22222">/*</font>
+<a name="line268">268: </a><font color="#B22222">  Atomic Insert (exchange) operations</font>
+
+<a name="line270">270: </a><font color="#B22222">  See Cuda version</font>
+<a name="line271">271: </a><font color="#B22222">*/</font>
+<a name="line272">272: </a><font color="#A020F0">#if PETSC_PKG_HIP_VERSION_LT(4, 4, 0)</font>
+<a name="line273">273: </a><strong><font color="#4169E1"><a name="atomicExch"></a>__device__ static double atomicExch(double *address, double val)</font></strong>
+<a name="line274">274: </a>{
+<a name="line275">275: </a>  <font color="#4169E1">return</font> __longlong_as_double(atomicExch((ullint *)address, __double_as_longlong(val)));
+<a name="line276">276: </a>}
+<a name="line277">277: </a><font color="#A020F0">#endif</font>
+
+<a name="line279">279: </a><strong><font color="#4169E1"><a name="atomicExch"></a>__device__ static llint atomicExch(llint *address, llint val)</font></strong>
+<a name="line280">280: </a>{
+<a name="line281">281: </a>  <font color="#4169E1">return</font> (llint)(atomicExch((ullint *)address, (ullint)val));
+<a name="line282">282: </a>}
+
+<a name="line284">284: </a>template &lt;typename Type&gt;
+<a name="line285">285: </a><font color="#4169E1"><a name="AtomicInsert"></a>struct AtomicInsert </font>{
+<a name="line286">286: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicExch(&amp;x, y); }
+<a name="line287">287: </a>};
+
+<a name="line289">289: </a><font color="#A020F0">#if defined(PETSC_HAVE_COMPLEX)</font>
+<a name="line290">290: </a><font color="#A020F0">  #if defined(PETSC_USE_REAL_DOUBLE)</font>
+<a name="line291">291: </a>template &lt;&gt;
+<a name="line292">292: </a><font color="#4169E1"><a name="AtomicInsert"></a>struct AtomicInsert</font>&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>&gt; {
+<a name="line293">293: </a>  __device__ <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> operator()(<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> &amp;x, <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> y) const
+<a name="line294">294: </a>  {
+<a name="line295">295: </a>    <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>         old, *z = &amp;old;
+<a name="line296">296: </a>    double              *xp = (double *)&amp;x, *yp = (double *)&amp;y;
+<a name="line297">297: </a>    AtomicInsert&lt;double&gt; op;
+<a name="line298">298: </a>    z[0] = op(xp[0], yp[0]);
+<a name="line299">299: </a>    z[1] = op(xp[1], yp[1]);
+<a name="line300">300: </a>    <font color="#4169E1">return</font> old; <font color="#B22222">/* The returned value may not be atomic. It can be mix of two ops. Caller should discard it. */</font>
+<a name="line301">301: </a>  }
+<a name="line302">302: </a>};
+<a name="line303">303: </a><font color="#A020F0">  #elif defined(PETSC_USE_REAL_SINGLE)</font>
+<a name="line304">304: </a>template &lt;&gt;
+<a name="line305">305: </a><font color="#4169E1"><a name="AtomicInsert"></a>struct AtomicInsert</font>&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>&gt; {
+<a name="line306">306: </a>  __device__ <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> operator()(<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> &amp;x, <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> y) const
+<a name="line307">307: </a>  {
+<a name="line308">308: </a>    double              *xp = (double *)&amp;x, *yp = (double *)&amp;y;
+<a name="line309">309: </a>    AtomicInsert&lt;double&gt; op;
+<a name="line310">310: </a>    <font color="#4169E1">return</font> op(xp[0], yp[0]);
+<a name="line311">311: </a>  }
+<a name="line312">312: </a>};
+<a name="line313">313: </a><font color="#A020F0">  #endif</font>
+<a name="line314">314: </a><font color="#A020F0">#endif</font>
+
+<a name="line316">316: </a><font color="#B22222">/*</font>
+<a name="line317">317: </a><font color="#B22222">  Atomic add operations</font>
+
+<a name="line319">319: </a><font color="#B22222">*/</font>
+<a name="line320">320: </a><strong><font color="#4169E1"><a name="atomicAdd"></a>__device__ static llint atomicAdd(llint *address, llint val)</font></strong>
+<a name="line321">321: </a>{
+<a name="line322">322: </a>  <font color="#4169E1">return</font> (llint)atomicAdd((ullint *)address, (ullint)val);
+<a name="line323">323: </a>}
+
+<a name="line325">325: </a>template &lt;typename Type&gt;
+<a name="line326">326: </a><font color="#4169E1"><a name="AtomicAdd"></a>struct AtomicAdd </font>{
+<a name="line327">327: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicAdd(&amp;x, y); }
+<a name="line328">328: </a>};
+
+<a name="line330">330: </a>template &lt;&gt;
+<a name="line331">331: </a><font color="#4169E1"><a name="AtomicAdd"></a>struct AtomicAdd</font>&lt;double&gt; {
+<a name="line332">332: </a>  __device__ double operator()(double &amp;x, double y) const
+<a name="line333">333: </a>  {
+<a name="line334">334: </a>    <font color="#B22222">/* Cuda version does more checks that may be needed */</font>
+<a name="line335">335: </a>    <font color="#4169E1">return</font> atomicAdd(&amp;x, y);
+<a name="line336">336: </a>  }
+<a name="line337">337: </a>};
+
+<a name="line339">339: </a>template &lt;&gt;
+<a name="line340">340: </a><font color="#4169E1"><a name="AtomicAdd"></a>struct AtomicAdd</font>&lt;float&gt; {
+<a name="line341">341: </a>  __device__ float operator()(float &amp;x, float y) const
+<a name="line342">342: </a>  {
+<a name="line343">343: </a>    <font color="#B22222">/* Cuda version does more checks that may be needed */</font>
+<a name="line344">344: </a>    <font color="#4169E1">return</font> atomicAdd(&amp;x, y);
+<a name="line345">345: </a>  }
+<a name="line346">346: </a>};
+
+<a name="line348">348: </a><font color="#A020F0">#if defined(PETSC_HAVE_COMPLEX)</font>
+<a name="line349">349: </a>template &lt;&gt;
+<a name="line350">350: </a><font color="#4169E1"><a name="AtomicAdd"></a>struct AtomicAdd</font>&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>&gt; {
+<a name="line351">351: </a>  __device__ <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> operator()(<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> &amp;x, <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a> y) const
+<a name="line352">352: </a>  {
+<a name="line353">353: </a>    <a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>         old, *z = &amp;old;
+<a name="line354">354: </a>    <a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>           *xp = (<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)&amp;x, *yp = (<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)&amp;y;
+<a name="line355">355: </a>    AtomicAdd&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>&gt; op;
+<a name="line356">356: </a>    z[0] = op(xp[0], yp[0]);
+<a name="line357">357: </a>    z[1] = op(xp[1], yp[1]);
+<a name="line358">358: </a>    <font color="#4169E1">return</font> old; <font color="#B22222">/* The returned value may not be atomic. It can be mix of two ops. Caller should discard it. */</font>
+<a name="line359">359: </a>  }
+<a name="line360">360: </a>};
+<a name="line361">361: </a><font color="#A020F0">#endif</font>
+
+<a name="line363">363: </a><font color="#B22222">/*</font>
+<a name="line364">364: </a><font color="#B22222">  Atomic Mult operations:</font>
+
+<a name="line366">366: </a><font color="#B22222">  HIP has no atomicMult at all, so we build our own with atomicCAS</font>
+<a name="line367">367: </a><font color="#B22222"> */</font>
+<a name="line368">368: </a><font color="#A020F0">#if defined(PETSC_USE_REAL_DOUBLE)</font>
+<a name="line369">369: </a><strong><font color="#4169E1"><a name="atomicMult"></a>__device__ static double atomicMult(double *address, double val)</font></strong>
+<a name="line370">370: </a>{
+<a name="line371">371: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line372">372: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line373">373: </a>  <font color="#4169E1">do</font> {
+<a name="line374">374: </a>    assumed = old;
+<a name="line375">375: </a>    <font color="#B22222">/* Other threads can access and modify value of *address_as_ull after the read above and before the write below */</font>
+<a name="line376">376: </a>    old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val * __longlong_as_double(assumed)));
+<a name="line377">377: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line378">378: </a>  <font color="#4169E1">return</font> __longlong_as_double(old);
+<a name="line379">379: </a>}
+<a name="line380">380: </a><font color="#A020F0">#elif defined(PETSC_USE_REAL_SINGLE)</font>
+<a name="line381">381: </a><strong><font color="#4169E1"><a name="atomicMult"></a>__device__ static float atomicMult(float *address, float val)</font></strong>
+<a name="line382">382: </a>{
+<a name="line383">383: </a>  int *address_as_int = (int *)(address);
+<a name="line384">384: </a>  int  old            = *address_as_int, assumed;
+<a name="line385">385: </a>  <font color="#4169E1">do</font> {
+<a name="line386">386: </a>    assumed = old;
+<a name="line387">387: </a>    old     = atomicCAS(address_as_int, assumed, __float_as_int(val * __int_as_float(assumed)));
+<a name="line388">388: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line389">389: </a>  <font color="#4169E1">return</font> __int_as_float(old);
+<a name="line390">390: </a>}
+<a name="line391">391: </a><font color="#A020F0">#endif</font>
+
+<a name="line393">393: </a><strong><font color="#4169E1"><a name="atomicMult"></a>__device__ static int atomicMult(int *address, int val)</font></strong>
+<a name="line394">394: </a>{
+<a name="line395">395: </a>  int *address_as_int = (int *)(address);
+<a name="line396">396: </a>  int  old            = *address_as_int, assumed;
+<a name="line397">397: </a>  <font color="#4169E1">do</font> {
+<a name="line398">398: </a>    assumed = old;
+<a name="line399">399: </a>    old     = atomicCAS(address_as_int, assumed, val * assumed);
+<a name="line400">400: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line401">401: </a>  <font color="#4169E1">return</font> (int)old;
+<a name="line402">402: </a>}
+
+<a name="line404">404: </a><strong><font color="#4169E1"><a name="atomicMult"></a>__device__ static llint atomicMult(llint *address, llint val)</font></strong>
+<a name="line405">405: </a>{
+<a name="line406">406: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line407">407: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line408">408: </a>  <font color="#4169E1">do</font> {
+<a name="line409">409: </a>    assumed = old;
+<a name="line410">410: </a>    old     = atomicCAS(address_as_ull, assumed, (ullint)(val * (llint)assumed));
+<a name="line411">411: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line412">412: </a>  <font color="#4169E1">return</font> (llint)old;
+<a name="line413">413: </a>}
+
+<a name="line415">415: </a>template &lt;typename Type&gt;
+<a name="line416">416: </a><font color="#4169E1"><a name="AtomicMult"></a>struct AtomicMult </font>{
+<a name="line417">417: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicMult(&amp;x, y); }
+<a name="line418">418: </a>};
+
+<a name="line420">420: </a><font color="#B22222">/*</font>
+<a name="line421">421: </a><font color="#B22222">  Atomic Min/Max operations</font>
+
+<a name="line423">423: </a><font color="#B22222">  See CUDA version for comments.</font>
+<a name="line424">424: </a><font color="#B22222"> */</font>
+<a name="line425">425: </a><font color="#A020F0">#if PETSC_PKG_HIP_VERSION_LT(4, 4, 0)</font>
+<a name="line426">426: </a><font color="#A020F0">  #if defined(PETSC_USE_REAL_DOUBLE)</font>
+<a name="line427">427: </a><strong><font color="#4169E1"><a name="atomicMin"></a>__device__ static double atomicMin(double *address, double val)</font></strong>
+<a name="line428">428: </a>{
+<a name="line429">429: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line430">430: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line431">431: </a>  <font color="#4169E1">do</font> {
+<a name="line432">432: </a>    assumed = old;
+<a name="line433">433: </a>    old     = atomicCAS(address_as_ull, assumed, __double_as_longlong(<a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(val, __longlong_as_double(assumed))));
+<a name="line434">434: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line435">435: </a>  <font color="#4169E1">return</font> __longlong_as_double(old);
+<a name="line436">436: </a>}
+
+<a name="line438">438: </a><strong><font color="#4169E1"><a name="atomicMax"></a>__device__ static double atomicMax(double *address, double val)</font></strong>
+<a name="line439">439: </a>{
+<a name="line440">440: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line441">441: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line442">442: </a>  <font color="#4169E1">do</font> {
+<a name="line443">443: </a>    assumed = old;
+<a name="line444">444: </a>    old     = atomicCAS(address_as_ull, assumed, __double_as_longlong(<a href="../../../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(val, __longlong_as_double(assumed))));
+<a name="line445">445: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line446">446: </a>  <font color="#4169E1">return</font> __longlong_as_double(old);
+<a name="line447">447: </a>}
+<a name="line448">448: </a><font color="#A020F0">  #elif defined(PETSC_USE_REAL_SINGLE)</font>
+<a name="line449">449: </a><strong><font color="#4169E1"><a name="atomicMin"></a>__device__ static float atomicMin(float *address, float val)</font></strong>
+<a name="line450">450: </a>{
+<a name="line451">451: </a>  int *address_as_int = (int *)(address);
+<a name="line452">452: </a>  int  old            = *address_as_int, assumed;
+<a name="line453">453: </a>  <font color="#4169E1">do</font> {
+<a name="line454">454: </a>    assumed = old;
+<a name="line455">455: </a>    old     = atomicCAS(address_as_int, assumed, __float_as_int(<a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(val, __int_as_float(assumed))));
+<a name="line456">456: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line457">457: </a>  <font color="#4169E1">return</font> __int_as_float(old);
+<a name="line458">458: </a>}
+
+<a name="line460">460: </a><strong><font color="#4169E1"><a name="atomicMax"></a>__device__ static float atomicMax(float *address, float val)</font></strong>
+<a name="line461">461: </a>{
+<a name="line462">462: </a>  int *address_as_int = (int *)(address);
+<a name="line463">463: </a>  int  old            = *address_as_int, assumed;
+<a name="line464">464: </a>  <font color="#4169E1">do</font> {
+<a name="line465">465: </a>    assumed = old;
+<a name="line466">466: </a>    old     = atomicCAS(address_as_int, assumed, __float_as_int(<a href="../../../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(val, __int_as_float(assumed))));
+<a name="line467">467: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line468">468: </a>  <font color="#4169E1">return</font> __int_as_float(old);
+<a name="line469">469: </a>}
+<a name="line470">470: </a><font color="#A020F0">  #endif</font>
+<a name="line471">471: </a><font color="#A020F0">#endif</font>
+
+<a name="line473">473: </a><font color="#B22222">/* As of ROCm 3.10 llint atomicMin/Max(llint*, llint) is not supported */</font>
+<a name="line474">474: </a><strong><font color="#4169E1"><a name="atomicMin"></a>__device__ static llint atomicMin(llint *address, llint val)</font></strong>
+<a name="line475">475: </a>{
+<a name="line476">476: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line477">477: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line478">478: </a>  <font color="#4169E1">do</font> {
+<a name="line479">479: </a>    assumed = old;
+<a name="line480">480: </a>    old     = atomicCAS(address_as_ull, assumed, (ullint)(<a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(val, (llint)assumed)));
+<a name="line481">481: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line482">482: </a>  <font color="#4169E1">return</font> (llint)old;
+<a name="line483">483: </a>}
+
+<a name="line485">485: </a><strong><font color="#4169E1"><a name="atomicMax"></a>__device__ static llint atomicMax(llint *address, llint val)</font></strong>
+<a name="line486">486: </a>{
+<a name="line487">487: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line488">488: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line489">489: </a>  <font color="#4169E1">do</font> {
+<a name="line490">490: </a>    assumed = old;
+<a name="line491">491: </a>    old     = atomicCAS(address_as_ull, assumed, (ullint)(<a href="../../../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(val, (llint)assumed)));
+<a name="line492">492: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line493">493: </a>  <font color="#4169E1">return</font> (llint)old;
+<a name="line494">494: </a>}
+
+<a name="line496">496: </a>template &lt;typename Type&gt;
+<a name="line497">497: </a><font color="#4169E1"><a name="AtomicMin"></a>struct AtomicMin </font>{
+<a name="line498">498: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicMin(&amp;x, y); }
+<a name="line499">499: </a>};
+<a name="line500">500: </a>template &lt;typename Type&gt;
+<a name="line501">501: </a><font color="#4169E1"><a name="AtomicMax"></a>struct AtomicMax </font>{
+<a name="line502">502: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicMax(&amp;x, y); }
+<a name="line503">503: </a>};
+
+<a name="line505">505: </a><font color="#B22222">/*</font>
+<a name="line506">506: </a><font color="#B22222">  Atomic bitwise operations</font>
+<a name="line507">507: </a><font color="#B22222">  As of ROCm 3.10, the llint atomicAnd/Or/Xor(llint*, llint) is not supported</font>
+<a name="line508">508: </a><font color="#B22222">*/</font>
+
+<a name="line510">510: </a><strong><font color="#4169E1"><a name="atomicAnd"></a>__device__ static llint atomicAnd(llint *address, llint val)</font></strong>
+<a name="line511">511: </a>{
+<a name="line512">512: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line513">513: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line514">514: </a>  <font color="#4169E1">do</font> {
+<a name="line515">515: </a>    assumed = old;
+<a name="line516">516: </a>    old     = atomicCAS(address_as_ull, assumed, (ullint)(val &amp; (llint)assumed));
+<a name="line517">517: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line518">518: </a>  <font color="#4169E1">return</font> (llint)old;
+<a name="line519">519: </a>}
+<a name="line520">520: </a><strong><font color="#4169E1"><a name="atomicOr"></a>__device__ static llint atomicOr(llint *address, llint val)</font></strong>
+<a name="line521">521: </a>{
+<a name="line522">522: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line523">523: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line524">524: </a>  <font color="#4169E1">do</font> {
+<a name="line525">525: </a>    assumed = old;
+<a name="line526">526: </a>    old     = atomicCAS(address_as_ull, assumed, (ullint)(val | (llint)assumed));
+<a name="line527">527: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line528">528: </a>  <font color="#4169E1">return</font> (llint)old;
+<a name="line529">529: </a>}
+
+<a name="line531">531: </a><strong><font color="#4169E1"><a name="atomicXor"></a>__device__ static llint atomicXor(llint *address, llint val)</font></strong>
+<a name="line532">532: </a>{
+<a name="line533">533: </a>  ullint *address_as_ull = (ullint *)(address);
+<a name="line534">534: </a>  ullint  old            = *address_as_ull, assumed;
+<a name="line535">535: </a>  <font color="#4169E1">do</font> {
+<a name="line536">536: </a>    assumed = old;
+<a name="line537">537: </a>    old     = atomicCAS(address_as_ull, assumed, (ullint)(val ^ (llint)assumed));
+<a name="line538">538: </a>  } <font color="#4169E1">while</font> (assumed != old);
+<a name="line539">539: </a>  <font color="#4169E1">return</font> (llint)old;
+<a name="line540">540: </a>}
+
+<a name="line542">542: </a>template &lt;typename Type&gt;
+<a name="line543">543: </a><font color="#4169E1"><a name="AtomicBAND"></a>struct AtomicBAND </font>{
+<a name="line544">544: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicAnd(&amp;x, y); }
+<a name="line545">545: </a>};
+<a name="line546">546: </a>template &lt;typename Type&gt;
+<a name="line547">547: </a><font color="#4169E1"><a name="AtomicBOR"></a>struct AtomicBOR </font>{
+<a name="line548">548: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicOr(&amp;x, y); }
+<a name="line549">549: </a>};
+<a name="line550">550: </a>template &lt;typename Type&gt;
+<a name="line551">551: </a><font color="#4169E1"><a name="AtomicBXOR"></a>struct AtomicBXOR </font>{
+<a name="line552">552: </a>  __device__ Type operator()(Type &amp;x, Type y) const { <font color="#4169E1">return</font> atomicXor(&amp;x, y); }
+<a name="line553">553: </a>};
+
+<a name="line555">555: </a><font color="#B22222">/*</font>
+<a name="line556">556: </a><font color="#B22222">  Atomic logical operations:</font>
+
+<a name="line558">558: </a><font color="#B22222">  CUDA has no atomic logical operations at all. We support them on integer types.</font>
+<a name="line559">559: </a><font color="#B22222">*/</font>
+
+<a name="line561">561: </a><font color="#B22222">/* A template without definition makes any instantiation not using given specializations erroneous at compile time,</font>
+<a name="line562">562: </a><font color="#B22222">   which is what we want since we only support 32-bit and 64-bit integers.</font>
+<a name="line563">563: </a><font color="#B22222"> */</font>
+<a name="line564">564: </a>template &lt;typename Type, class Op, int size <font color="#B22222">/* sizeof(Type) */</font>&gt;
+<a name="line565">565: </a><font color="#4169E1"><a name="AtomicLogical"></a>struct AtomicLogical</font>;
+
+<a name="line567">567: </a>template &lt;typename Type, class Op&gt;
+<a name="line568">568: </a><font color="#4169E1"><a name="AtomicLogical"></a>struct AtomicLogical</font>&lt;Type, Op, 4&gt; {
+<a name="line569">569: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line570">570: </a>  {
+<a name="line571">571: </a>    int *address_as_int = (int *)(&amp;x);
+<a name="line572">572: </a>    int  old            = *address_as_int, assumed;
+<a name="line573">573: </a>    Op   op;
+<a name="line574">574: </a>    <font color="#4169E1">do</font> {
+<a name="line575">575: </a>      assumed = old;
+<a name="line576">576: </a>      old     = atomicCAS(address_as_int, assumed, (int)(op((Type)assumed, y)));
+<a name="line577">577: </a>    } <font color="#4169E1">while</font> (assumed != old);
+<a name="line578">578: </a>    <font color="#4169E1">return</font> (Type)old;
+<a name="line579">579: </a>  }
+<a name="line580">580: </a>};
+
+<a name="line582">582: </a>template &lt;typename Type, class Op&gt;
+<a name="line583">583: </a><font color="#4169E1"><a name="AtomicLogical"></a>struct AtomicLogical</font>&lt;Type, Op, 8&gt; {
+<a name="line584">584: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line585">585: </a>  {
+<a name="line586">586: </a>    ullint *address_as_ull = (ullint *)(&amp;x);
+<a name="line587">587: </a>    ullint  old            = *address_as_ull, assumed;
+<a name="line588">588: </a>    Op      op;
+<a name="line589">589: </a>    <font color="#4169E1">do</font> {
+<a name="line590">590: </a>      assumed = old;
+<a name="line591">591: </a>      old     = atomicCAS(address_as_ull, assumed, (ullint)(op((Type)assumed, y)));
+<a name="line592">592: </a>    } <font color="#4169E1">while</font> (assumed != old);
+<a name="line593">593: </a>    <font color="#4169E1">return</font> (Type)old;
+<a name="line594">594: </a>  }
+<a name="line595">595: </a>};
+
+<a name="line597">597: </a><font color="#B22222">/* Note land/lor/lxor below are different from LAND etc above. Here we pass arguments by value and return result of ops (not old value) */</font>
+<a name="line598">598: </a>template &lt;typename Type&gt;
+<a name="line599">599: </a><font color="#4169E1"><a name="land"></a>struct land </font>{
+<a name="line600">600: </a>  __device__ Type operator()(Type x, Type y) { <font color="#4169E1">return</font> x &amp;&amp; y; }
+<a name="line601">601: </a>};
+<a name="line602">602: </a>template &lt;typename Type&gt;
+<a name="line603">603: </a><font color="#4169E1"><a name="lor"></a>struct lor </font>{
+<a name="line604">604: </a>  __device__ Type operator()(Type x, Type y) { <font color="#4169E1">return</font> x || y; }
+<a name="line605">605: </a>};
+<a name="line606">606: </a>template &lt;typename Type&gt;
+<a name="line607">607: </a><font color="#4169E1"><a name="lxor"></a>struct lxor </font>{
+<a name="line608">608: </a>  __device__ Type operator()(Type x, Type y) { <font color="#4169E1">return</font> (!x != !y); }
+<a name="line609">609: </a>};
+
+<a name="line611">611: </a>template &lt;typename Type&gt;
+<a name="line612">612: </a><font color="#4169E1"><a name="AtomicLAND"></a>struct AtomicLAND </font>{
+<a name="line613">613: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line614">614: </a>  {
+<a name="line615">615: </a>    AtomicLogical&lt;Type, land&lt;Type&gt;, <font color="#4169E1">sizeof</font>(Type)&gt; op;
+<a name="line616">616: </a>    <font color="#4169E1">return</font> op(x, y);
+<a name="line617">617: </a>  }
+<a name="line618">618: </a>};
+<a name="line619">619: </a>template &lt;typename Type&gt;
+<a name="line620">620: </a><font color="#4169E1"><a name="AtomicLOR"></a>struct AtomicLOR </font>{
+<a name="line621">621: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line622">622: </a>  {
+<a name="line623">623: </a>    AtomicLogical&lt;Type, lor&lt;Type&gt;, <font color="#4169E1">sizeof</font>(Type)&gt; op;
+<a name="line624">624: </a>    <font color="#4169E1">return</font> op(x, y);
+<a name="line625">625: </a>  }
+<a name="line626">626: </a>};
+<a name="line627">627: </a>template &lt;typename Type&gt;
+<a name="line628">628: </a><font color="#4169E1"><a name="AtomicLXOR"></a>struct AtomicLXOR </font>{
+<a name="line629">629: </a>  __device__ Type operator()(Type &amp;x, Type y) const
+<a name="line630">630: </a>  {
+<a name="line631">631: </a>    AtomicLogical&lt;Type, lxor&lt;Type&gt;, <font color="#4169E1">sizeof</font>(Type)&gt; op;
+<a name="line632">632: </a>    <font color="#4169E1">return</font> op(x, y);
+<a name="line633">633: </a>  }
+<a name="line634">634: </a>};
+
+<a name="line636">636: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line637">637: </a><font color="#B22222">/*  Wrapper functions of hip kernels. Function pointers are stored in 'link'         */</font>
+<a name="line638">638: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line639">639: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line640">640: </a><strong><font color="#4169E1"><a name="Pack"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> Pack(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> start, PetscSFPackOpt opt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *idx, const void *data, void *buf)</font></strong>
+<a name="line641">641: </a>{
+<a name="line642">642: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nthreads = 256;
+<a name="line643">643: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nblocks  = (count + nthreads - 1) / nthreads;
+<a name="line644">644: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *iarray   = opt ? opt-&gt;array : NULL;
+
+<a name="line646">646: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line647">647: </a>  <font color="#4169E1">if</font> (!count) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line648">648: </a>  nblocks = <a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nblocks, link-&gt;maxResidentThreadsPerGPU / nthreads);
+<a name="line649">649: </a>  hipLaunchKernelGGL(HIP_KERNEL_NAME(d_Pack&lt;Type, BS, EQ&gt;), dim3(nblocks), dim3(nthreads), 0, link-&gt;stream, link-&gt;bs, count, start, iarray, idx, (const Type *)data, (Type *)buf);
+<a name="line650">650: </a>  PetscCallHIP(hipGetLastError());
+<a name="line651">651: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line652">652: </a>}
+
+<a name="line654">654: </a>template &lt;typename Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line655">655: </a><strong><font color="#4169E1"><a name="UnpackAndOp"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> UnpackAndOp(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> start, PetscSFPackOpt opt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *idx, void *data, const void *buf)</font></strong>
+<a name="line656">656: </a>{
+<a name="line657">657: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nthreads = 256;
+<a name="line658">658: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nblocks  = (count + nthreads - 1) / nthreads;
+<a name="line659">659: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *iarray   = opt ? opt-&gt;array : NULL;
+
+<a name="line661">661: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line662">662: </a>  <font color="#4169E1">if</font> (!count) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line663">663: </a>  nblocks = <a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nblocks, link-&gt;maxResidentThreadsPerGPU / nthreads);
+<a name="line664">664: </a>  hipLaunchKernelGGL(HIP_KERNEL_NAME(d_UnpackAndOp&lt;Type, Op, BS, EQ&gt;), dim3(nblocks), dim3(nthreads), 0, link-&gt;stream, link-&gt;bs, count, start, iarray, idx, (Type *)data, (const Type *)buf);
+<a name="line665">665: </a>  PetscCallHIP(hipGetLastError());
+<a name="line666">666: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line667">667: </a>}
+
+<a name="line669">669: </a>template &lt;typename Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line670">670: </a><strong><font color="#4169E1"><a name="FetchAndOp"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FetchAndOp(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> start, PetscSFPackOpt opt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *idx, void *data, void *buf)</font></strong>
+<a name="line671">671: </a>{
+<a name="line672">672: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nthreads = 256;
+<a name="line673">673: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nblocks  = (count + nthreads - 1) / nthreads;
+<a name="line674">674: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *iarray   = opt ? opt-&gt;array : NULL;
+
+<a name="line676">676: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line677">677: </a>  <font color="#4169E1">if</font> (!count) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line678">678: </a>  nblocks = <a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nblocks, link-&gt;maxResidentThreadsPerGPU / nthreads);
+<a name="line679">679: </a>  hipLaunchKernelGGL(HIP_KERNEL_NAME(d_FetchAndOp&lt;Type, Op, BS, EQ&gt;), dim3(nblocks), dim3(nthreads), 0, link-&gt;stream, link-&gt;bs, count, start, iarray, idx, (Type *)data, (Type *)buf);
+<a name="line680">680: </a>  PetscCallHIP(hipGetLastError());
+<a name="line681">681: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line682">682: </a>}
+
+<a name="line684">684: </a>template &lt;typename Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line685">685: </a><strong><font color="#4169E1"><a name="ScatterAndOp"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ScatterAndOp(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcStart, PetscSFPackOpt srcOpt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *srcIdx, const void *src, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dstStart, PetscSFPackOpt dstOpt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *dstIdx, void *dst)</font></strong>
+<a name="line686">686: </a>{
+<a name="line687">687: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nthreads = 256;
+<a name="line688">688: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nblocks  = (count + nthreads - 1) / nthreads;
+<a name="line689">689: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcx = 0, srcy = 0, srcX = 0, srcY = 0, dstx = 0, dsty = 0, dstX = 0, dstY = 0;
+
+<a name="line691">691: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line692">692: </a>  <font color="#4169E1">if</font> (!count) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line693">693: </a>  nblocks = <a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nblocks, link-&gt;maxResidentThreadsPerGPU / nthreads);
+
+<a name="line695">695: </a>  <font color="#B22222">/* The 3D shape of source subdomain may be different than that of the destination, which makes it difficult to use CUDA 3D grid and block */</font>
+<a name="line696">696: </a>  <font color="#4169E1">if</font> (srcOpt) {
+<a name="line697">697: </a>    srcx     = srcOpt-&gt;dx[0];
+<a name="line698">698: </a>    srcy     = srcOpt-&gt;dy[0];
+<a name="line699">699: </a>    srcX     = srcOpt-&gt;X[0];
+<a name="line700">700: </a>    srcY     = srcOpt-&gt;Y[0];
+<a name="line701">701: </a>    srcStart = srcOpt-&gt;start[0];
+<a name="line702">702: </a>    srcIdx   = NULL;
+<a name="line703">703: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (!srcIdx) {
+<a name="line704">704: </a>    srcx = srcX = count;
+<a name="line705">705: </a>    srcy = srcY = 1;
+<a name="line706">706: </a>  }
+
+<a name="line708">708: </a>  <font color="#4169E1">if</font> (dstOpt) {
+<a name="line709">709: </a>    dstx     = dstOpt-&gt;dx[0];
+<a name="line710">710: </a>    dsty     = dstOpt-&gt;dy[0];
+<a name="line711">711: </a>    dstX     = dstOpt-&gt;X[0];
+<a name="line712">712: </a>    dstY     = dstOpt-&gt;Y[0];
+<a name="line713">713: </a>    dstStart = dstOpt-&gt;start[0];
+<a name="line714">714: </a>    dstIdx   = NULL;
+<a name="line715">715: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (!dstIdx) {
+<a name="line716">716: </a>    dstx = dstX = count;
+<a name="line717">717: </a>    dsty = dstY = 1;
+<a name="line718">718: </a>  }
+
+<a name="line720">720: </a>  hipLaunchKernelGGL(HIP_KERNEL_NAME(d_ScatterAndOp&lt;Type, Op, BS, EQ&gt;), dim3(nblocks), dim3(nthreads), 0, link-&gt;stream, link-&gt;bs, count, srcx, srcy, srcX, srcY, srcStart, srcIdx, (const Type *)src, dstx, dsty, dstX, dstY, dstStart, dstIdx, (Type *)dst);
+<a name="line721">721: </a>  PetscCallHIP(hipGetLastError());
+<a name="line722">722: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line723">723: </a>}
+
+<a name="line725">725: </a><font color="#B22222">/* Specialization for Insert since we may use hipMemcpyAsync */</font>
+<a name="line726">726: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line727">727: </a><strong><font color="#4169E1"><a name="ScatterAndInsert"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ScatterAndInsert(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> srcStart, PetscSFPackOpt srcOpt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *srcIdx, const void *src, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> dstStart, PetscSFPackOpt dstOpt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *dstIdx, void *dst)</font></strong>
+<a name="line728">728: </a>{
+<a name="line729">729: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line730">730: </a>  <font color="#4169E1">if</font> (!count) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line731">731: </a>  <font color="#B22222">/*src and dst are contiguous */</font>
+<a name="line732">732: </a>  <font color="#4169E1">if</font> ((!srcOpt &amp;&amp; !srcIdx) &amp;&amp; (!dstOpt &amp;&amp; !dstIdx) &amp;&amp; src != dst) {
+<a name="line733">733: </a>    PetscCallHIP(hipMemcpyAsync((Type *)dst + dstStart * link-&gt;bs, (const Type *)src + srcStart * link-&gt;bs, count * link-&gt;unitbytes, hipMemcpyDeviceToDevice, link-&gt;stream));
+<a name="line734">734: </a>  } <font color="#4169E1">else</font> {
+<a name="line735">735: </a>    <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ScatterAndOp&lt;Type, Insert&lt;Type&gt;, BS, EQ&gt;(link, count, srcStart, srcOpt, srcIdx, src, dstStart, dstOpt, dstIdx, dst));
+<a name="line736">736: </a>  }
+<a name="line737">737: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line738">738: </a>}
+
+<a name="line740">740: </a>template &lt;typename Type, class Op, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line741">741: </a><strong><font color="#4169E1"><a name="FetchAndOpLocal"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FetchAndOpLocal(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> count, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> rootstart, PetscSFPackOpt rootopt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rootidx, void *rootdata, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> leafstart, PetscSFPackOpt leafopt, const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *leafidx, const void *leafdata, void *leafupdate)</font></strong>
+<a name="line742">742: </a>{
+<a name="line743">743: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nthreads = 256;
+<a name="line744">744: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        nblocks  = (count + nthreads - 1) / nthreads;
+<a name="line745">745: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rarray   = rootopt ? rootopt-&gt;array : NULL;
+<a name="line746">746: </a>  const <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *larray   = leafopt ? leafopt-&gt;array : NULL;
+
+<a name="line748">748: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line749">749: </a>  <font color="#4169E1">if</font> (!count) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line750">750: </a>  nblocks = <a href="../../../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(nblocks, link-&gt;maxResidentThreadsPerGPU / nthreads);
+<a name="line751">751: </a>  hipLaunchKernelGGL(HIP_KERNEL_NAME(d_FetchAndOpLocal&lt;Type, Op, BS, EQ&gt;), dim3(nblocks), dim3(nthreads), 0, link-&gt;stream, link-&gt;bs, count, rootstart, rarray, rootidx, (Type *)rootdata, leafstart, larray, leafidx, (const Type *)leafdata, (Type *)leafupdate);
+<a name="line752">752: </a>  PetscCallHIP(hipGetLastError());
+<a name="line753">753: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line754">754: </a>}
+
+<a name="line756">756: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line757">757: </a><font color="#B22222">/*  Init various types and instantiate pack/unpack function pointers                  */</font>
+<a name="line758">758: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line759">759: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line760">760: </a><strong><font color="#4169E1"><a name="PackInit_RealType"></a>static void PackInit_RealType(PetscSFLink link)</font></strong>
+<a name="line761">761: </a>{
+<a name="line762">762: </a>  <font color="#B22222">/* Pack/unpack for remote communication */</font>
+<a name="line763">763: </a>  link-&gt;d_Pack            = Pack&lt;Type, BS, EQ&gt;;
+<a name="line764">764: </a>  link-&gt;d_UnpackAndInsert = UnpackAndOp&lt;Type, Insert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line765">765: </a>  link-&gt;d_UnpackAndAdd    = UnpackAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line766">766: </a>  link-&gt;d_UnpackAndMult   = UnpackAndOp&lt;Type, Mult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line767">767: </a>  link-&gt;d_UnpackAndMin    = UnpackAndOp&lt;Type, Min&lt;Type&gt;, BS, EQ&gt;;
+<a name="line768">768: </a>  link-&gt;d_UnpackAndMax    = UnpackAndOp&lt;Type, Max&lt;Type&gt;, BS, EQ&gt;;
+<a name="line769">769: </a>  link-&gt;d_FetchAndAdd     = FetchAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line771">771: </a>  <font color="#B22222">/* Scatter for local communication */</font>
+<a name="line772">772: </a>  link-&gt;d_ScatterAndInsert = ScatterAndInsert&lt;Type, BS, EQ&gt;; <font color="#B22222">/* Has special optimizations */</font>
+<a name="line773">773: </a>  link-&gt;d_ScatterAndAdd    = ScatterAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line774">774: </a>  link-&gt;d_ScatterAndMult   = ScatterAndOp&lt;Type, Mult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line775">775: </a>  link-&gt;d_ScatterAndMin    = ScatterAndOp&lt;Type, Min&lt;Type&gt;, BS, EQ&gt;;
+<a name="line776">776: </a>  link-&gt;d_ScatterAndMax    = ScatterAndOp&lt;Type, Max&lt;Type&gt;, BS, EQ&gt;;
+<a name="line777">777: </a>  link-&gt;d_FetchAndAddLocal = FetchAndOpLocal&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line779">779: </a>  <font color="#B22222">/* Atomic versions when there are data-race possibilities */</font>
+<a name="line780">780: </a>  link-&gt;da_UnpackAndInsert = UnpackAndOp&lt;Type, AtomicInsert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line781">781: </a>  link-&gt;da_UnpackAndAdd    = UnpackAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line782">782: </a>  link-&gt;da_UnpackAndMult   = UnpackAndOp&lt;Type, AtomicMult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line783">783: </a>  link-&gt;da_UnpackAndMin    = UnpackAndOp&lt;Type, AtomicMin&lt;Type&gt;, BS, EQ&gt;;
+<a name="line784">784: </a>  link-&gt;da_UnpackAndMax    = UnpackAndOp&lt;Type, AtomicMax&lt;Type&gt;, BS, EQ&gt;;
+<a name="line785">785: </a>  link-&gt;da_FetchAndAdd     = FetchAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line787">787: </a>  link-&gt;da_ScatterAndInsert = ScatterAndOp&lt;Type, AtomicInsert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line788">788: </a>  link-&gt;da_ScatterAndAdd    = ScatterAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line789">789: </a>  link-&gt;da_ScatterAndMult   = ScatterAndOp&lt;Type, AtomicMult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line790">790: </a>  link-&gt;da_ScatterAndMin    = ScatterAndOp&lt;Type, AtomicMin&lt;Type&gt;, BS, EQ&gt;;
+<a name="line791">791: </a>  link-&gt;da_ScatterAndMax    = ScatterAndOp&lt;Type, AtomicMax&lt;Type&gt;, BS, EQ&gt;;
+<a name="line792">792: </a>  link-&gt;da_FetchAndAddLocal = FetchAndOpLocal&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line793">793: </a>}
+
+<a name="line795">795: </a><font color="#B22222">/* Have this templated class to specialize for char integers */</font>
+<a name="line796">796: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> size <font color="#B22222">/*sizeof(Type)*/</font>&gt;
+<a name="line797">797: </a><font color="#4169E1"><a name="PackInit_IntegerType_Atomic"></a>struct PackInit_IntegerType_Atomic </font>{
+<a name="line798">798: </a>  static void Init(PetscSFLink link)
+<a name="line799">799: </a>  {
+<a name="line800">800: </a>    link-&gt;da_UnpackAndInsert = UnpackAndOp&lt;Type, AtomicInsert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line801">801: </a>    link-&gt;da_UnpackAndAdd    = UnpackAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line802">802: </a>    link-&gt;da_UnpackAndMult   = UnpackAndOp&lt;Type, AtomicMult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line803">803: </a>    link-&gt;da_UnpackAndMin    = UnpackAndOp&lt;Type, AtomicMin&lt;Type&gt;, BS, EQ&gt;;
+<a name="line804">804: </a>    link-&gt;da_UnpackAndMax    = UnpackAndOp&lt;Type, AtomicMax&lt;Type&gt;, BS, EQ&gt;;
+<a name="line805">805: </a>    link-&gt;da_UnpackAndLAND   = UnpackAndOp&lt;Type, AtomicLAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line806">806: </a>    link-&gt;da_UnpackAndLOR    = UnpackAndOp&lt;Type, AtomicLOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line807">807: </a>    link-&gt;da_UnpackAndLXOR   = UnpackAndOp&lt;Type, AtomicLXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line808">808: </a>    link-&gt;da_UnpackAndBAND   = UnpackAndOp&lt;Type, AtomicBAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line809">809: </a>    link-&gt;da_UnpackAndBOR    = UnpackAndOp&lt;Type, AtomicBOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line810">810: </a>    link-&gt;da_UnpackAndBXOR   = UnpackAndOp&lt;Type, AtomicBXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line811">811: </a>    link-&gt;da_FetchAndAdd     = FetchAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line813">813: </a>    link-&gt;da_ScatterAndInsert = ScatterAndOp&lt;Type, AtomicInsert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line814">814: </a>    link-&gt;da_ScatterAndAdd    = ScatterAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line815">815: </a>    link-&gt;da_ScatterAndMult   = ScatterAndOp&lt;Type, AtomicMult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line816">816: </a>    link-&gt;da_ScatterAndMin    = ScatterAndOp&lt;Type, AtomicMin&lt;Type&gt;, BS, EQ&gt;;
+<a name="line817">817: </a>    link-&gt;da_ScatterAndMax    = ScatterAndOp&lt;Type, AtomicMax&lt;Type&gt;, BS, EQ&gt;;
+<a name="line818">818: </a>    link-&gt;da_ScatterAndLAND   = ScatterAndOp&lt;Type, AtomicLAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line819">819: </a>    link-&gt;da_ScatterAndLOR    = ScatterAndOp&lt;Type, AtomicLOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line820">820: </a>    link-&gt;da_ScatterAndLXOR   = ScatterAndOp&lt;Type, AtomicLXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line821">821: </a>    link-&gt;da_ScatterAndBAND   = ScatterAndOp&lt;Type, AtomicBAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line822">822: </a>    link-&gt;da_ScatterAndBOR    = ScatterAndOp&lt;Type, AtomicBOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line823">823: </a>    link-&gt;da_ScatterAndBXOR   = ScatterAndOp&lt;Type, AtomicBXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line824">824: </a>    link-&gt;da_FetchAndAddLocal = FetchAndOpLocal&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line825">825: </a>  }
+<a name="line826">826: </a>};
+
+<a name="line828">828: </a><font color="#B22222">/*  See cuda version */</font>
+<a name="line829">829: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line830">830: </a><font color="#4169E1"><a name="PackInit_IntegerType_Atomic"></a>struct PackInit_IntegerType_Atomic</font>&lt;Type, BS, EQ, 1&gt; {
+<a name="line831">831: </a>  static void Init(PetscSFLink link)
+<a name="line832">832: </a>  { <font color="#B22222">/* Nothing to leave function pointers NULL */</font>
+<a name="line833">833: </a>  }
+<a name="line834">834: </a>};
+
+<a name="line836">836: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line837">837: </a><strong><font color="#4169E1"><a name="PackInit_IntegerType"></a>static void PackInit_IntegerType(PetscSFLink link)</font></strong>
+<a name="line838">838: </a>{
+<a name="line839">839: </a>  link-&gt;d_Pack            = Pack&lt;Type, BS, EQ&gt;;
+<a name="line840">840: </a>  link-&gt;d_UnpackAndInsert = UnpackAndOp&lt;Type, Insert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line841">841: </a>  link-&gt;d_UnpackAndAdd    = UnpackAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line842">842: </a>  link-&gt;d_UnpackAndMult   = UnpackAndOp&lt;Type, Mult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line843">843: </a>  link-&gt;d_UnpackAndMin    = UnpackAndOp&lt;Type, Min&lt;Type&gt;, BS, EQ&gt;;
+<a name="line844">844: </a>  link-&gt;d_UnpackAndMax    = UnpackAndOp&lt;Type, Max&lt;Type&gt;, BS, EQ&gt;;
+<a name="line845">845: </a>  link-&gt;d_UnpackAndLAND   = UnpackAndOp&lt;Type, LAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line846">846: </a>  link-&gt;d_UnpackAndLOR    = UnpackAndOp&lt;Type, LOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line847">847: </a>  link-&gt;d_UnpackAndLXOR   = UnpackAndOp&lt;Type, LXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line848">848: </a>  link-&gt;d_UnpackAndBAND   = UnpackAndOp&lt;Type, BAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line849">849: </a>  link-&gt;d_UnpackAndBOR    = UnpackAndOp&lt;Type, BOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line850">850: </a>  link-&gt;d_UnpackAndBXOR   = UnpackAndOp&lt;Type, BXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line851">851: </a>  link-&gt;d_FetchAndAdd     = FetchAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line853">853: </a>  link-&gt;d_ScatterAndInsert = ScatterAndInsert&lt;Type, BS, EQ&gt;;
+<a name="line854">854: </a>  link-&gt;d_ScatterAndAdd    = ScatterAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line855">855: </a>  link-&gt;d_ScatterAndMult   = ScatterAndOp&lt;Type, Mult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line856">856: </a>  link-&gt;d_ScatterAndMin    = ScatterAndOp&lt;Type, Min&lt;Type&gt;, BS, EQ&gt;;
+<a name="line857">857: </a>  link-&gt;d_ScatterAndMax    = ScatterAndOp&lt;Type, Max&lt;Type&gt;, BS, EQ&gt;;
+<a name="line858">858: </a>  link-&gt;d_ScatterAndLAND   = ScatterAndOp&lt;Type, LAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line859">859: </a>  link-&gt;d_ScatterAndLOR    = ScatterAndOp&lt;Type, LOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line860">860: </a>  link-&gt;d_ScatterAndLXOR   = ScatterAndOp&lt;Type, LXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line861">861: </a>  link-&gt;d_ScatterAndBAND   = ScatterAndOp&lt;Type, BAND&lt;Type&gt;, BS, EQ&gt;;
+<a name="line862">862: </a>  link-&gt;d_ScatterAndBOR    = ScatterAndOp&lt;Type, BOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line863">863: </a>  link-&gt;d_ScatterAndBXOR   = ScatterAndOp&lt;Type, BXOR&lt;Type&gt;, BS, EQ&gt;;
+<a name="line864">864: </a>  link-&gt;d_FetchAndAddLocal = FetchAndOpLocal&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line865">865: </a>  PackInit_IntegerType_Atomic&lt;Type, BS, EQ, <font color="#4169E1">sizeof</font>(Type)&gt;::Init(link);
+<a name="line866">866: </a>}
+
+<a name="line868">868: </a><font color="#A020F0">#if defined(PETSC_HAVE_COMPLEX)</font>
+<a name="line869">869: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line870">870: </a><strong><font color="#4169E1"><a name="PackInit_ComplexType"></a>static void PackInit_ComplexType(PetscSFLink link)</font></strong>
+<a name="line871">871: </a>{
+<a name="line872">872: </a>  link-&gt;d_Pack            = Pack&lt;Type, BS, EQ&gt;;
+<a name="line873">873: </a>  link-&gt;d_UnpackAndInsert = UnpackAndOp&lt;Type, Insert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line874">874: </a>  link-&gt;d_UnpackAndAdd    = UnpackAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line875">875: </a>  link-&gt;d_UnpackAndMult   = UnpackAndOp&lt;Type, Mult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line876">876: </a>  link-&gt;d_FetchAndAdd     = FetchAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line878">878: </a>  link-&gt;d_ScatterAndInsert = ScatterAndInsert&lt;Type, BS, EQ&gt;;
+<a name="line879">879: </a>  link-&gt;d_ScatterAndAdd    = ScatterAndOp&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+<a name="line880">880: </a>  link-&gt;d_ScatterAndMult   = ScatterAndOp&lt;Type, Mult&lt;Type&gt;, BS, EQ&gt;;
+<a name="line881">881: </a>  link-&gt;d_FetchAndAddLocal = FetchAndOpLocal&lt;Type, Add&lt;Type&gt;, BS, EQ&gt;;
+
+<a name="line883">883: </a>  link-&gt;da_UnpackAndInsert = UnpackAndOp&lt;Type, AtomicInsert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line884">884: </a>  link-&gt;da_UnpackAndAdd    = UnpackAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line885">885: </a>  link-&gt;da_UnpackAndMult   = NULL; <font color="#B22222">/* Not implemented yet */</font>
+<a name="line886">886: </a>  link-&gt;da_FetchAndAdd     = NULL; <font color="#B22222">/* Return value of atomicAdd on complex is not atomic */</font>
+
+<a name="line888">888: </a>  link-&gt;da_ScatterAndInsert = ScatterAndOp&lt;Type, AtomicInsert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line889">889: </a>  link-&gt;da_ScatterAndAdd    = ScatterAndOp&lt;Type, AtomicAdd&lt;Type&gt;, BS, EQ&gt;;
+<a name="line890">890: </a>}
+<a name="line891">891: </a><font color="#A020F0">#endif</font>
+
+<a name="line893">893: </a><font color="#4169E1">typedef signed char   SignedChar;</font>
+<a name="line894">894: </a><font color="#4169E1">typedef unsigned char UnsignedChar;</font>
+<a name="line895">895: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line896">896: </a>  int a;
+<a name="line897">897: </a>  int b;
+<a name="line898">898: </a>} PairInt;
+<a name="line899">899: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line900">900: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> a;
+<a name="line901">901: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> b;
+<a name="line902">902: </a>} PairPetscInt;
+
+<a name="line904">904: </a>template &lt;typename Type&gt;
+<a name="line905">905: </a><strong><font color="#4169E1"><a name="PackInit_PairType"></a>static void PackInit_PairType(PetscSFLink link)</font></strong>
+<a name="line906">906: </a>{
+<a name="line907">907: </a>  link-&gt;d_Pack            = Pack&lt;Type, 1, 1&gt;;
+<a name="line908">908: </a>  link-&gt;d_UnpackAndInsert = UnpackAndOp&lt;Type, Insert&lt;Type&gt;, 1, 1&gt;;
+<a name="line909">909: </a>  link-&gt;d_UnpackAndMaxloc = UnpackAndOp&lt;Type, Maxloc&lt;Type&gt;, 1, 1&gt;;
+<a name="line910">910: </a>  link-&gt;d_UnpackAndMinloc = UnpackAndOp&lt;Type, Minloc&lt;Type&gt;, 1, 1&gt;;
+
+<a name="line912">912: </a>  link-&gt;d_ScatterAndInsert = ScatterAndOp&lt;Type, Insert&lt;Type&gt;, 1, 1&gt;;
+<a name="line913">913: </a>  link-&gt;d_ScatterAndMaxloc = ScatterAndOp&lt;Type, Maxloc&lt;Type&gt;, 1, 1&gt;;
+<a name="line914">914: </a>  link-&gt;d_ScatterAndMinloc = ScatterAndOp&lt;Type, Minloc&lt;Type&gt;, 1, 1&gt;;
+<a name="line915">915: </a>  <font color="#B22222">/* Atomics for pair types are not implemented yet */</font>
+<a name="line916">916: </a>}
+
+<a name="line918">918: </a>template &lt;typename Type, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> BS, <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> EQ&gt;
+<a name="line919">919: </a><strong><font color="#4169E1"><a name="PackInit_DumbType"></a>static void PackInit_DumbType(PetscSFLink link)</font></strong>
+<a name="line920">920: </a>{
+<a name="line921">921: </a>  link-&gt;d_Pack             = Pack&lt;Type, BS, EQ&gt;;
+<a name="line922">922: </a>  link-&gt;d_UnpackAndInsert  = UnpackAndOp&lt;Type, Insert&lt;Type&gt;, BS, EQ&gt;;
+<a name="line923">923: </a>  link-&gt;d_ScatterAndInsert = ScatterAndInsert&lt;Type, BS, EQ&gt;;
+<a name="line924">924: </a>  <font color="#B22222">/* Atomics for dumb types are not implemented yet */</font>
+<a name="line925">925: </a>}
+
+<a name="line927">927: </a><font color="#B22222">/* Some device-specific utilities */</font>
+<a name="line928">928: </a><strong><font color="#4169E1"><a name="PetscSFLinkSyncDevice_HIP"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFLinkSyncDevice_HIP(PetscSFLink link)</font></strong>
+<a name="line929">929: </a>{
+<a name="line930">930: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line931">931: </a>  PetscCallHIP(hipDeviceSynchronize());
+<a name="line932">932: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line933">933: </a>}
+
+<a name="line935">935: </a><strong><font color="#4169E1"><a name="PetscSFLinkSyncStream_HIP"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFLinkSyncStream_HIP(PetscSFLink link)</font></strong>
+<a name="line936">936: </a>{
+<a name="line937">937: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line938">938: </a>  PetscCallHIP(hipStreamSynchronize(link-&gt;stream));
+<a name="line939">939: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line940">940: </a>}
+
+<a name="line942">942: </a><strong><font color="#4169E1"><a name="PetscSFLinkMemcpy_HIP"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFLinkMemcpy_HIP(PetscSFLink link, <a href="../../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> dstmtype, void *dst, <a href="../../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> srcmtype, const void *src, size_t n)</font></strong>
+<a name="line943">943: </a>{
+<a name="line944">944: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line945">945: </a>  <font color="#4169E1">enum</font> hipMemcpyKind kinds[2][2] = {
+<a name="line946">946: </a>    {hipMemcpyHostToHost,   hipMemcpyHostToDevice  },
+<a name="line947">947: </a>    {hipMemcpyDeviceToHost, hipMemcpyDeviceToDevice}
+<a name="line948">948: </a>  };
+
+<a name="line950">950: </a>  <font color="#4169E1">if</font> (n) {
+<a name="line951">951: </a>    <font color="#4169E1">if</font> (PetscMemTypeHost(dstmtype) &amp;&amp; PetscMemTypeHost(srcmtype)) { <font color="#B22222">/* Separate HostToHost so that pure-cpu code won't call hip runtime */</font>
+<a name="line952">952: </a>      <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../../manualpages/Sys/PetscMemcpy.html">PetscMemcpy</a>(dst, src, n));
+<a name="line953">953: </a>    } <font color="#4169E1">else</font> {
+<a name="line954">954: </a>      int stype = PetscMemTypeDevice(srcmtype) ? 1 : 0;
+<a name="line955">955: </a>      int dtype = PetscMemTypeDevice(dstmtype) ? 1 : 0;
+<a name="line956">956: </a>      PetscCallHIP(hipMemcpyAsync(dst, src, n, kinds[stype][dtype], link-&gt;stream));
+<a name="line957">957: </a>    }
+<a name="line958">958: </a>  }
+<a name="line959">959: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line960">960: </a>}
+
+<a name="line962">962: </a><strong><font color="#4169E1"><a name="PetscSFMalloc_HIP"></a><a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFMalloc_HIP(<a href="../../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> mtype, size_t size, void **ptr)</font></strong>
+<a name="line963">963: </a>{
+<a name="line964">964: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line965">965: </a>  <font color="#4169E1">if</font> (PetscMemTypeHost(mtype)) <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../../manualpages/Sys/PetscMalloc.html">PetscMalloc</a>(size, ptr));
+<a name="line966">966: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (PetscMemTypeDevice(mtype)) {
+<a name="line967">967: </a>    <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../../manualpages/Sys/PetscDeviceInitialize.html">PetscDeviceInitialize</a>(<a href="../../../../../../../manualpages/Sys/PetscDeviceType.html">PETSC_DEVICE_HIP</a>));
+<a name="line968">968: </a>    PetscCallHIP(hipMalloc(ptr, size));
+<a name="line969">969: </a>  } <font color="#4169E1">else</font> <a href="../../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Wrong <a href="../../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> %d"</font>, (int)mtype);
+<a name="line970">970: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line971">971: </a>}
+
+<a name="line973">973: </a><strong><font color="#4169E1"><a name="PetscSFFree_HIP"></a><a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFFree_HIP(<a href="../../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> mtype, void *ptr)</font></strong>
+<a name="line974">974: </a>{
+<a name="line975">975: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line976">976: </a>  <font color="#4169E1">if</font> (PetscMemTypeHost(mtype)) <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(ptr));
+<a name="line977">977: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (PetscMemTypeDevice(mtype)) PetscCallHIP(hipFree(ptr));
+<a name="line978">978: </a>  <font color="#4169E1">else</font> <a href="../../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Wrong <a href="../../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> %d"</font>, (int)mtype);
+<a name="line979">979: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line980">980: </a>}
+
+<a name="line982">982: </a><font color="#B22222">/* Destructor when the link uses MPI for communication on HIP device */</font>
+<a name="line983">983: </a><strong><font color="#4169E1"><a name="PetscSFLinkDestroy_MPI_HIP"></a>static <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFLinkDestroy_MPI_HIP(<a href="../../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, PetscSFLink link)</font></strong>
+<a name="line984">984: </a>{
+<a name="line985">985: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line986">986: </a>  <font color="#4169E1">for</font> (int i = PETSCSF_LOCAL; i &lt;= PETSCSF_REMOTE; i++) {
+<a name="line987">987: </a>    PetscCallHIP(hipFree(link-&gt;rootbuf_alloc[i][<a href="../../../../../../../manualpages/Sys/PetscMemType.html">PETSC_MEMTYPE_DEVICE</a>]));
+<a name="line988">988: </a>    PetscCallHIP(hipFree(link-&gt;leafbuf_alloc[i][<a href="../../../../../../../manualpages/Sys/PetscMemType.html">PETSC_MEMTYPE_DEVICE</a>]));
+<a name="line989">989: </a>  }
+<a name="line990">990: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line991">991: </a>}
+
+<a name="line993">993: </a><font color="#B22222">/*====================================================================================*/</font>
+<a name="line994">994: </a><font color="#B22222">/*                Main driver to init MPI datatype on device                          */</font>
+<a name="line995">995: </a><font color="#B22222">/*====================================================================================*/</font>
+
+<a name="line997">997: </a><font color="#B22222">/* Some fields of link are initialized by PetscSFPackSetUp_Host. This routine only does what needed on device */</font>
+<a name="line998">998: </a><strong><font color="#4169E1"><a name="PetscSFLinkSetUp_HIP"></a><a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFLinkSetUp_HIP(<a href="../../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, PetscSFLink link, MPI_Datatype unit)</font></strong>
+<a name="line999">999: </a>{
+<a name="line1000">1000: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  nSignedChar = 0, nUnsignedChar = 0, nInt = 0, nPetscInt = 0, nPetscReal = 0;
+<a name="line1001">1001: </a>  <a href="../../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> is2Int, is2PetscInt;
+<a name="line1002">1002: </a><font color="#A020F0">#if defined(PETSC_HAVE_COMPLEX)</font>
+<a name="line1003">1003: </a>  <a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nPetscComplex = 0;
+<a name="line1004">1004: </a><font color="#A020F0">#endif</font>
+
+<a name="line1006">1006: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1007">1007: </a>  <font color="#4169E1">if</font> (link-&gt;deviceinited) <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1008">1008: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare_contig(unit, MPI_SIGNED_CHAR, &amp;nSignedChar));
+<a name="line1009">1009: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare_contig(unit, MPI_UNSIGNED_CHAR, &amp;nUnsignedChar));
+<a name="line1010">1010: </a>  <font color="#B22222">/* MPI_CHAR is treated below as a dumb type that does not support reduction according to MPI standard */</font>
+<a name="line1011">1011: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare_contig(unit, MPI_INT, &amp;nInt));
+<a name="line1012">1012: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare_contig(unit, <a href="../../../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, &amp;nPetscInt));
+<a name="line1013">1013: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare_contig(unit, <a href="../../../../../../../manualpages/Sys/MPIU_REAL.html">MPIU_REAL</a>, &amp;nPetscReal));
+<a name="line1014">1014: </a><font color="#A020F0">#if defined(PETSC_HAVE_COMPLEX)</font>
+<a name="line1015">1015: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare_contig(unit, <a href="../../../../../../../manualpages/Sys/MPIU_COMPLEX.html">MPIU_COMPLEX</a>, &amp;nPetscComplex));
+<a name="line1016">1016: </a><font color="#A020F0">#endif</font>
+<a name="line1017">1017: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare(unit, MPI_2INT, &amp;is2Int));
+<a name="line1018">1018: </a>  <a href="../../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare(unit, MPIU_2INT, &amp;is2PetscInt));
+
+<a name="line1020">1020: </a>  <font color="#4169E1">if</font> (is2Int) {
+<a name="line1021">1021: </a>    PackInit_PairType&lt;PairInt&gt;(link);
+<a name="line1022">1022: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (is2PetscInt) { <font color="#B22222">/* TODO: when is2PetscInt and nPetscInt=2, we don't know which path to take. The two paths support different ops. */</font>
+<a name="line1023">1023: </a>    PackInit_PairType&lt;PairPetscInt&gt;(link);
+<a name="line1024">1024: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal) {
+<a name="line1025">1025: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1026">1026: </a>    <font color="#4169E1">if</font> (nPetscReal == 8) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 8, 1&gt;(link);
+<a name="line1027">1027: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal % 8 == 0) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 8, 0&gt;(link);
+<a name="line1028">1028: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal == 4) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 4, 1&gt;(link);
+<a name="line1029">1029: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal % 4 == 0) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 4, 0&gt;(link);
+<a name="line1030">1030: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal == 2) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 2, 1&gt;(link);
+<a name="line1031">1031: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal % 2 == 0) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 2, 0&gt;(link);
+<a name="line1032">1032: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal == 1) PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 1, 1&gt;(link);
+<a name="line1033">1033: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscReal % 1 == 0)
+<a name="line1034">1034: </a><font color="#A020F0">#endif</font>
+<a name="line1035">1035: </a>      PackInit_RealType&lt;<a href="../../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, 1, 0&gt;(link);
+<a name="line1036">1036: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt &amp;&amp; <font color="#4169E1">sizeof</font>(<a href="../../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>) == <font color="#4169E1">sizeof</font>(llint)) {
+<a name="line1037">1037: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1038">1038: </a>    <font color="#4169E1">if</font> (nPetscInt == 8) PackInit_IntegerType&lt;llint, 8, 1&gt;(link);
+<a name="line1039">1039: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt % 8 == 0) PackInit_IntegerType&lt;llint, 8, 0&gt;(link);
+<a name="line1040">1040: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt == 4) PackInit_IntegerType&lt;llint, 4, 1&gt;(link);
+<a name="line1041">1041: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt % 4 == 0) PackInit_IntegerType&lt;llint, 4, 0&gt;(link);
+<a name="line1042">1042: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt == 2) PackInit_IntegerType&lt;llint, 2, 1&gt;(link);
+<a name="line1043">1043: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt % 2 == 0) PackInit_IntegerType&lt;llint, 2, 0&gt;(link);
+<a name="line1044">1044: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt == 1) PackInit_IntegerType&lt;llint, 1, 1&gt;(link);
+<a name="line1045">1045: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscInt % 1 == 0)
+<a name="line1046">1046: </a><font color="#A020F0">#endif</font>
+<a name="line1047">1047: </a>      PackInit_IntegerType&lt;llint, 1, 0&gt;(link);
+<a name="line1048">1048: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt) {
+<a name="line1049">1049: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1050">1050: </a>    <font color="#4169E1">if</font> (nInt == 8) PackInit_IntegerType&lt;int, 8, 1&gt;(link);
+<a name="line1051">1051: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 8 == 0) PackInit_IntegerType&lt;int, 8, 0&gt;(link);
+<a name="line1052">1052: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt == 4) PackInit_IntegerType&lt;int, 4, 1&gt;(link);
+<a name="line1053">1053: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 4 == 0) PackInit_IntegerType&lt;int, 4, 0&gt;(link);
+<a name="line1054">1054: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt == 2) PackInit_IntegerType&lt;int, 2, 1&gt;(link);
+<a name="line1055">1055: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 2 == 0) PackInit_IntegerType&lt;int, 2, 0&gt;(link);
+<a name="line1056">1056: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt == 1) PackInit_IntegerType&lt;int, 1, 1&gt;(link);
+<a name="line1057">1057: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 1 == 0)
+<a name="line1058">1058: </a><font color="#A020F0">#endif</font>
+<a name="line1059">1059: </a>      PackInit_IntegerType&lt;int, 1, 0&gt;(link);
+<a name="line1060">1060: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar) {
+<a name="line1061">1061: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1062">1062: </a>    <font color="#4169E1">if</font> (nSignedChar == 8) PackInit_IntegerType&lt;SignedChar, 8, 1&gt;(link);
+<a name="line1063">1063: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar % 8 == 0) PackInit_IntegerType&lt;SignedChar, 8, 0&gt;(link);
+<a name="line1064">1064: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar == 4) PackInit_IntegerType&lt;SignedChar, 4, 1&gt;(link);
+<a name="line1065">1065: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar % 4 == 0) PackInit_IntegerType&lt;SignedChar, 4, 0&gt;(link);
+<a name="line1066">1066: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar == 2) PackInit_IntegerType&lt;SignedChar, 2, 1&gt;(link);
+<a name="line1067">1067: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar % 2 == 0) PackInit_IntegerType&lt;SignedChar, 2, 0&gt;(link);
+<a name="line1068">1068: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar == 1) PackInit_IntegerType&lt;SignedChar, 1, 1&gt;(link);
+<a name="line1069">1069: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nSignedChar % 1 == 0)
+<a name="line1070">1070: </a><font color="#A020F0">#endif</font>
+<a name="line1071">1071: </a>      PackInit_IntegerType&lt;SignedChar, 1, 0&gt;(link);
+<a name="line1072">1072: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar) {
+<a name="line1073">1073: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1074">1074: </a>    <font color="#4169E1">if</font> (nUnsignedChar == 8) PackInit_IntegerType&lt;UnsignedChar, 8, 1&gt;(link);
+<a name="line1075">1075: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar % 8 == 0) PackInit_IntegerType&lt;UnsignedChar, 8, 0&gt;(link);
+<a name="line1076">1076: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar == 4) PackInit_IntegerType&lt;UnsignedChar, 4, 1&gt;(link);
+<a name="line1077">1077: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar % 4 == 0) PackInit_IntegerType&lt;UnsignedChar, 4, 0&gt;(link);
+<a name="line1078">1078: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar == 2) PackInit_IntegerType&lt;UnsignedChar, 2, 1&gt;(link);
+<a name="line1079">1079: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar % 2 == 0) PackInit_IntegerType&lt;UnsignedChar, 2, 0&gt;(link);
+<a name="line1080">1080: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar == 1) PackInit_IntegerType&lt;UnsignedChar, 1, 1&gt;(link);
+<a name="line1081">1081: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nUnsignedChar % 1 == 0)
+<a name="line1082">1082: </a><font color="#A020F0">#endif</font>
+<a name="line1083">1083: </a>      PackInit_IntegerType&lt;UnsignedChar, 1, 0&gt;(link);
+<a name="line1084">1084: </a><font color="#A020F0">#if defined(PETSC_HAVE_COMPLEX)</font>
+<a name="line1085">1085: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex) {
+<a name="line1086">1086: </a><font color="#A020F0">  #if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1087">1087: </a>    <font color="#4169E1">if</font> (nPetscComplex == 8) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 8, 1&gt;(link);
+<a name="line1088">1088: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex % 8 == 0) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 8, 0&gt;(link);
+<a name="line1089">1089: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex == 4) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 4, 1&gt;(link);
+<a name="line1090">1090: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex % 4 == 0) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 4, 0&gt;(link);
+<a name="line1091">1091: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex == 2) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 2, 1&gt;(link);
+<a name="line1092">1092: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex % 2 == 0) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 2, 0&gt;(link);
+<a name="line1093">1093: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex == 1) PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 1, 1&gt;(link);
+<a name="line1094">1094: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nPetscComplex % 1 == 0)
+<a name="line1095">1095: </a><font color="#A020F0">  #endif</font>
+<a name="line1096">1096: </a>      PackInit_ComplexType&lt;<a href="../../../../../../../manualpages/Sys/PetscComplex.html">PetscComplex</a>, 1, 0&gt;(link);
+<a name="line1097">1097: </a><font color="#A020F0">#endif</font>
+<a name="line1098">1098: </a>  } <font color="#4169E1">else</font> {
+<a name="line1099">1099: </a>    MPI_Aint lb, nbyte;
+<a name="line1100">1100: </a>    <a href="../../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_get_extent.html#MPI_Type_get_extent">MPI_Type_get_extent</a>(unit, &amp;lb, &amp;nbyte));
+<a name="line1101">1101: </a>    <a href="../../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(lb == 0, <a href="../../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Datatype with nonzero lower bound %ld"</font>, (long)lb);
+<a name="line1102">1102: </a>    <font color="#4169E1">if</font> (nbyte % <font color="#4169E1">sizeof</font>(int)) { <font color="#B22222">/* If the type size is not multiple of int */</font>
+<a name="line1103">1103: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1104">1104: </a>      <font color="#4169E1">if</font> (nbyte == 4) PackInit_DumbType&lt;char, 4, 1&gt;(link);
+<a name="line1105">1105: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nbyte % 4 == 0) PackInit_DumbType&lt;char, 4, 0&gt;(link);
+<a name="line1106">1106: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nbyte == 2) PackInit_DumbType&lt;char, 2, 1&gt;(link);
+<a name="line1107">1107: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nbyte % 2 == 0) PackInit_DumbType&lt;char, 2, 0&gt;(link);
+<a name="line1108">1108: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nbyte == 1) PackInit_DumbType&lt;char, 1, 1&gt;(link);
+<a name="line1109">1109: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nbyte % 1 == 0)
+<a name="line1110">1110: </a><font color="#A020F0">#endif</font>
+<a name="line1111">1111: </a>        PackInit_DumbType&lt;char, 1, 0&gt;(link);
+<a name="line1112">1112: </a>    } <font color="#4169E1">else</font> {
+<a name="line1113">1113: </a>      nInt = nbyte / <font color="#4169E1">sizeof</font>(int);
+<a name="line1114">1114: </a><font color="#A020F0">#if !defined(PETSC_HAVE_DEVICE)</font>
+<a name="line1115">1115: </a>      <font color="#4169E1">if</font> (nInt == 8) PackInit_DumbType&lt;int, 8, 1&gt;(link);
+<a name="line1116">1116: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 8 == 0) PackInit_DumbType&lt;int, 8, 0&gt;(link);
+<a name="line1117">1117: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt == 4) PackInit_DumbType&lt;int, 4, 1&gt;(link);
+<a name="line1118">1118: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 4 == 0) PackInit_DumbType&lt;int, 4, 0&gt;(link);
+<a name="line1119">1119: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt == 2) PackInit_DumbType&lt;int, 2, 1&gt;(link);
+<a name="line1120">1120: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 2 == 0) PackInit_DumbType&lt;int, 2, 0&gt;(link);
+<a name="line1121">1121: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt == 1) PackInit_DumbType&lt;int, 1, 1&gt;(link);
+<a name="line1122">1122: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (nInt % 1 == 0)
+<a name="line1123">1123: </a><font color="#A020F0">#endif</font>
+<a name="line1124">1124: </a>        PackInit_DumbType&lt;int, 1, 0&gt;(link);
+<a name="line1125">1125: </a>    }
+<a name="line1126">1126: </a>  }
+
+<a name="line1128">1128: </a>  <font color="#4169E1">if</font> (!sf-&gt;maxResidentThreadsPerGPU) { <font color="#B22222">/* Not initialized */</font>
+<a name="line1129">1129: </a>    int                    device;
+<a name="line1130">1130: </a>    <font color="#4169E1">struct hipDeviceProp_t</font> props;
+<a name="line1131">1131: </a>    PetscCallHIP(hipGetDevice(&amp;device));
+<a name="line1132">1132: </a>    PetscCallHIP(hipGetDeviceProperties(&amp;props, device));
+<a name="line1133">1133: </a>    sf-&gt;maxResidentThreadsPerGPU = props.maxThreadsPerMultiProcessor * props.multiProcessorCount;
+<a name="line1134">1134: </a>  }
+<a name="line1135">1135: </a>  link-&gt;maxResidentThreadsPerGPU = sf-&gt;maxResidentThreadsPerGPU;
+
+<a name="line1137">1137: </a>  link-&gt;stream       = PetscDefaultHipStream;
+<a name="line1138">1138: </a>  link-&gt;Destroy      = PetscSFLinkDestroy_MPI_HIP;
+<a name="line1139">1139: </a>  link-&gt;SyncDevice   = PetscSFLinkSyncDevice_HIP;
+<a name="line1140">1140: </a>  link-&gt;SyncStream   = PetscSFLinkSyncStream_HIP;
+<a name="line1141">1141: </a>  link-&gt;Memcpy       = PetscSFLinkMemcpy_HIP;
+<a name="line1142">1142: </a>  link-&gt;deviceinited = <a href="../../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line1143">1143: </a>  <a href="../../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1144">1144: </a>}
+</pre>
+</body>
+
+</html>

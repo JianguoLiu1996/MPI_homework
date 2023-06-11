@@ -1,0 +1,1010 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/vec/is/sf/impls/window/sfwindow.c">Actual source code: sfwindow.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:24+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../../include/petsc/private/sfimpl.h.html">&lt;petsc/private/sfimpl.h&gt;</A>
+
+<a name="line3">  3: </a><font color="#4169E1">typedef struct _n_PetscSFDataLink *PetscSFDataLink;</font>
+<a name="line4">  4: </a><font color="#4169E1">typedef struct _n_PetscSFWinLink  *PetscSFWinLink;</font>
+
+<a name="line6">  6: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line7">  7: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>   sync;   <font color="#B22222">/* FENCE, LOCK, or ACTIVE synchronization */</font>
+<a name="line8">  8: </a>  PetscSFDataLink         link;   <font color="#B22222">/* List of MPI data types, lazily constructed for each data type */</font>
+<a name="line9">  9: </a>  PetscSFWinLink          wins;   <font color="#B22222">/* List of active windows */</font>
+<a name="line10"> 10: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> flavor; <font color="#B22222">/* Current PETSCSF_WINDOW_FLAVOR_ */</font>
+<a name="line11"> 11: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>                 dynsf;
+<a name="line12"> 12: </a>  MPI_Info                info;
+<a name="line13"> 13: </a>} PetscSF_Window;
+
+<a name="line15"> 15: </a><font color="#4169E1"><a name="_n_PetscSFDataLink"></a>struct _n_PetscSFDataLink </font>{
+<a name="line16"> 16: </a>  MPI_Datatype    unit;
+<a name="line17"> 17: </a>  MPI_Datatype   *mine;
+<a name="line18"> 18: </a>  MPI_Datatype   *remote;
+<a name="line19"> 19: </a>  PetscSFDataLink next;
+<a name="line20"> 20: </a>};
+
+<a name="line22"> 22: </a><font color="#4169E1"><a name="_n_PetscSFWinLink"></a>struct _n_PetscSFWinLink </font>{
+<a name="line23"> 23: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>               inuse;
+<a name="line24"> 24: </a>  size_t                  bytes;
+<a name="line25"> 25: </a>  void                   *addr;
+<a name="line26"> 26: </a>  void                   *paddr;
+<a name="line27"> 27: </a>  MPI_Win                 win;
+<a name="line28"> 28: </a>  MPI_Request            *reqs;
+<a name="line29"> 29: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> flavor;
+<a name="line30"> 30: </a>  MPI_Aint               *dyn_target_addr;
+<a name="line31"> 31: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>               epoch;
+<a name="line32"> 32: </a>  PetscSFWinLink          next;
+<a name="line33"> 33: </a>};
+
+<a name="line35"> 35: </a>const char *const PetscSFWindowSyncTypes[]   = {<font color="#666666">"FENCE"</font>, <font color="#666666">"LOCK"</font>, <font color="#666666">"ACTIVE"</font>, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>"</font>, <font color="#666666">"PETSCSF_WINDOW_SYNC_"</font>, NULL};
+<a name="line36"> 36: </a>const char *const PetscSFWindowFlavorTypes[] = {<font color="#666666">"CREATE"</font>, <font color="#666666">"DYNAMIC"</font>, <font color="#666666">"ALLOCATE"</font>, <font color="#666666">"SHARED"</font>, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a>"</font>, <font color="#666666">"PETSCSF_WINDOW_FLAVOR_"</font>, NULL};
+
+<a name="line38"> 38: </a><font color="#B22222">/* Built-in MPI_Ops act elementwise inside <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Accumulate.html#MPI_Accumulate">MPI_Accumulate</a>, but cannot be used with composite types inside collectives (<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</a>) */</font>
+<a name="line39"> 39: </a><strong><font color="#4169E1"><a name="PetscSFWindowOpTranslate"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowOpTranslate(MPI_Op *op)</font></strong>
+<a name="line40"> 40: </a>{
+<a name="line41"> 41: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line42"> 42: </a>  <font color="#4169E1">if</font> (*op == MPIU_SUM) *op = MPI_SUM;
+<a name="line43"> 43: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (*op == MPIU_MAX) *op = MPI_MAX;
+<a name="line44"> 44: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (*op == MPIU_MIN) *op = MPI_MIN;
+<a name="line45"> 45: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line46"> 46: </a>}
+
+<a name="line48"> 48: </a><font color="#B22222">/*@C</font>
+<a name="line49"> 49: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetDataTypes.html">PetscSFWindowGetDataTypes</a> - gets composite local and remote data types for each rank</font>
+
+<a name="line51"> 51: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line53"> 53: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line54"> 54: </a><font color="#B22222">+  sf - star forest of type `PETSCSFWINDOW`</font>
+<a name="line55"> 55: </a><font color="#B22222">-  unit - data type for each node</font>
+
+<a name="line57"> 57: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line58"> 58: </a><font color="#B22222">+  localtypes - types describing part of local leaf buffer referencing each remote rank</font>
+<a name="line59"> 59: </a><font color="#B22222">-  remotetypes - types describing part of remote root buffer referenced for each remote rank</font>
+
+<a name="line61"> 61: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line63"> 63: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetGraph.html">PetscSFSetGraph</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFView.html">PetscSFView</a>()`</font>
+<a name="line64"> 64: </a><font color="#B22222">@*/</font>
+<a name="line65"> 65: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetDataTypes"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetDataTypes.html">PetscSFWindowGetDataTypes</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, const MPI_Datatype **localtypes, const MPI_Datatype **remotetypes)</font></strong>
+<a name="line66"> 66: </a>{
+<a name="line67"> 67: </a>  PetscSF_Window    *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line68"> 68: </a>  PetscSFDataLink    link;
+<a name="line69"> 69: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i, nranks;
+<a name="line70"> 70: </a>  const <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    *roffset, *rmine, *rremote;
+<a name="line71"> 71: </a>  const <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *ranks;
+
+<a name="line73"> 73: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line74"> 74: </a>  <font color="#B22222">/* Look for types in cache */</font>
+<a name="line75"> 75: </a>  <font color="#4169E1">for</font> (link = w-&gt;link; link; link = link-&gt;next) {
+<a name="line76"> 76: </a>    <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> match;
+<a name="line77"> 77: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Type_compare(unit, link-&gt;unit, &amp;match));
+<a name="line78"> 78: </a>    <font color="#4169E1">if</font> (match) {
+<a name="line79"> 79: </a>      *localtypes  = link-&gt;mine;
+<a name="line80"> 80: </a>      *remotetypes = link-&gt;remote;
+<a name="line81"> 81: </a>      <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line82"> 82: </a>    }
+<a name="line83"> 83: </a>  }
+
+<a name="line85"> 85: </a>  <font color="#B22222">/* Create new composite types for each send rank */</font>
+<a name="line86"> 86: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>(sf, &amp;nranks, &amp;ranks, &amp;roffset, &amp;rmine, &amp;rremote));
+<a name="line87"> 87: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;link));
+<a name="line88"> 88: </a>  <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_dup.html#MPI_Type_dup">MPI_Type_dup</a>(unit, &amp;link-&gt;unit));
+<a name="line89"> 89: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc2.html">PetscMalloc2</a>(nranks, &amp;link-&gt;mine, nranks, &amp;link-&gt;remote));
+<a name="line90"> 90: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nranks; i++) {
+<a name="line91"> 91: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     rcount = roffset[i + 1] - roffset[i];
+<a name="line92"> 92: </a>    <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *rmine, *rremote;
+<a name="line93"> 93: </a><font color="#A020F0">#if !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line94"> 94: </a>    rmine   = sf-&gt;rmine + sf-&gt;roffset[i];
+<a name="line95"> 95: </a>    rremote = sf-&gt;rremote + sf-&gt;roffset[i];
+<a name="line96"> 96: </a><font color="#A020F0">#else</font>
+<a name="line97"> 97: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> j;
+<a name="line98"> 98: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc2.html">PetscMalloc2</a>(rcount, &amp;rmine, rcount, &amp;rremote));
+<a name="line99"> 99: </a>    <font color="#4169E1">for</font> (j = 0; j &lt; rcount; j++) {
+<a name="line100">100: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMPIIntCast.html">PetscMPIIntCast</a>(sf-&gt;rmine[sf-&gt;roffset[i] + j], rmine + j));
+<a name="line101">101: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMPIIntCast.html">PetscMPIIntCast</a>(sf-&gt;rremote[sf-&gt;roffset[i] + j], rremote + j));
+<a name="line102">102: </a>    }
+<a name="line103">103: </a><font color="#A020F0">#endif</font>
+
+<a name="line105">105: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_create_indexed_block.html#MPI_Type_create_indexed_block">MPI_Type_create_indexed_block</a>(rcount, 1, rmine, link-&gt;unit, &amp;link-&gt;mine[i]));
+<a name="line106">106: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_create_indexed_block.html#MPI_Type_create_indexed_block">MPI_Type_create_indexed_block</a>(rcount, 1, rremote, link-&gt;unit, &amp;link-&gt;remote[i]));
+<a name="line107">107: </a><font color="#A020F0">#if defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line108">108: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree2.html">PetscFree2</a>(rmine, rremote));
+<a name="line109">109: </a><font color="#A020F0">#endif</font>
+<a name="line110">110: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_commit.html#MPI_Type_commit">MPI_Type_commit</a>(&amp;link-&gt;mine[i]));
+<a name="line111">111: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_commit.html#MPI_Type_commit">MPI_Type_commit</a>(&amp;link-&gt;remote[i]));
+<a name="line112">112: </a>  }
+<a name="line113">113: </a>  link-&gt;next = w-&gt;link;
+<a name="line114">114: </a>  w-&gt;link    = link;
+
+<a name="line116">116: </a>  *localtypes  = link-&gt;mine;
+<a name="line117">117: </a>  *remotetypes = link-&gt;remote;
+<a name="line118">118: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line119">119: </a>}
+
+<a name="line121">121: </a><font color="#B22222">/*@C</font>
+<a name="line122">122: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a> - Set flavor type for `MPI_Win` creation</font>
+
+<a name="line124">124: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line126">126: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line127">127: </a><font color="#B22222">+  sf - star forest for communication of type `PETSCSFWINDOW`</font>
+<a name="line128">128: </a><font color="#B22222">-  flavor - flavor type</font>
+
+<a name="line130">130: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line131">131: </a><font color="#B22222">.  -sf_window_flavor &lt;flavor&gt; - sets the flavor type CREATE, DYNAMIC, ALLOCATE or SHARED (see `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a>`)</font>
+
+<a name="line133">133: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line135">135: </a><font color="#B22222">   Notes:</font>
+<a name="line136">136: </a><font color="#B22222">   Windows reuse follows these rules:</font>
+<a name="line137">137: </a><font color="#B22222">.vb</font>
+<a name="line138">138: </a><font color="#B22222">     <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>: creates a new window every time, uses <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_create.html#MPI_Win_create">MPI_Win_create</a></font>
+
+<a name="line140">140: </a><font color="#B22222">     <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_DYNAMIC</a>: uses <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_create_dynamic.html#MPI_Win_create_dynamic">MPI_Win_create_dynamic</a>/<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_attach.html#MPI_Win_attach">MPI_Win_attach</a> and tries to reuse windows by comparing the root array. Intended to be used on repeated applications of the same SF, e.g.</font>
+<a name="line141">141: </a><font color="#B22222">       for i=1 to K</font>
+<a name="line142">142: </a><font color="#B22222">         PetscSFOperationBegin(rootdata1,leafdata_whatever);</font>
+<a name="line143">143: </a><font color="#B22222">         PetscSFOperationEnd(rootdata1,leafdata_whatever);</font>
+<a name="line144">144: </a><font color="#B22222">         ...</font>
+<a name="line145">145: </a><font color="#B22222">         PetscSFOperationBegin(rootdataN,leafdata_whatever);</font>
+<a name="line146">146: </a><font color="#B22222">         PetscSFOperationEnd(rootdataN,leafdata_whatever);</font>
+<a name="line147">147: </a><font color="#B22222">       endfor</font>
+<a name="line148">148: </a><font color="#B22222">       The following pattern will instead raise an error</font>
+<a name="line149">149: </a><font color="#B22222">         PetscSFOperationBegin(rootdata1,leafdata_whatever);</font>
+<a name="line150">150: </a><font color="#B22222">         PetscSFOperationEnd(rootdata1,leafdata_whatever);</font>
+<a name="line151">151: </a><font color="#B22222">         PetscSFOperationBegin(rank ? rootdata1 : rootdata2,leafdata_whatever);</font>
+<a name="line152">152: </a><font color="#B22222">         PetscSFOperationEnd(rank ? rootdata1 : rootdata2,leafdata_whatever);</font>
+
+<a name="line154">154: </a><font color="#B22222">     <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_ALLOCATE</a>: uses <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_allocate.html#MPI_Win_allocate">MPI_Win_allocate</a>, reuses any pre-existing window which fits the data and it is not in use</font>
+
+<a name="line156">156: </a><font color="#B22222">     <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_SHARED</a>: uses <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_allocate_shared.html#MPI_Win_allocate_shared">MPI_Win_allocate_shared</a>, reusage policy as for <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_ALLOCATE</a></font>
+<a name="line157">157: </a><font color="#B22222">.ve</font>
+
+<a name="line159">159: </a><font color="#B22222">.seealso:  `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetFromOptions.html">PetscSFSetFromOptions</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetFlavorType.html">PetscSFWindowGetFlavorType</a>()`</font>
+<a name="line160">160: </a><font color="#B22222">@*/</font>
+<a name="line161">161: </a><strong><font color="#4169E1"><a name="PetscSFWindowSetFlavorType"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> flavor)</font></strong>
+<a name="line162">162: </a>{
+<a name="line163">163: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line166">166: </a>  <a href="../../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(sf, <font color="#666666">"PetscSFWindowSetFlavorType_C"</font>, (<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a>), (sf, flavor));
+<a name="line167">167: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line168">168: </a>}
+
+<a name="line170">170: </a><strong><font color="#4169E1"><a name="PetscSFWindowSetFlavorType_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowSetFlavorType_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> flavor)</font></strong>
+<a name="line171">171: </a>{
+<a name="line172">172: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line174">174: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line175">175: </a>  w-&gt;flavor = flavor;
+<a name="line176">176: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line177">177: </a>}
+
+<a name="line179">179: </a><font color="#B22222">/*@C</font>
+<a name="line180">180: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetFlavorType.html">PetscSFWindowGetFlavorType</a> - Get  `PETSCSFWINDOW` flavor type for `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>` communication</font>
+
+<a name="line182">182: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line184">184: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line185">185: </a><font color="#B22222">.  sf - star forest for communication of type `PETSCSFWINDOW`</font>
+
+<a name="line187">187: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line188">188: </a><font color="#B22222">.  flavor - flavor type</font>
+
+<a name="line190">190: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line192">192: </a><font color="#B22222">.seealso:  `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetFromOptions.html">PetscSFSetFromOptions</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a>()`</font>
+<a name="line193">193: </a><font color="#B22222">@*/</font>
+<a name="line194">194: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetFlavorType"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetFlavorType.html">PetscSFWindowGetFlavorType</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> *flavor)</font></strong>
+<a name="line195">195: </a>{
+<a name="line196">196: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line199">199: </a>  <a href="../../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(sf, <font color="#666666">"PetscSFWindowGetFlavorType_C"</font>, (<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> *), (sf, flavor));
+<a name="line200">200: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line201">201: </a>}
+
+<a name="line203">203: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetFlavorType_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowGetFlavorType_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> *flavor)</font></strong>
+<a name="line204">204: </a>{
+<a name="line205">205: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line207">207: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line208">208: </a>  *flavor = w-&gt;flavor;
+<a name="line209">209: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line210">210: </a>}
+
+<a name="line212">212: </a><font color="#B22222">/*@C</font>
+<a name="line213">213: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetSyncType.html">PetscSFWindowSetSyncType</a> - Set synchronization type for `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>` communication of type  `PETSCSFWINDOW`</font>
+
+<a name="line215">215: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line217">217: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line218">218: </a><font color="#B22222">+  sf - star forest for communication</font>
+<a name="line219">219: </a><font color="#B22222">-  sync - synchronization type</font>
+
+<a name="line221">221: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line222">222: </a><font color="#B22222">.  -sf_window_sync &lt;sync&gt; - sets the synchronization type FENCE, LOCK, or ACTIVE (see `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>`)</font>
+
+<a name="line224">224: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line226">226: </a><font color="#B22222">.seealso:  `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetFromOptions.html">PetscSFSetFromOptions</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetSyncType.html">PetscSFWindowGetSyncType</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>`</font>
+<a name="line227">227: </a><font color="#B22222">@*/</font>
+<a name="line228">228: </a><strong><font color="#4169E1"><a name="PetscSFWindowSetSyncType"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetSyncType.html">PetscSFWindowSetSyncType</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> sync)</font></strong>
+<a name="line229">229: </a>{
+<a name="line230">230: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line233">233: </a>  <a href="../../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(sf, <font color="#666666">"PetscSFWindowSetSyncType_C"</font>, (<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>), (sf, sync));
+<a name="line234">234: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line235">235: </a>}
+
+<a name="line237">237: </a><strong><font color="#4169E1"><a name="PetscSFWindowSetSyncType_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowSetSyncType_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> sync)</font></strong>
+<a name="line238">238: </a>{
+<a name="line239">239: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line241">241: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line242">242: </a>  w-&gt;sync = sync;
+<a name="line243">243: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line244">244: </a>}
+
+<a name="line246">246: </a><font color="#B22222">/*@C</font>
+<a name="line247">247: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetSyncType.html">PetscSFWindowGetSyncType</a> - Get synchronization type for `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>` communication of type `PETSCSFWINDOW`</font>
+
+<a name="line249">249: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line251">251: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line252">252: </a><font color="#B22222">.  sf - star forest for communication</font>
+
+<a name="line254">254: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line255">255: </a><font color="#B22222">.  sync - synchronization type</font>
+
+<a name="line257">257: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line259">259: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetFromOptions.html">PetscSFSetFromOptions</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetSyncType.html">PetscSFWindowSetSyncType</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>`</font>
+<a name="line260">260: </a><font color="#B22222">@*/</font>
+<a name="line261">261: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetSyncType"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetSyncType.html">PetscSFWindowGetSyncType</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> *sync)</font></strong>
+<a name="line262">262: </a>{
+<a name="line263">263: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line266">266: </a>  <a href="../../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(sf, <font color="#666666">"PetscSFWindowGetSyncType_C"</font>, (<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> *), (sf, sync));
+<a name="line267">267: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line268">268: </a>}
+
+<a name="line270">270: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetSyncType_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowGetSyncType_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> *sync)</font></strong>
+<a name="line271">271: </a>{
+<a name="line272">272: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line274">274: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line275">275: </a>  *sync = w-&gt;sync;
+<a name="line276">276: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line277">277: </a>}
+
+<a name="line279">279: </a><font color="#B22222">/*@C</font>
+<a name="line280">280: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetInfo.html">PetscSFWindowSetInfo</a> - Set the `MPI_Info` handle that will be used for subsequent windows allocation</font>
+
+<a name="line282">282: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line284">284: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line285">285: </a><font color="#B22222">+  sf - star forest for communication</font>
+<a name="line286">286: </a><font color="#B22222">-  info - `MPI_Info` handle</font>
+
+<a name="line288">288: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line290">290: </a><font color="#B22222">   Note:</font>
+<a name="line291">291: </a><font color="#B22222">   The info handle is duplicated with a call to `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_dup.html#MPI_Info_dup">MPI_Info_dup</a>()` unless info = `MPI_INFO_NULL`.</font>
+
+<a name="line293">293: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetFromOptions.html">PetscSFSetFromOptions</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetInfo.html">PetscSFWindowGetInfo</a>()`</font>
+<a name="line294">294: </a><font color="#B22222">@*/</font>
+<a name="line295">295: </a><strong><font color="#4169E1"><a name="PetscSFWindowSetInfo"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetInfo.html">PetscSFWindowSetInfo</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Info info)</font></strong>
+<a name="line296">296: </a>{
+<a name="line297">297: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line299">299: </a>  <a href="../../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(sf, <font color="#666666">"PetscSFWindowSetInfo_C"</font>, (<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>, MPI_Info), (sf, info));
+<a name="line300">300: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line301">301: </a>}
+
+<a name="line303">303: </a><strong><font color="#4169E1"><a name="PetscSFWindowSetInfo_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowSetInfo_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Info info)</font></strong>
+<a name="line304">304: </a>{
+<a name="line305">305: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line307">307: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line308">308: </a>  <font color="#4169E1">if</font> (w-&gt;info != MPI_INFO_NULL) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_free.html#MPI_Info_free">MPI_Info_free</a>(&amp;w-&gt;info));
+<a name="line309">309: </a>  <font color="#4169E1">if</font> (info != MPI_INFO_NULL) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_dup.html#MPI_Info_dup">MPI_Info_dup</a>(info, &amp;w-&gt;info));
+<a name="line310">310: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line311">311: </a>}
+
+<a name="line313">313: </a><font color="#B22222">/*@C</font>
+<a name="line314">314: </a><font color="#B22222">   <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetInfo.html">PetscSFWindowGetInfo</a> - Get the `MPI_Info` handle used for windows allocation</font>
+
+<a name="line316">316: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line318">318: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line319">319: </a><font color="#B22222">.  sf - star forest for communication</font>
+
+<a name="line321">321: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line322">322: </a><font color="#B22222">.  info - `MPI_Info` handle</font>
+
+<a name="line324">324: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line326">326: </a><font color="#B22222">   Note:</font>
+<a name="line327">327: </a><font color="#B22222">   If `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetInfo.html">PetscSFWindowSetInfo</a>()` has not be called, this returns `MPI_INFO_NULL`</font>
+
+<a name="line329">329: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFSetFromOptions.html">PetscSFSetFromOptions</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetInfo.html">PetscSFWindowSetInfo</a>()`</font>
+<a name="line330">330: </a><font color="#B22222">@*/</font>
+<a name="line331">331: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetInfo"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetInfo.html">PetscSFWindowGetInfo</a>(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Info *info)</font></strong>
+<a name="line332">332: </a>{
+<a name="line333">333: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line336">336: </a>  <a href="../../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(sf, <font color="#666666">"PetscSFWindowGetInfo_C"</font>, (<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>, MPI_Info *), (sf, info));
+<a name="line337">337: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line338">338: </a>}
+
+<a name="line340">340: </a><strong><font color="#4169E1"><a name="PetscSFWindowGetInfo_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFWindowGetInfo_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Info *info)</font></strong>
+<a name="line341">341: </a>{
+<a name="line342">342: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line344">344: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line345">345: </a>  *info = w-&gt;info;
+<a name="line346">346: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line347">347: </a>}
+
+<a name="line349">349: </a><font color="#B22222">/*</font>
+<a name="line350">350: </a><font color="#B22222">   PetscSFGetWindow - Get a window for use with a given data type</font>
+
+<a name="line352">352: </a><font color="#B22222">   Collective</font>
+
+<a name="line354">354: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line355">355: </a><font color="#B22222">+  sf - star forest</font>
+<a name="line356">356: </a><font color="#B22222">.  unit - data type</font>
+<a name="line357">357: </a><font color="#B22222">.  array - array to be sent</font>
+<a name="line358">358: </a><font color="#B22222">.  sync - type of synchronization `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>`</font>
+<a name="line359">359: </a><font color="#B22222">.  epoch - `<a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` to acquire the window and start an epoch, `<a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>` to just acquire the window</font>
+<a name="line360">360: </a><font color="#B22222">.  fenceassert - assert parameter for call to `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_fence.html#MPI_Win_fence">MPI_Win_fence</a>()`, if sync == `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_FENCE</a>`</font>
+<a name="line361">361: </a><font color="#B22222">.  postassert - assert parameter for call to `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_post.html#MPI_Win_post">MPI_Win_post</a>()`, if sync == `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_ACTIVE</a>`</font>
+<a name="line362">362: </a><font color="#B22222">-  startassert - assert parameter for call to `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_start.html#MPI_Win_start">MPI_Win_start</a>()`, if sync == `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_ACTIVE</a>`</font>
+
+<a name="line364">364: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line365">365: </a><font color="#B22222">+  target_disp - target_disp argument for RMA calls (significative for `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_DYNAMIC</a>` only)</font>
+<a name="line366">366: </a><font color="#B22222">+  reqs - array of requests (significative for sync == `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>` only)</font>
+<a name="line367">367: </a><font color="#B22222">-  win - window</font>
+
+<a name="line369">369: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line371">371: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>()`, `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetDataTypes.html">PetscSFWindowGetDataTypes</a>()`</font>
+<a name="line372">372: </a><font color="#B22222">*/</font>
+<a name="line373">373: </a><strong><font color="#4169E1"><a name="PetscSFGetWindow"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFGetWindow(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, void *array, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> epoch, <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> fenceassert, <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> postassert, <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> startassert, const MPI_Aint **target_disp, MPI_Request **reqs, MPI_Win *win)</font></strong>
+<a name="line374">374: </a>{
+<a name="line375">375: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line376">376: </a>  MPI_Aint        lb, lb_true, bytes, bytes_true;
+<a name="line377">377: </a>  PetscSFWinLink  link;
+<a name="line378">378: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_FEATURE_DYNAMIC_WINDOW)</font>
+<a name="line379">379: </a>  MPI_Aint winaddr;
+<a name="line380">380: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nranks;
+<a name="line381">381: </a><font color="#A020F0">#endif</font>
+<a name="line382">382: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> reuse = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, update = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line383">383: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> dummy[2];
+<a name="line384">384: </a>  MPI_Aint  wsize;
+
+<a name="line386">386: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line387">387: </a>  <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_get_extent.html#MPI_Type_get_extent">MPI_Type_get_extent</a>(unit, &amp;lb, &amp;bytes));
+<a name="line388">388: </a>  <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_get_true_extent.html#MPI_Type_get_true_extent">MPI_Type_get_true_extent</a>(unit, &amp;lb_true, &amp;bytes_true));
+<a name="line389">389: </a>  <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(lb == 0 &amp;&amp; lb_true == 0, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"No support for unit type with nonzero lower bound, write petsc-maint@mcs.anl.gov if you want this feature"</font>);
+<a name="line390">390: </a>  <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(bytes == bytes_true, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"No support for unit type with modified extent, write petsc-maint@mcs.anl.gov if you want this feature"</font>);
+<a name="line391">391: </a>  <font color="#4169E1">if</font> (w-&gt;flavor != <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>) reuse = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line392">392: </a>  <font color="#4169E1">for</font> (link = w-&gt;wins; reuse &amp;&amp; link; link = link-&gt;next) {
+<a name="line393">393: </a>    <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> winok = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line394">394: </a>    <font color="#4169E1">if</font> (w-&gt;flavor != link-&gt;flavor) <font color="#4169E1">continue</font>;
+<a name="line395">395: </a>    <font color="#4169E1">switch</font> (w-&gt;flavor) {
+<a name="line396">396: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_DYNAMIC</a>: <font color="#B22222">/* check available matching array, error if in use (we additionally check that the matching condition is the same across processes) */</font>
+<a name="line397">397: </a>      <font color="#4169E1">if</font> (array == link-&gt;addr) {
+<a name="line398">398: </a>        <font color="#4169E1">if</font> (<a href="../../../../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)) {
+<a name="line399">399: </a>          dummy[0] = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line400">400: </a>          dummy[1] = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line401">401: </a>          <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(MPI_IN_PLACE, dummy, 1, MPIU_BOOL, MPI_LAND, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line402">402: </a>          <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(MPI_IN_PLACE, dummy + 1, 1, MPIU_BOOL, MPI_LOR, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line403">403: </a>          <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dummy[0] == dummy[1], <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_DYNAMIC</a> requires root pointers to be consistently used across the comm. Use <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a> or <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_ALLOCATE</a> instead"</font>);
+<a name="line404">404: </a>        }
+<a name="line405">405: </a>        <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!link-&gt;inuse, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Window in use"</font>);
+<a name="line406">406: </a>        <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!epoch || !link-&gt;epoch, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Window epoch not finished"</font>);
+<a name="line407">407: </a>        winok       = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line408">408: </a>        link-&gt;paddr = array;
+<a name="line409">409: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (<a href="../../../../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)) {
+<a name="line410">410: </a>        dummy[0] = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line411">411: </a>        dummy[1] = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line412">412: </a>        <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(MPI_IN_PLACE, dummy, 1, MPIU_BOOL, MPI_LAND, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line413">413: </a>        <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(MPI_IN_PLACE, dummy + 1, 1, MPIU_BOOL, MPI_LOR, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line414">414: </a>        <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dummy[0] == dummy[1], <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_DYNAMIC</a> requires root pointers to be consistently used across the comm. Use <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a> or <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_ALLOCATE</a> instead"</font>);
+<a name="line415">415: </a>      }
+<a name="line416">416: </a>      <font color="#4169E1">break</font>;
+<a name="line417">417: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_ALLOCATE</a>: <font color="#B22222">/* check available by matching size, allocate if in use */</font>
+<a name="line418">418: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_SHARED</a>:
+<a name="line419">419: </a>      <font color="#4169E1">if</font> (!link-&gt;inuse &amp;&amp; bytes == (MPI_Aint)link-&gt;bytes) {
+<a name="line420">420: </a>        update      = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line421">421: </a>        link-&gt;paddr = array;
+<a name="line422">422: </a>        winok       = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line423">423: </a>      }
+<a name="line424">424: </a>      <font color="#4169E1">break</font>;
+<a name="line425">425: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line426">426: </a>      <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"No support for flavor %s"</font>, PetscSFWindowFlavorTypes[w-&gt;flavor]);
+<a name="line427">427: </a>    }
+<a name="line428">428: </a>    <font color="#4169E1">if</font> (winok) {
+<a name="line429">429: </a>      *win = link-&gt;win;
+<a name="line430">430: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(sf, <font color="#666666">"Reusing window %"</font> PETSC_INTPTR_T_FMT <font color="#666666">" of flavor %d for comm %"</font> PETSC_INTPTR_T_FMT <font color="#666666">"\n"</font>, (PETSC_INTPTR_T)link-&gt;win, link-&gt;flavor, (PETSC_INTPTR_T)<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line431">431: </a>      <font color="#4169E1">goto</font> found;
+<a name="line432">432: </a>    }
+<a name="line433">433: </a>  }
+
+<a name="line435">435: </a>  wsize = (MPI_Aint)bytes * sf-&gt;nroots;
+<a name="line436">436: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;link));
+<a name="line437">437: </a>  link-&gt;bytes           = bytes;
+<a name="line438">438: </a>  link-&gt;next            = w-&gt;wins;
+<a name="line439">439: </a>  link-&gt;flavor          = w-&gt;flavor;
+<a name="line440">440: </a>  link-&gt;dyn_target_addr = NULL;
+<a name="line441">441: </a>  link-&gt;reqs            = NULL;
+<a name="line442">442: </a>  w-&gt;wins               = link;
+<a name="line443">443: </a>  <font color="#4169E1">if</font> (sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) {
+<a name="line444">444: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> i;
+
+<a name="line446">446: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(sf-&gt;nranks, &amp;link-&gt;reqs));
+<a name="line447">447: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; sf-&gt;nranks; i++) link-&gt;reqs[i] = MPI_REQUEST_NULL;
+<a name="line448">448: </a>  }
+<a name="line449">449: </a>  <font color="#4169E1">switch</font> (w-&gt;flavor) {
+<a name="line450">450: </a>  <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>:
+<a name="line451">451: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_create.html#MPI_Win_create">MPI_Win_create</a>(array, wsize, (<a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>)bytes, w-&gt;info, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), &amp;link-&gt;win));
+<a name="line452">452: </a>    link-&gt;addr  = array;
+<a name="line453">453: </a>    link-&gt;paddr = array;
+<a name="line454">454: </a>    <font color="#4169E1">break</font>;
+<a name="line455">455: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_FEATURE_DYNAMIC_WINDOW)</font>
+<a name="line456">456: </a>  <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_DYNAMIC</a>:
+<a name="line457">457: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_create_dynamic.html#MPI_Win_create_dynamic">MPI_Win_create_dynamic</a>(w-&gt;info, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), &amp;link-&gt;win));
+<a name="line458">458: </a><font color="#A020F0">  #if defined(PETSC_HAVE_OMPI_MAJOR_VERSION) </font><font color="#B22222">/* some OpenMPI versions do not support <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_attach.html#MPI_Win_attach">MPI_Win_attach</a>(win,NULL,0); */</font><font color="#A020F0"></font>
+<a name="line459">459: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_attach.html#MPI_Win_attach">MPI_Win_attach</a>(link-&gt;win, wsize ? array : (void *)dummy, wsize));
+<a name="line460">460: </a><font color="#A020F0">  #else</font>
+<a name="line461">461: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_attach.html#MPI_Win_attach">MPI_Win_attach</a>(link-&gt;win, array, wsize));
+<a name="line462">462: </a><font color="#A020F0">  #endif</font>
+<a name="line463">463: </a>    link-&gt;addr  = array;
+<a name="line464">464: </a>    link-&gt;paddr = array;
+<a name="line465">465: </a>    <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(w-&gt;dynsf, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Must call <a href="../../../../../../manualpages/PetscSF/PetscSFSetUp.html">PetscSFSetUp</a>()"</font>);
+<a name="line466">466: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFSetUp.html">PetscSFSetUp</a>(w-&gt;dynsf));
+<a name="line467">467: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>(w-&gt;dynsf, &amp;nranks, NULL, NULL, NULL, NULL));
+<a name="line468">468: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nranks, &amp;link-&gt;dyn_target_addr));
+<a name="line469">469: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Get_address.html#MPI_Get_address">MPI_Get_address</a>(array, &amp;winaddr));
+<a name="line470">470: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFBcastBegin.html">PetscSFBcastBegin</a>(w-&gt;dynsf, MPI_AINT, &amp;winaddr, link-&gt;dyn_target_addr, MPI_REPLACE));
+<a name="line471">471: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFBcastEnd.html">PetscSFBcastEnd</a>(w-&gt;dynsf, MPI_AINT, &amp;winaddr, link-&gt;dyn_target_addr, MPI_REPLACE));
+<a name="line472">472: </a>    <font color="#4169E1">break</font>;
+<a name="line473">473: </a>  <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_ALLOCATE</a>:
+<a name="line474">474: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_allocate.html#MPI_Win_allocate">MPI_Win_allocate</a>(wsize, (<a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>)bytes, w-&gt;info, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), &amp;link-&gt;addr, &amp;link-&gt;win));
+<a name="line475">475: </a>    update      = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line476">476: </a>    link-&gt;paddr = array;
+<a name="line477">477: </a>    <font color="#4169E1">break</font>;
+<a name="line478">478: </a><font color="#A020F0">#endif</font>
+<a name="line479">479: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_PROCESS_SHARED_MEMORY)</font>
+<a name="line480">480: </a>  <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_SHARED</a>:
+<a name="line481">481: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_allocate_shared.html#MPI_Win_allocate_shared">MPI_Win_allocate_shared</a>(wsize, (<a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>)bytes, w-&gt;info, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), &amp;link-&gt;addr, &amp;link-&gt;win));
+<a name="line482">482: </a>    update      = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line483">483: </a>    link-&gt;paddr = array;
+<a name="line484">484: </a>    <font color="#4169E1">break</font>;
+<a name="line485">485: </a><font color="#A020F0">#endif</font>
+<a name="line486">486: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line487">487: </a>    <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"No support for flavor %s"</font>, PetscSFWindowFlavorTypes[w-&gt;flavor]);
+<a name="line488">488: </a>  }
+<a name="line489">489: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(sf, <font color="#666666">"New window %"</font> PETSC_INTPTR_T_FMT <font color="#666666">" of flavor %d for comm %"</font> PETSC_INTPTR_T_FMT <font color="#666666">"\n"</font>, (PETSC_INTPTR_T)link-&gt;win, link-&gt;flavor, (PETSC_INTPTR_T)<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line490">490: </a>  *win = link-&gt;win;
+
+<a name="line492">492: </a><strong><font color="#FF0000">found:</font></strong>
+
+<a name="line494">494: </a>  <font color="#4169E1">if</font> (target_disp) *target_disp = link-&gt;dyn_target_addr;
+<a name="line495">495: </a>  <font color="#4169E1">if</font> (reqs) *reqs = link-&gt;reqs;
+<a name="line496">496: </a>  <font color="#4169E1">if</font> (update) { <font color="#B22222">/* locks are needed for the "separate" memory model only, the fence guaranties memory-synchronization */</font>
+<a name="line497">497: </a>    <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> rank;
+
+<a name="line499">499: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), &amp;rank));
+<a name="line500">500: </a>    <font color="#4169E1">if</font> (sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_lock.html#MPI_Win_lock">MPI_Win_lock</a>(MPI_LOCK_EXCLUSIVE, rank, MPI_MODE_NOCHECK, *win));
+<a name="line501">501: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMemcpy.html">PetscMemcpy</a>(link-&gt;addr, array, sf-&gt;nroots * bytes));
+<a name="line502">502: </a>    <font color="#4169E1">if</font> (sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) {
+<a name="line503">503: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_unlock.html#MPI_Win_unlock">MPI_Win_unlock</a>(rank, *win));
+<a name="line504">504: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_fence.html#MPI_Win_fence">MPI_Win_fence</a>(0, *win));
+<a name="line505">505: </a>    }
+<a name="line506">506: </a>  }
+<a name="line507">507: </a>  link-&gt;inuse = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line508">508: </a>  link-&gt;epoch = epoch;
+<a name="line509">509: </a>  <font color="#4169E1">if</font> (epoch) {
+<a name="line510">510: </a>    <font color="#4169E1">switch</font> (sync) {
+<a name="line511">511: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_FENCE</a>:
+<a name="line512">512: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_fence.html#MPI_Win_fence">MPI_Win_fence</a>(fenceassert, *win));
+<a name="line513">513: </a>      <font color="#4169E1">break</font>;
+<a name="line514">514: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>: <font color="#B22222">/* Handled outside */</font>
+<a name="line515">515: </a>      <font color="#4169E1">break</font>;
+<a name="line516">516: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_ACTIVE</a>: {
+<a name="line517">517: </a>      MPI_Group   ingroup, outgroup;
+<a name="line518">518: </a>      <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> isize, osize;
+
+<a name="line520">520: </a>      <font color="#B22222">/* OpenMPI 4.0.2 with btl=vader does not like calling</font>
+<a name="line521">521: </a><font color="#B22222">         - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_complete.html#MPI_Win_complete">MPI_Win_complete</a> when ogroup is empty</font>
+<a name="line522">522: </a><font color="#B22222">         - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_wait.html#MPI_Win_wait">MPI_Win_wait</a> when igroup is empty</font>
+<a name="line523">523: </a><font color="#B22222">         So, we do not even issue the corresponding start and post calls</font>
+<a name="line524">524: </a><font color="#B22222">         The MPI standard (Sec. 11.5.2 of MPI 3.1) only requires that</font>
+<a name="line525">525: </a><font color="#B22222">         start(outgroup) has a matching post(ingroup)</font>
+<a name="line526">526: </a><font color="#B22222">         and this is guaranteed by <a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a></font>
+<a name="line527">527: </a><font color="#B22222">      */</font>
+<a name="line528">528: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetGroups.html">PetscSFGetGroups</a>(sf, &amp;ingroup, &amp;outgroup));
+<a name="line529">529: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_size.html#MPI_Group_size">MPI_Group_size</a>(ingroup, &amp;isize));
+<a name="line530">530: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_size.html#MPI_Group_size">MPI_Group_size</a>(outgroup, &amp;osize));
+<a name="line531">531: </a>      <font color="#4169E1">if</font> (isize) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_post.html#MPI_Win_post">MPI_Win_post</a>(ingroup, postassert, *win));
+<a name="line532">532: </a>      <font color="#4169E1">if</font> (osize) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_start.html#MPI_Win_start">MPI_Win_start</a>(outgroup, startassert, *win));
+<a name="line533">533: </a>    } <font color="#4169E1">break</font>;
+<a name="line534">534: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line535">535: </a>      <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Unknown synchronization type"</font>);
+<a name="line536">536: </a>    }
+<a name="line537">537: </a>  }
+<a name="line538">538: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line539">539: </a>}
+
+<a name="line541">541: </a><font color="#B22222">/*</font>
+<a name="line542">542: </a><font color="#B22222">   PetscSFFindWindow - Finds a window that is already in use</font>
+
+<a name="line544">544: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line546">546: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line547">547: </a><font color="#B22222">+  sf - star forest</font>
+<a name="line548">548: </a><font color="#B22222">.  unit - data type</font>
+<a name="line549">549: </a><font color="#B22222">-  array - array with which the window is associated</font>
+
+<a name="line551">551: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line552">552: </a><font color="#B22222">+  win - window</font>
+<a name="line553">553: </a><font color="#B22222">-  reqs - outstanding requests associated to the window</font>
+
+<a name="line555">555: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line557">557: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `PetscSFGetWindow()`, `PetscSFRestoreWindow()`</font>
+<a name="line558">558: </a><font color="#B22222">*/</font>
+<a name="line559">559: </a><strong><font color="#4169E1"><a name="PetscSFFindWindow"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFFindWindow(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, const void *array, MPI_Win *win, MPI_Request **reqs)</font></strong>
+<a name="line560">560: </a>{
+<a name="line561">561: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line562">562: </a>  PetscSFWinLink  link;
+
+<a name="line564">564: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line565">565: </a>  *win = MPI_WIN_NULL;
+<a name="line566">566: </a>  <font color="#4169E1">for</font> (link = w-&gt;wins; link; link = link-&gt;next) {
+<a name="line567">567: </a>    <font color="#4169E1">if</font> (array == link-&gt;paddr) {
+<a name="line568">568: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(sf, <font color="#666666">"Window %"</font> PETSC_INTPTR_T_FMT <font color="#666666">" of flavor %d for comm %"</font> PETSC_INTPTR_T_FMT <font color="#666666">"\n"</font>, (PETSC_INTPTR_T)link-&gt;win, link-&gt;flavor, (PETSC_INTPTR_T)<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line569">569: </a>      *win  = link-&gt;win;
+<a name="line570">570: </a>      *reqs = link-&gt;reqs;
+<a name="line571">571: </a>      <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line572">572: </a>    }
+<a name="line573">573: </a>  }
+<a name="line574">574: </a>  <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"Requested window not in use"</font>);
+<a name="line575">575: </a>}
+
+<a name="line577">577: </a><font color="#B22222">/*</font>
+<a name="line578">578: </a><font color="#B22222">   PetscSFRestoreWindow - Restores a window obtained with `PetscSFGetWindow()`</font>
+
+<a name="line580">580: </a><font color="#B22222">   Collective</font>
+
+<a name="line582">582: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line583">583: </a><font color="#B22222">+  sf - star forest</font>
+<a name="line584">584: </a><font color="#B22222">.  unit - data type</font>
+<a name="line585">585: </a><font color="#B22222">.  array - array associated with window</font>
+<a name="line586">586: </a><font color="#B22222">.  sync - type of synchronization `<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a>`</font>
+<a name="line587">587: </a><font color="#B22222">.  epoch - close an epoch, must match argument to `PetscSFGetWindow()`</font>
+<a name="line588">588: </a><font color="#B22222">.  update - if we have to update the local window array</font>
+<a name="line589">589: </a><font color="#B22222">-  win - window</font>
+
+<a name="line591">591: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line593">593: </a><font color="#B22222">.seealso: `<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>`, `PETSCSFWINDOW`, `PetscSFFindWindow()`</font>
+<a name="line594">594: </a><font color="#B22222">*/</font>
+<a name="line595">595: </a><strong><font color="#4169E1"><a name="PetscSFRestoreWindow"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFRestoreWindow(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, void *array, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> epoch, <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> fenceassert, <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> update, MPI_Win *win)</font></strong>
+<a name="line596">596: </a>{
+<a name="line597">597: </a>  PetscSF_Window         *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line598">598: </a>  PetscSFWinLink         *p, link;
+<a name="line599">599: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>               reuse = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line600">600: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> flavor;
+<a name="line601">601: </a>  void                   *laddr;
+<a name="line602">602: </a>  size_t                  bytes;
+
+<a name="line604">604: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line605">605: </a>  <font color="#4169E1">for</font> (p = &amp;w-&gt;wins; *p; p = &amp;(*p)-&gt;next) {
+<a name="line606">606: </a>    link = *p;
+<a name="line607">607: </a>    <font color="#4169E1">if</font> (*win == link-&gt;win) {
+<a name="line608">608: </a>      <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(array == link-&gt;paddr, <a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"Matched window, but not array"</font>);
+<a name="line609">609: </a>      <font color="#4169E1">if</font> (epoch != link-&gt;epoch) {
+<a name="line610">610: </a>        <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!epoch, <a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"No epoch to end"</font>);
+<a name="line611">611: </a>        <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"Restoring window without ending epoch"</font>);
+<a name="line612">612: </a>      }
+<a name="line613">613: </a>      laddr  = link-&gt;addr;
+<a name="line614">614: </a>      flavor = link-&gt;flavor;
+<a name="line615">615: </a>      bytes  = link-&gt;bytes;
+<a name="line616">616: </a>      <font color="#4169E1">if</font> (flavor != <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>) reuse = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line617">617: </a>      <font color="#4169E1">else</font> {
+<a name="line618">618: </a>        *p     = link-&gt;next;
+<a name="line619">619: </a>        update = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line620">620: </a>      } <font color="#B22222">/* remove from list */</font>
+<a name="line621">621: </a>      <font color="#4169E1">goto</font> found;
+<a name="line622">622: </a>    }
+<a name="line623">623: </a>  }
+<a name="line624">624: </a>  <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, <font color="#666666">"Requested window not in use"</font>);
+
+<a name="line626">626: </a><strong><font color="#FF0000">found:</font></strong>
+<a name="line627">627: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(sf, <font color="#666666">"Window %"</font> PETSC_INTPTR_T_FMT <font color="#666666">" of flavor %d for comm %"</font> PETSC_INTPTR_T_FMT <font color="#666666">"\n"</font>, (PETSC_INTPTR_T)link-&gt;win, link-&gt;flavor, (PETSC_INTPTR_T)<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf)));
+<a name="line628">628: </a>  <font color="#4169E1">if</font> (epoch) {
+<a name="line629">629: </a>    <font color="#4169E1">switch</font> (sync) {
+<a name="line630">630: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_FENCE</a>:
+<a name="line631">631: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_fence.html#MPI_Win_fence">MPI_Win_fence</a>(fenceassert, *win));
+<a name="line632">632: </a>      <font color="#4169E1">break</font>;
+<a name="line633">633: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>: <font color="#B22222">/* Handled outside */</font>
+<a name="line634">634: </a>      <font color="#4169E1">break</font>;
+<a name="line635">635: </a>    <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_ACTIVE</a>: {
+<a name="line636">636: </a>      MPI_Group   ingroup, outgroup;
+<a name="line637">637: </a>      <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> isize, osize;
+
+<a name="line639">639: </a>      <font color="#B22222">/* OpenMPI 4.0.2 with btl=wader does not like calling</font>
+<a name="line640">640: </a><font color="#B22222">         - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_complete.html#MPI_Win_complete">MPI_Win_complete</a> when ogroup is empty</font>
+<a name="line641">641: </a><font color="#B22222">         - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_wait.html#MPI_Win_wait">MPI_Win_wait</a> when igroup is empty</font>
+<a name="line642">642: </a><font color="#B22222">         The MPI standard (Sec. 11.5.2 of MPI 3.1) only requires that</font>
+<a name="line643">643: </a><font color="#B22222">         - each process who issues a call to <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_start.html#MPI_Win_start">MPI_Win_start</a> issues a call to MPI_Win_Complete</font>
+<a name="line644">644: </a><font color="#B22222">         - each process who issues a call to <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_post.html#MPI_Win_post">MPI_Win_post</a> issues a call to MPI_Win_Wait</font>
+<a name="line645">645: </a><font color="#B22222">      */</font>
+<a name="line646">646: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetGroups.html">PetscSFGetGroups</a>(sf, &amp;ingroup, &amp;outgroup));
+<a name="line647">647: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_size.html#MPI_Group_size">MPI_Group_size</a>(ingroup, &amp;isize));
+<a name="line648">648: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_size.html#MPI_Group_size">MPI_Group_size</a>(outgroup, &amp;osize));
+<a name="line649">649: </a>      <font color="#4169E1">if</font> (osize) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_complete.html#MPI_Win_complete">MPI_Win_complete</a>(*win));
+<a name="line650">650: </a>      <font color="#4169E1">if</font> (isize) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_wait.html#MPI_Win_wait">MPI_Win_wait</a>(*win));
+<a name="line651">651: </a>    } <font color="#4169E1">break</font>;
+<a name="line652">652: </a><strong><font color="#FF0000">    default:</font></strong>
+<a name="line653">653: </a>      <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Unknown synchronization type"</font>);
+<a name="line654">654: </a>    }
+<a name="line655">655: </a>  }
+<a name="line656">656: </a>  <font color="#4169E1">if</font> (update) {
+<a name="line657">657: </a>    <font color="#4169E1">if</font> (sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_fence.html#MPI_Win_fence">MPI_Win_fence</a>(MPI_MODE_NOPUT | MPI_MODE_NOSUCCEED, *win));
+<a name="line658">658: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMemcpy.html">PetscMemcpy</a>(array, laddr, sf-&gt;nroots * bytes));
+<a name="line659">659: </a>  }
+<a name="line660">660: </a>  link-&gt;epoch = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line661">661: </a>  link-&gt;inuse = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line662">662: </a>  link-&gt;paddr = NULL;
+<a name="line663">663: </a>  <font color="#4169E1">if</font> (!reuse) {
+<a name="line664">664: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(link-&gt;dyn_target_addr));
+<a name="line665">665: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(link-&gt;reqs));
+<a name="line666">666: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_free.html#MPI_Win_free">MPI_Win_free</a>(&amp;link-&gt;win));
+<a name="line667">667: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(link));
+<a name="line668">668: </a>    *win = MPI_WIN_NULL;
+<a name="line669">669: </a>  }
+<a name="line670">670: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line671">671: </a>}
+
+<a name="line673">673: </a><strong><font color="#4169E1"><a name="PetscSFSetUp_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFSetUp_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf)</font></strong>
+<a name="line674">674: </a>{
+<a name="line675">675: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line676">676: </a>  MPI_Group       ingroup, outgroup;
+
+<a name="line678">678: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line679">679: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFSetUpRanks.html">PetscSFSetUpRanks</a>(sf, MPI_GROUP_EMPTY));
+<a name="line680">680: </a>  <font color="#4169E1">if</font> (!w-&gt;dynsf) {
+<a name="line681">681: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     i;
+<a name="line682">682: </a>    <a href="../../../../../../manualpages/PetscSF/PetscSFNode.html">PetscSFNode</a> *remotes;
+
+<a name="line684">684: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(sf-&gt;nranks, &amp;remotes));
+<a name="line685">685: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; sf-&gt;nranks; i++) {
+<a name="line686">686: </a>      remotes[i].rank  = sf-&gt;ranks[i];
+<a name="line687">687: </a>      remotes[i].index = 0;
+<a name="line688">688: </a>    }
+<a name="line689">689: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFDuplicate.html">PetscSFDuplicate</a>(sf, <a href="../../../../../../manualpages/PetscSF/PetscSFDuplicateOption.html">PETSCSF_DUPLICATE_RANKS</a>, &amp;w-&gt;dynsf));
+<a name="line690">690: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a>(w-&gt;dynsf, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>)); <font color="#B22222">/* break recursion */</font>
+<a name="line691">691: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFSetGraph.html">PetscSFSetGraph</a>(w-&gt;dynsf, 1, sf-&gt;nranks, NULL, <a href="../../../../../../manualpages/Sys/PetscCopyMode.html">PETSC_OWN_POINTER</a>, remotes, <a href="../../../../../../manualpages/Sys/PetscCopyMode.html">PETSC_OWN_POINTER</a>));
+<a name="line692">692: </a>  }
+<a name="line693">693: </a>  <font color="#4169E1">switch</font> (w-&gt;sync) {
+<a name="line694">694: </a>  <font color="#4169E1">case</font> <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_ACTIVE</a>:
+<a name="line695">695: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetGroups.html">PetscSFGetGroups</a>(sf, &amp;ingroup, &amp;outgroup));
+<a name="line696">696: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line697">697: </a>    <font color="#4169E1">break</font>;
+<a name="line698">698: </a>  }
+<a name="line699">699: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line700">700: </a>}
+
+<a name="line702">702: </a><strong><font color="#4169E1"><a name="PetscSFSetFromOptions_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFSetFromOptions_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line703">703: </a>{
+<a name="line704">704: </a>  PetscSF_Window         *w      = (PetscSF_Window *)sf-&gt;data;
+<a name="line705">705: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> flavor = w-&gt;flavor;
+
+<a name="line707">707: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line708">708: </a>  <a href="../../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> Window options"</font>);
+<a name="line709">709: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-sf_window_sync"</font>, <font color="#666666">"synchronization type to use for <a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> Window communication"</font>, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetSyncType.html">PetscSFWindowSetSyncType</a>"</font>, PetscSFWindowSyncTypes, (<a href="../../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)w-&gt;sync, (<a href="../../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;w-&gt;sync, NULL));
+<a name="line710">710: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-sf_window_flavor"</font>, <font color="#666666">"flavor to use for <a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> Window creation"</font>, <font color="#666666">"<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a>"</font>, PetscSFWindowFlavorTypes, (<a href="../../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)flavor, (<a href="../../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;flavor, NULL));
+<a name="line711">711: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a>(sf, flavor));
+<a name="line712">712: </a>  PetscOptionsHeadEnd();
+<a name="line713">713: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line714">714: </a>}
+
+<a name="line716">716: </a><strong><font color="#4169E1"><a name="PetscSFReset_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFReset_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf)</font></strong>
+<a name="line717">717: </a>{
+<a name="line718">718: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line719">719: </a>  PetscSFDataLink link, next;
+<a name="line720">720: </a>  PetscSFWinLink  wlink, wnext;
+<a name="line721">721: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        i;
+
+<a name="line723">723: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line724">724: </a>  <font color="#4169E1">for</font> (link = w-&gt;link; link; link = next) {
+<a name="line725">725: </a>    next = link-&gt;next;
+<a name="line726">726: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_free.html#MPI_Type_free">MPI_Type_free</a>(&amp;link-&gt;unit));
+<a name="line727">727: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; sf-&gt;nranks; i++) {
+<a name="line728">728: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_free.html#MPI_Type_free">MPI_Type_free</a>(&amp;link-&gt;mine[i]));
+<a name="line729">729: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_free.html#MPI_Type_free">MPI_Type_free</a>(&amp;link-&gt;remote[i]));
+<a name="line730">730: </a>    }
+<a name="line731">731: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree2.html">PetscFree2</a>(link-&gt;mine, link-&gt;remote));
+<a name="line732">732: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(link));
+<a name="line733">733: </a>  }
+<a name="line734">734: </a>  w-&gt;link = NULL;
+<a name="line735">735: </a>  <font color="#4169E1">for</font> (wlink = w-&gt;wins; wlink; wlink = wnext) {
+<a name="line736">736: </a>    wnext = wlink-&gt;next;
+<a name="line737">737: </a>    <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!wlink-&gt;inuse, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Window still in use with address %p"</font>, (void *)wlink-&gt;addr);
+<a name="line738">738: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(wlink-&gt;dyn_target_addr));
+<a name="line739">739: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(wlink-&gt;reqs));
+<a name="line740">740: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_free.html#MPI_Win_free">MPI_Win_free</a>(&amp;wlink-&gt;win));
+<a name="line741">741: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(wlink));
+<a name="line742">742: </a>  }
+<a name="line743">743: </a>  w-&gt;wins = NULL;
+<a name="line744">744: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFDestroy.html">PetscSFDestroy</a>(&amp;w-&gt;dynsf));
+<a name="line745">745: </a>  <font color="#4169E1">if</font> (w-&gt;info != MPI_INFO_NULL) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_free.html#MPI_Info_free">MPI_Info_free</a>(&amp;w-&gt;info));
+<a name="line746">746: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line747">747: </a>}
+
+<a name="line749">749: </a><strong><font color="#4169E1"><a name="PetscSFDestroy_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFDestroy_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf)</font></strong>
+<a name="line750">750: </a>{
+<a name="line751">751: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line752">752: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFReset_Window(sf));
+<a name="line753">753: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(sf-&gt;data));
+<a name="line754">754: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowSetSyncType_C"</font>, NULL));
+<a name="line755">755: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowGetSyncType_C"</font>, NULL));
+<a name="line756">756: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowSetFlavorType_C"</font>, NULL));
+<a name="line757">757: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowGetFlavorType_C"</font>, NULL));
+<a name="line758">758: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowSetInfo_C"</font>, NULL));
+<a name="line759">759: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowGetInfo_C"</font>, NULL));
+<a name="line760">760: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line761">761: </a>}
+
+<a name="line763">763: </a><strong><font color="#4169E1"><a name="PetscSFView_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFView_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line764">764: </a>{
+<a name="line765">765: </a>  PetscSF_Window   *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line766">766: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>         iascii;
+<a name="line767">767: </a>  <a href="../../../../../../manualpages/Viewer/PetscViewerFormat.html">PetscViewerFormat</a> format;
+
+<a name="line769">769: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line770">770: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Viewer/PetscViewerGetFormat.html">PetscViewerGetFormat</a>(viewer, &amp;format));
+<a name="line771">771: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line772">772: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line773">773: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"  current flavor=%s synchronization=%s MultiSF sort=%s\n"</font>, PetscSFWindowFlavorTypes[w-&gt;flavor], PetscSFWindowSyncTypes[w-&gt;sync], sf-&gt;rankorder ? <font color="#666666">"rank-order"</font> : <font color="#666666">"unordered"</font>));
+<a name="line774">774: </a>    <font color="#4169E1">if</font> (format == <a href="../../../../../../manualpages/Viewer/PetscViewerFormat.html">PETSC_VIEWER_ASCII_INFO_DETAIL</a>) {
+<a name="line775">775: </a>      <font color="#4169E1">if</font> (w-&gt;info != MPI_INFO_NULL) {
+<a name="line776">776: </a>        <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> k, nkeys;
+<a name="line777">777: </a>        char        key[MPI_MAX_INFO_KEY], value[MPI_MAX_INFO_VAL];
+
+<a name="line779">779: </a>        <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_get_nkeys.html#MPI_Info_get_nkeys">MPI_Info_get_nkeys</a>(w-&gt;info, &amp;nkeys));
+<a name="line780">780: </a>        <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"    current info with %d keys. Ordered key-value pairs follow:\n"</font>, nkeys));
+<a name="line781">781: </a>        <font color="#4169E1">for</font> (k = 0; k &lt; nkeys; k++) {
+<a name="line782">782: </a>          <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> flag;
+
+<a name="line784">784: </a>          <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_get_nthkey.html#MPI_Info_get_nthkey">MPI_Info_get_nthkey</a>(w-&gt;info, k, key));
+<a name="line785">785: </a>          <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Info_get.html#MPI_Info_get">MPI_Info_get</a>(w-&gt;info, key, MPI_MAX_INFO_VAL, value, &amp;flag));
+<a name="line786">786: </a>          <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(flag, <a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Missing key %s"</font>, key);
+<a name="line787">787: </a>          <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"      %s = %s\n"</font>, key, value));
+<a name="line788">788: </a>        }
+<a name="line789">789: </a>      } <font color="#4169E1">else</font> {
+<a name="line790">790: </a>        <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"    current info=MPI_INFO_NULL\n"</font>));
+<a name="line791">791: </a>      }
+<a name="line792">792: </a>    }
+<a name="line793">793: </a>  }
+<a name="line794">794: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line795">795: </a>}
+
+<a name="line797">797: </a><strong><font color="#4169E1"><a name="PetscSFDuplicate_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFDuplicate_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, <a href="../../../../../../manualpages/PetscSF/PetscSFDuplicateOption.html">PetscSFDuplicateOption</a> opt, <a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> newsf)</font></strong>
+<a name="line798">798: </a>{
+<a name="line799">799: </a>  PetscSF_Window       *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line800">800: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PetscSFWindowSyncType</a> synctype;
+
+<a name="line802">802: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line803">803: </a>  synctype = w-&gt;sync;
+<a name="line804">804: </a>  <font color="#B22222">/* HACK: Must use FENCE or LOCK when called from <a href="../../../../../../manualpages/PetscSF/PetscSFGetGroups.html">PetscSFGetGroups</a>() because ACTIVE here would cause recursion. */</font>
+<a name="line805">805: </a>  <font color="#4169E1">if</font> (!sf-&gt;setupcalled) synctype = <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>;
+<a name="line806">806: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetSyncType.html">PetscSFWindowSetSyncType</a>(newsf, synctype));
+<a name="line807">807: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetFlavorType.html">PetscSFWindowSetFlavorType</a>(newsf, w-&gt;flavor));
+<a name="line808">808: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowSetInfo.html">PetscSFWindowSetInfo</a>(newsf, w-&gt;info));
+<a name="line809">809: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line810">810: </a>}
+
+<a name="line812">812: </a><strong><font color="#4169E1"><a name="PetscSFBcastBegin_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFBcastBegin_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, <a href="../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> rootmtype, const void *rootdata, <a href="../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> leafmtype, void *leafdata, MPI_Op op)</font></strong>
+<a name="line813">813: </a>{
+<a name="line814">814: </a>  PetscSF_Window     *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line815">815: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>            i, nranks;
+<a name="line816">816: </a>  const <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  *ranks;
+<a name="line817">817: </a>  const MPI_Aint     *target_disp;
+<a name="line818">818: </a>  const MPI_Datatype *mine, *remote;
+<a name="line819">819: </a>  MPI_Request        *reqs;
+<a name="line820">820: </a>  MPI_Win             win;
+
+<a name="line822">822: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line823">823: </a>  <a href="../../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(op == MPI_REPLACE, <a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"PetscSFBcastBegin_Window with op!=MPI_REPLACE has not been implemented"</font>);
+<a name="line824">824: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>(sf, &amp;nranks, &amp;ranks, NULL, NULL, NULL));
+<a name="line825">825: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetDataTypes.html">PetscSFWindowGetDataTypes</a>(sf, unit, &amp;mine, &amp;remote));
+<a name="line826">826: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFGetWindow(sf, unit, (void *)rootdata, w-&gt;sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, MPI_MODE_NOPUT | MPI_MODE_NOPRECEDE, MPI_MODE_NOPUT, 0, &amp;target_disp, &amp;reqs, &amp;win));
+<a name="line827">827: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nranks; i++) {
+<a name="line828">828: </a>    MPI_Aint tdp = target_disp ? target_disp[i] : 0;
+
+<a name="line830">830: </a>    <font color="#4169E1">if</font> (w-&gt;sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) {
+<a name="line831">831: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_lock.html#MPI_Win_lock">MPI_Win_lock</a>(MPI_LOCK_SHARED, ranks[i], MPI_MODE_NOCHECK, win));
+<a name="line832">832: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_RGET)</font>
+<a name="line833">833: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Rget.html#MPI_Rget">MPI_Rget</a>(leafdata, 1, mine[i], ranks[i], tdp, 1, remote[i], win, &amp;reqs[i]));
+<a name="line834">834: </a><font color="#A020F0">#else</font>
+<a name="line835">835: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Get.html#MPI_Get">MPI_Get</a>(leafdata, 1, mine[i], ranks[i], tdp, 1, remote[i], win));
+<a name="line836">836: </a><font color="#A020F0">#endif</font>
+<a name="line837">837: </a>    } <font color="#4169E1">else</font> {
+<a name="line838">838: </a>      <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Get.html#MPI_Get">MPI_Get</a>(leafdata, 1, mine[i], ranks[i], tdp, 1, remote[i], win));
+<a name="line839">839: </a>    }
+<a name="line840">840: </a>  }
+<a name="line841">841: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line842">842: </a>}
+
+<a name="line844">844: </a><strong><font color="#4169E1"><a name="PetscSFBcastEnd_Window"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFBcastEnd_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, const void *rootdata, void *leafdata, MPI_Op op)</font></strong>
+<a name="line845">845: </a>{
+<a name="line846">846: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line847">847: </a>  MPI_Win         win;
+<a name="line848">848: </a>  MPI_Request    *reqs = NULL;
+
+<a name="line850">850: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line851">851: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFFindWindow(sf, unit, rootdata, &amp;win, &amp;reqs));
+<a name="line852">852: </a>  <font color="#4169E1">if</font> (reqs) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Waitall.html#MPI_Waitall">MPI_Waitall</a>(sf-&gt;nranks, reqs, MPI_STATUSES_IGNORE));
+<a name="line853">853: </a>  <font color="#4169E1">if</font> (w-&gt;sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) {
+<a name="line854">854: </a>    <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i, nranks;
+<a name="line855">855: </a>    const <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *ranks;
+
+<a name="line857">857: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>(sf, &amp;nranks, &amp;ranks, NULL, NULL, NULL));
+<a name="line858">858: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; nranks; i++) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_unlock.html#MPI_Win_unlock">MPI_Win_unlock</a>(ranks[i], win));
+<a name="line859">859: </a>  }
+<a name="line860">860: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFRestoreWindow(sf, unit, (void *)rootdata, w-&gt;sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, MPI_MODE_NOSTORE | MPI_MODE_NOSUCCEED, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, &amp;win));
+<a name="line861">861: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line862">862: </a>}
+
+<a name="line864">864: </a><strong><font color="#4169E1"><a name="PetscSFReduceBegin_Window"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFReduceBegin_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, <a href="../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> leafmtype, const void *leafdata, <a href="../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> rootmtype, void *rootdata, MPI_Op op)</font></strong>
+<a name="line865">865: </a>{
+<a name="line866">866: </a>  PetscSF_Window     *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line867">867: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>            i, nranks;
+<a name="line868">868: </a>  const <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  *ranks;
+<a name="line869">869: </a>  const MPI_Aint     *target_disp;
+<a name="line870">870: </a>  const MPI_Datatype *mine, *remote;
+<a name="line871">871: </a>  MPI_Win             win;
+
+<a name="line873">873: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line874">874: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>(sf, &amp;nranks, &amp;ranks, NULL, NULL, NULL));
+<a name="line875">875: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetDataTypes.html">PetscSFWindowGetDataTypes</a>(sf, unit, &amp;mine, &amp;remote));
+<a name="line876">876: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFWindowOpTranslate(&amp;op));
+<a name="line877">877: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFGetWindow(sf, unit, rootdata, w-&gt;sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, MPI_MODE_NOPRECEDE, 0, 0, &amp;target_disp, NULL, &amp;win));
+<a name="line878">878: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nranks; i++) {
+<a name="line879">879: </a>    MPI_Aint tdp = target_disp ? target_disp[i] : 0;
+
+<a name="line881">881: </a>    <font color="#4169E1">if</font> (w-&gt;sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_lock.html#MPI_Win_lock">MPI_Win_lock</a>(MPI_LOCK_SHARED, ranks[i], MPI_MODE_NOCHECK, win));
+<a name="line882">882: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Accumulate.html#MPI_Accumulate">MPI_Accumulate</a>((void *)leafdata, 1, mine[i], ranks[i], tdp, 1, remote[i], op, win));
+<a name="line883">883: </a>    <font color="#4169E1">if</font> (w-&gt;sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_unlock.html#MPI_Win_unlock">MPI_Win_unlock</a>(ranks[i], win));
+<a name="line884">884: </a>  }
+<a name="line885">885: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line886">886: </a>}
+
+<a name="line888">888: </a><strong><font color="#4169E1"><a name="PetscSFReduceEnd_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFReduceEnd_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, const void *leafdata, void *rootdata, MPI_Op op)</font></strong>
+<a name="line889">889: </a>{
+<a name="line890">890: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line891">891: </a>  MPI_Win         win;
+<a name="line892">892: </a>  MPI_Request    *reqs = NULL;
+
+<a name="line894">894: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line895">895: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFFindWindow(sf, unit, rootdata, &amp;win, &amp;reqs));
+<a name="line896">896: </a>  <font color="#4169E1">if</font> (reqs) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Waitall.html#MPI_Waitall">MPI_Waitall</a>(sf-&gt;nranks, reqs, MPI_STATUSES_IGNORE));
+<a name="line897">897: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFRestoreWindow(sf, unit, rootdata, w-&gt;sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, MPI_MODE_NOSUCCEED, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, &amp;win));
+<a name="line898">898: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line899">899: </a>}
+
+<a name="line901">901: </a><strong><font color="#4169E1"><a name="PetscSFFetchAndOpBegin_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFFetchAndOpBegin_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, <a href="../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> rootmtype, void *rootdata, <a href="../../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> leafmtype, const void *leafdata, void *leafupdate, MPI_Op op)</font></strong>
+<a name="line902">902: </a>{
+<a name="line903">903: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>            i, nranks;
+<a name="line904">904: </a>  const <a href="../../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  *ranks;
+<a name="line905">905: </a>  const MPI_Datatype *mine, *remote;
+<a name="line906">906: </a>  const MPI_Aint     *target_disp;
+<a name="line907">907: </a>  MPI_Win             win;
+<a name="line908">908: </a>  PetscSF_Window     *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line909">909: </a><font color="#A020F0">#if !defined(PETSC_HAVE_MPI_GET_ACCUMULATE)</font>
+<a name="line910">910: </a>  <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PetscSFWindowFlavorType</a> oldf;
+<a name="line911">911: </a><font color="#A020F0">#endif</font>
+
+<a name="line913">913: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line914">914: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFGetRootRanks.html">PetscSFGetRootRanks</a>(sf, &amp;nranks, &amp;ranks, NULL, NULL, NULL));
+<a name="line915">915: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/PetscSF/PetscSFWindowGetDataTypes.html">PetscSFWindowGetDataTypes</a>(sf, unit, &amp;mine, &amp;remote));
+<a name="line916">916: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFWindowOpTranslate(&amp;op));
+<a name="line917">917: </a><font color="#A020F0">#if !defined(PETSC_HAVE_MPI_GET_ACCUMULATE)</font>
+<a name="line918">918: </a>  <font color="#B22222">/* FetchAndOp without MPI_Get_Accumulate requires locking.</font>
+<a name="line919">919: </a><font color="#B22222">     we create a new window every time to not interfere with user-defined MPI_Info which may have used "no_locks"="true" */</font>
+<a name="line920">920: </a>  oldf      = w-&gt;flavor;
+<a name="line921">921: </a>  w-&gt;flavor = <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>;
+<a name="line922">922: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFGetWindow(sf, unit, rootdata, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, 0, 0, 0, &amp;target_disp, NULL, &amp;win));
+<a name="line923">923: </a><font color="#A020F0">#else</font>
+<a name="line924">924: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFGetWindow(sf, unit, rootdata, w-&gt;sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, MPI_MODE_NOPRECEDE, 0, 0, &amp;target_disp, NULL, &amp;win));
+<a name="line925">925: </a><font color="#A020F0">#endif</font>
+<a name="line926">926: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nranks; i++) {
+<a name="line927">927: </a>    MPI_Aint tdp = target_disp ? target_disp[i] : 0;
+
+<a name="line929">929: </a><font color="#A020F0">#if !defined(PETSC_HAVE_MPI_GET_ACCUMULATE)</font>
+<a name="line930">930: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_lock.html#MPI_Win_lock">MPI_Win_lock</a>(MPI_LOCK_EXCLUSIVE, ranks[i], 0, win));
+<a name="line931">931: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Get.html#MPI_Get">MPI_Get</a>(leafupdate, 1, mine[i], ranks[i], tdp, 1, remote[i], win));
+<a name="line932">932: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Accumulate.html#MPI_Accumulate">MPI_Accumulate</a>((void *)leafdata, 1, mine[i], ranks[i], tdp, 1, remote[i], op, win));
+<a name="line933">933: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_unlock.html#MPI_Win_unlock">MPI_Win_unlock</a>(ranks[i], win));
+<a name="line934">934: </a><font color="#A020F0">#else</font>
+<a name="line935">935: </a>    <font color="#4169E1">if</font> (w-&gt;sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_lock.html#MPI_Win_lock">MPI_Win_lock</a>(MPI_LOCK_SHARED, ranks[i], 0, win));
+<a name="line936">936: </a>    <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Get_accumulate.html#MPI_Get_accumulate">MPI_Get_accumulate</a>((void *)leafdata, 1, mine[i], leafupdate, 1, mine[i], ranks[i], tdp, 1, remote[i], op, win));
+<a name="line937">937: </a>    <font color="#4169E1">if</font> (w-&gt;sync == <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_unlock.html#MPI_Win_unlock">MPI_Win_unlock</a>(ranks[i], win));
+<a name="line938">938: </a><font color="#A020F0">#endif</font>
+<a name="line939">939: </a>  }
+<a name="line940">940: </a><font color="#A020F0">#if !defined(PETSC_HAVE_MPI_GET_ACCUMULATE)</font>
+<a name="line941">941: </a>  w-&gt;flavor = oldf;
+<a name="line942">942: </a><font color="#A020F0">#endif</font>
+<a name="line943">943: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line944">944: </a>}
+
+<a name="line946">946: </a><strong><font color="#4169E1"><a name="PetscSFFetchAndOpEnd_Window"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFFetchAndOpEnd_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf, MPI_Datatype unit, void *rootdata, const void *leafdata, void *leafupdate, MPI_Op op)</font></strong>
+<a name="line947">947: </a>{
+<a name="line948">948: </a>  MPI_Win win;
+<a name="line949">949: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_GET_ACCUMULATE)</font>
+<a name="line950">950: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+<a name="line951">951: </a><font color="#A020F0">#endif</font>
+<a name="line952">952: </a>  MPI_Request *reqs = NULL;
+
+<a name="line954">954: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line955">955: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFFindWindow(sf, unit, rootdata, &amp;win, &amp;reqs));
+<a name="line956">956: </a>  <font color="#4169E1">if</font> (reqs) <a href="../../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Waitall.html#MPI_Waitall">MPI_Waitall</a>(sf-&gt;nranks, reqs, MPI_STATUSES_IGNORE));
+<a name="line957">957: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_GET_ACCUMULATE)</font>
+<a name="line958">958: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFRestoreWindow(sf, unit, rootdata, w-&gt;sync, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, MPI_MODE_NOSUCCEED, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, &amp;win));
+<a name="line959">959: </a><font color="#A020F0">#else</font>
+<a name="line960">960: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSFRestoreWindow(sf, unit, rootdata, <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_LOCK</a>, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, 0, <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, &amp;win));
+<a name="line961">961: </a><font color="#A020F0">#endif</font>
+<a name="line962">962: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line963">963: </a>}
+
+<a name="line965">965: </a><strong><font color="#4169E1"><a name="PetscSFCreate_Window"></a>PETSC_INTERN <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSFCreate_Window(<a href="../../../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a> sf)</font></strong>
+<a name="line966">966: </a>{
+<a name="line967">967: </a>  PetscSF_Window *w = (PetscSF_Window *)sf-&gt;data;
+
+<a name="line969">969: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line970">970: </a>  sf-&gt;ops-&gt;SetUp           = PetscSFSetUp_Window;
+<a name="line971">971: </a>  sf-&gt;ops-&gt;SetFromOptions  = PetscSFSetFromOptions_Window;
+<a name="line972">972: </a>  sf-&gt;ops-&gt;Reset           = PetscSFReset_Window;
+<a name="line973">973: </a>  sf-&gt;ops-&gt;Destroy         = PetscSFDestroy_Window;
+<a name="line974">974: </a>  sf-&gt;ops-&gt;View            = PetscSFView_Window;
+<a name="line975">975: </a>  sf-&gt;ops-&gt;Duplicate       = PetscSFDuplicate_Window;
+<a name="line976">976: </a>  sf-&gt;ops-&gt;BcastBegin      = PetscSFBcastBegin_Window;
+<a name="line977">977: </a>  sf-&gt;ops-&gt;BcastEnd        = PetscSFBcastEnd_Window;
+<a name="line978">978: </a>  sf-&gt;ops-&gt;ReduceBegin     = PetscSFReduceBegin_Window;
+<a name="line979">979: </a>  sf-&gt;ops-&gt;ReduceEnd       = PetscSFReduceEnd_Window;
+<a name="line980">980: </a>  sf-&gt;ops-&gt;FetchAndOpBegin = PetscSFFetchAndOpBegin_Window;
+<a name="line981">981: </a>  sf-&gt;ops-&gt;FetchAndOpEnd   = PetscSFFetchAndOpEnd_Window;
+
+<a name="line983">983: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;w));
+<a name="line984">984: </a>  sf-&gt;data  = (void *)w;
+<a name="line985">985: </a>  w-&gt;sync   = <a href="../../../../../../manualpages/PetscSF/PetscSFWindowSyncType.html">PETSCSF_WINDOW_SYNC_FENCE</a>;
+<a name="line986">986: </a>  w-&gt;flavor = <a href="../../../../../../manualpages/PetscSF/PetscSFWindowFlavorType.html">PETSCSF_WINDOW_FLAVOR_CREATE</a>;
+<a name="line987">987: </a>  w-&gt;info   = MPI_INFO_NULL;
+
+<a name="line989">989: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowSetSyncType_C"</font>, PetscSFWindowSetSyncType_Window));
+<a name="line990">990: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowGetSyncType_C"</font>, PetscSFWindowGetSyncType_Window));
+<a name="line991">991: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowSetFlavorType_C"</font>, PetscSFWindowSetFlavorType_Window));
+<a name="line992">992: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowGetFlavorType_C"</font>, PetscSFWindowGetFlavorType_Window));
+<a name="line993">993: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowSetInfo_C"</font>, PetscSFWindowSetInfo_Window));
+<a name="line994">994: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf, <font color="#666666">"PetscSFWindowGetInfo_C"</font>, PetscSFWindowGetInfo_Window));
+
+<a name="line996">996: </a><font color="#A020F0">#if defined(OMPI_MAJOR_VERSION) &amp;&amp; (OMPI_MAJOR_VERSION &lt; 1 || (OMPI_MAJOR_VERSION == 1 &amp;&amp; OMPI_MINOR_VERSION &lt;= 6))</font>
+<a name="line997">997: </a>  {
+<a name="line998">998: </a>    <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> ackbug = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line999">999: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-acknowledge_ompi_onesided_bug"</font>, &amp;ackbug, NULL));
+<a name="line1000">1000: </a>    <font color="#4169E1">if</font> (ackbug) {
+<a name="line1001">1001: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(sf, <font color="#666666">"Acknowledged Open MPI bug, proceeding anyway. Expect memory corruption.\n"</font>));
+<a name="line1002">1002: </a>    } <font color="#4169E1">else</font> <a href="../../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sf), <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Open MPI is known to be buggy (https://svn.open-mpi.org/trac/ompi/ticket/1905 and 2656), use -acknowledge_ompi_onesided_bug to proceed"</font>);
+<a name="line1003">1003: </a>  }
+<a name="line1004">1004: </a><font color="#A020F0">#endif</font>
+<a name="line1005">1005: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1006">1006: </a>}
+</pre>
+</body>
+
+</html>

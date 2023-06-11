@@ -1,0 +1,503 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/ksp/guess/impls/fischer/fischer.c">Actual source code: fischer.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:10+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../../include/petsc/private/kspimpl.h.html">&lt;petsc/private/kspimpl.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../../include/petscblaslapack.h.html">&lt;petscblaslapack.h&gt;</A>
+
+<a name="line4">  4: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line5">  5: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         method; <font color="#B22222">/* 1, 2 or 3 */</font>
+<a name="line6">  6: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         curl;   <font color="#B22222">/* Current number of basis vectors */</font>
+<a name="line7">  7: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         maxl;   <font color="#B22222">/* Maximum number of basis vectors */</font>
+<a name="line8">  8: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        monitor;
+<a name="line9">  9: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>     *alpha;  <font color="#B22222">/* */</font>
+<a name="line10"> 10: </a>  <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a>             *xtilde; <font color="#B22222">/* Saved x vectors */</font>
+<a name="line11"> 11: </a>  <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a>             *btilde; <font color="#B22222">/* Saved b vectors, methods 1 and 3 */</font>
+<a name="line12"> 12: </a>  <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a>              Ax;     <font color="#B22222">/* method 2 */</font>
+<a name="line13"> 13: </a>  <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a>              guess;
+<a name="line14"> 14: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>     *corr;         <font color="#B22222">/* correlation matrix in column-major format, method 3 */</font>
+<a name="line15"> 15: </a>  <a href="../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>        tol;          <font color="#B22222">/* tolerance for determining rank, method 3 */</font>
+<a name="line16"> 16: </a>  <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a>              last_b;       <font color="#B22222">/* last b provided to FormGuess (not owned by this object), method 3 */</font>
+<a name="line17"> 17: </a>  <a href="../../../../../../manualpages/Sys/PetscObjectState.html">PetscObjectState</a> last_b_state; <font color="#B22222">/* state of last_b as of the last call to FormGuess, method 3 */</font>
+<a name="line18"> 18: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>     *last_b_coefs; <font color="#B22222">/* dot products of last_b and btilde, method 3 */</font>
+<a name="line19"> 19: </a>} KSPGuessFischer;
+
+<a name="line21"> 21: </a><strong><font color="#4169E1"><a name="KSPGuessReset_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessReset_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess)</font></strong>
+<a name="line22"> 22: </a>{
+<a name="line23"> 23: </a>  KSPGuessFischer *itg  = (KSPGuessFischer *)guess-&gt;data;
+<a name="line24"> 24: </a>  <a href="../../../../../../manualpages/IS/PetscLayout.html">PetscLayout</a>      Alay = NULL, vlay = NULL;
+<a name="line25"> 25: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        cong;
+
+<a name="line27"> 27: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line28"> 28: </a>  itg-&gt;curl = 0;
+<a name="line29"> 29: </a>  <font color="#B22222">/* destroy vectors if the size of the linear system has changed */</font>
+<a name="line30"> 30: </a>  <font color="#4169E1">if</font> (guess-&gt;A) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatGetLayouts.html">MatGetLayouts</a>(guess-&gt;A, &amp;Alay, NULL));
+<a name="line31"> 31: </a>  <font color="#4169E1">if</font> (itg-&gt;xtilde) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetLayout.html">VecGetLayout</a>(itg-&gt;xtilde[0], &amp;vlay));
+<a name="line32"> 32: </a>  cong = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line33"> 33: </a>  <font color="#4169E1">if</font> (vlay &amp;&amp; Alay) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/IS/PetscLayoutCompare.html">PetscLayoutCompare</a>(Alay, vlay, &amp;cong));
+<a name="line34"> 34: </a>  <font color="#4169E1">if</font> (!cong) {
+<a name="line35"> 35: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(itg-&gt;maxl, &amp;itg-&gt;btilde));
+<a name="line36"> 36: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(itg-&gt;maxl, &amp;itg-&gt;xtilde));
+<a name="line37"> 37: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;itg-&gt;guess));
+<a name="line38"> 38: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;itg-&gt;Ax));
+<a name="line39"> 39: </a>  }
+<a name="line40"> 40: </a>  <font color="#4169E1">if</font> (itg-&gt;corr) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMemzero.html">PetscMemzero</a>(itg-&gt;corr, <font color="#4169E1">sizeof</font>(*itg-&gt;corr) * itg-&gt;maxl * itg-&gt;maxl));
+<a name="line41"> 41: </a>  itg-&gt;last_b       = NULL;
+<a name="line42"> 42: </a>  itg-&gt;last_b_state = 0;
+<a name="line43"> 43: </a>  <font color="#4169E1">if</font> (itg-&gt;last_b_coefs) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMemzero.html">PetscMemzero</a>(itg-&gt;last_b_coefs, <font color="#4169E1">sizeof</font>(*itg-&gt;last_b_coefs) * itg-&gt;maxl));
+<a name="line44"> 44: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line45"> 45: </a>}
+
+<a name="line47"> 47: </a><strong><font color="#4169E1"><a name="KSPGuessSetUp_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessSetUp_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess)</font></strong>
+<a name="line48"> 48: </a>{
+<a name="line49"> 49: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+
+<a name="line51"> 51: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line52"> 52: </a>  <font color="#4169E1">if</font> (!itg-&gt;alpha) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(itg-&gt;maxl, &amp;itg-&gt;alpha));
+<a name="line53"> 53: </a>  <font color="#4169E1">if</font> (!itg-&gt;xtilde) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/KSP/KSPCreateVecs.html">KSPCreateVecs</a>(guess-&gt;ksp, itg-&gt;maxl, &amp;itg-&gt;xtilde, 0, NULL));
+<a name="line54"> 54: </a>  <font color="#4169E1">if</font> (!itg-&gt;btilde &amp;&amp; (itg-&gt;method == 1 || itg-&gt;method == 3)) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/KSP/KSPCreateVecs.html">KSPCreateVecs</a>(guess-&gt;ksp, itg-&gt;maxl, &amp;itg-&gt;btilde, 0, NULL));
+<a name="line55"> 55: </a>  <font color="#4169E1">if</font> (!itg-&gt;Ax &amp;&amp; itg-&gt;method == 2) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(itg-&gt;xtilde[0], &amp;itg-&gt;Ax));
+<a name="line56"> 56: </a>  <font color="#4169E1">if</font> (!itg-&gt;guess &amp;&amp; (itg-&gt;method == 1 || itg-&gt;method == 2)) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(itg-&gt;xtilde[0], &amp;itg-&gt;guess));
+<a name="line57"> 57: </a>  <font color="#4169E1">if</font> (!itg-&gt;corr &amp;&amp; itg-&gt;method == 3) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscCalloc1.html">PetscCalloc1</a>(itg-&gt;maxl * itg-&gt;maxl, &amp;itg-&gt;corr));
+<a name="line58"> 58: </a>  <font color="#4169E1">if</font> (!itg-&gt;last_b_coefs &amp;&amp; itg-&gt;method == 3) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscCalloc1.html">PetscCalloc1</a>(itg-&gt;maxl, &amp;itg-&gt;last_b_coefs));
+<a name="line59"> 59: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line60"> 60: </a>}
+
+<a name="line62"> 62: </a><strong><font color="#4169E1"><a name="KSPGuessDestroy_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessDestroy_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess)</font></strong>
+<a name="line63"> 63: </a>{
+<a name="line64"> 64: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+
+<a name="line66"> 66: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line67"> 67: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(itg-&gt;alpha));
+<a name="line68"> 68: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(itg-&gt;maxl, &amp;itg-&gt;btilde));
+<a name="line69"> 69: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(itg-&gt;maxl, &amp;itg-&gt;xtilde));
+<a name="line70"> 70: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;itg-&gt;guess));
+<a name="line71"> 71: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;itg-&gt;Ax));
+<a name="line72"> 72: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(itg-&gt;corr));
+<a name="line73"> 73: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(itg-&gt;last_b_coefs));
+<a name="line74"> 74: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(itg));
+<a name="line75"> 75: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess, <font color="#666666">"KSPGuessFischerSetModel_C"</font>, NULL));
+<a name="line76"> 76: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line77"> 77: </a>}
+
+<a name="line79"> 79: </a><font color="#B22222">/* Note: do not change the b right hand side as is done in the publication */</font>
+<a name="line80"> 80: </a><strong><font color="#4169E1"><a name="KSPGuessFormGuess_Fischer_1"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessFormGuess_Fischer_1(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line81"> 81: </a>{
+<a name="line82"> 82: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+<a name="line83"> 83: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         i;
+
+<a name="line85"> 85: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line86"> 86: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecSet.html">VecSet</a>(x, 0.0));
+<a name="line87"> 87: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMDot.html">VecMDot</a>(b, itg-&gt;curl, itg-&gt;btilde, itg-&gt;alpha));
+<a name="line88"> 88: </a>  <font color="#4169E1">if</font> (itg-&gt;monitor) {
+<a name="line89"> 89: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"KSPFischerGuess alphas ="</font>));
+<a name="line90"> 90: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; itg-&gt;curl; i++) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">" %g"</font>, (double)PetscAbsScalar(itg-&gt;alpha[i])));
+<a name="line91"> 91: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"\n"</font>));
+<a name="line92"> 92: </a>  }
+<a name="line93"> 93: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(x, itg-&gt;curl, itg-&gt;alpha, itg-&gt;xtilde));
+<a name="line94"> 94: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;guess));
+<a name="line95"> 95: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line96"> 96: </a>}
+
+<a name="line98"> 98: </a><strong><font color="#4169E1"><a name="KSPGuessUpdate_Fischer_1"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessUpdate_Fischer_1(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line99"> 99: </a>{
+<a name="line100">100: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+<a name="line101">101: </a>  <a href="../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>        norm;
+<a name="line102">102: </a>  int              curl = itg-&gt;curl, i;
+
+<a name="line104">104: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line105">105: </a>  <font color="#4169E1">if</font> (curl == itg-&gt;maxl) {
+<a name="line106">106: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSP_MatMult(guess-&gt;ksp, guess-&gt;A, x, itg-&gt;btilde[0]));
+<a name="line107">107: </a>    <font color="#B22222">/* <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(b,itg-&gt;btilde[0])); */</font>
+<a name="line108">108: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecNormalize.html">VecNormalize</a>(itg-&gt;btilde[0], &amp;norm));
+<a name="line109">109: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;xtilde[0]));
+<a name="line110">110: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecScale.html">VecScale</a>(itg-&gt;xtilde[0], 1.0 / norm));
+<a name="line111">111: </a>    itg-&gt;curl = 1;
+<a name="line112">112: </a>  } <font color="#4169E1">else</font> {
+<a name="line113">113: </a>    <font color="#4169E1">if</font> (!curl) {
+<a name="line114">114: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;xtilde[curl]));
+<a name="line115">115: </a>    } <font color="#4169E1">else</font> {
+<a name="line116">116: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(itg-&gt;xtilde[curl], -1.0, itg-&gt;guess, x));
+<a name="line117">117: </a>    }
+<a name="line118">118: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSP_MatMult(guess-&gt;ksp, guess-&gt;A, itg-&gt;xtilde[curl], itg-&gt;btilde[curl]));
+<a name="line119">119: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMDot.html">VecMDot</a>(itg-&gt;btilde[curl], curl, itg-&gt;btilde, itg-&gt;alpha));
+<a name="line120">120: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; curl; i++) itg-&gt;alpha[i] = -itg-&gt;alpha[i];
+<a name="line121">121: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(itg-&gt;btilde[curl], curl, itg-&gt;alpha, itg-&gt;btilde));
+<a name="line122">122: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(itg-&gt;xtilde[curl], curl, itg-&gt;alpha, itg-&gt;xtilde));
+<a name="line123">123: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecNormalize.html">VecNormalize</a>(itg-&gt;btilde[curl], &amp;norm));
+<a name="line124">124: </a>    <font color="#4169E1">if</font> (norm) {
+<a name="line125">125: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecScale.html">VecScale</a>(itg-&gt;xtilde[curl], 1.0 / norm));
+<a name="line126">126: </a>      itg-&gt;curl++;
+<a name="line127">127: </a>    } <font color="#4169E1">else</font> {
+<a name="line128">128: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(guess-&gt;ksp, <font color="#666666">"Not increasing dimension of Fischer space because new direction is identical to previous\n"</font>));
+<a name="line129">129: </a>    }
+<a name="line130">130: </a>  }
+<a name="line131">131: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line132">132: </a>}
+
+<a name="line134">134: </a><font color="#B22222">/*</font>
+<a name="line135">135: </a><font color="#B22222">  Given a basis generated already this computes a new guess x from the new right hand side b</font>
+<a name="line136">136: </a><font color="#B22222">  Figures out the components of b in each btilde direction and adds them to x</font>
+<a name="line137">137: </a><font color="#B22222">  Note: do not change the b right hand side as is done in the publication</font>
+<a name="line138">138: </a><font color="#B22222">*/</font>
+<a name="line139">139: </a><strong><font color="#4169E1"><a name="KSPGuessFormGuess_Fischer_2"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessFormGuess_Fischer_2(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line140">140: </a>{
+<a name="line141">141: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+<a name="line142">142: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         i;
+
+<a name="line144">144: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line145">145: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecSet.html">VecSet</a>(x, 0.0));
+<a name="line146">146: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMDot.html">VecMDot</a>(b, itg-&gt;curl, itg-&gt;xtilde, itg-&gt;alpha));
+<a name="line147">147: </a>  <font color="#4169E1">if</font> (itg-&gt;monitor) {
+<a name="line148">148: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"KSPFischerGuess alphas ="</font>));
+<a name="line149">149: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; itg-&gt;curl; i++) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">" %g"</font>, (double)PetscAbsScalar(itg-&gt;alpha[i])));
+<a name="line150">150: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"\n"</font>));
+<a name="line151">151: </a>  }
+<a name="line152">152: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(x, itg-&gt;curl, itg-&gt;alpha, itg-&gt;xtilde));
+<a name="line153">153: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;guess));
+<a name="line154">154: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line155">155: </a>}
+
+<a name="line157">157: </a><strong><font color="#4169E1"><a name="KSPGuessUpdate_Fischer_2"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessUpdate_Fischer_2(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line158">158: </a>{
+<a name="line159">159: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+<a name="line160">160: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>      norm;
+<a name="line161">161: </a>  int              curl = itg-&gt;curl, i;
+
+<a name="line163">163: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line164">164: </a>  <font color="#4169E1">if</font> (curl == itg-&gt;maxl) {
+<a name="line165">165: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSP_MatMult(guess-&gt;ksp, guess-&gt;A, x, itg-&gt;Ax)); <font color="#B22222">/* norm = sqrt(x'Ax) */</font>
+<a name="line166">166: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDot.html">VecDot</a>(x, itg-&gt;Ax, &amp;norm));
+<a name="line167">167: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;xtilde[0]));
+<a name="line168">168: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecScale.html">VecScale</a>(itg-&gt;xtilde[0], 1.0 / PetscSqrtScalar(norm)));
+<a name="line169">169: </a>    itg-&gt;curl = 1;
+<a name="line170">170: </a>  } <font color="#4169E1">else</font> {
+<a name="line171">171: </a>    <font color="#4169E1">if</font> (!curl) {
+<a name="line172">172: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;xtilde[curl]));
+<a name="line173">173: </a>    } <font color="#4169E1">else</font> {
+<a name="line174">174: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(itg-&gt;xtilde[curl], -1.0, itg-&gt;guess, x));
+<a name="line175">175: </a>    }
+<a name="line176">176: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSP_MatMult(guess-&gt;ksp, guess-&gt;A, itg-&gt;xtilde[curl], itg-&gt;Ax));
+<a name="line177">177: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMDot.html">VecMDot</a>(itg-&gt;Ax, curl, itg-&gt;xtilde, itg-&gt;alpha));
+<a name="line178">178: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; curl; i++) itg-&gt;alpha[i] = -itg-&gt;alpha[i];
+<a name="line179">179: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(itg-&gt;xtilde[curl], curl, itg-&gt;alpha, itg-&gt;xtilde));
+
+<a name="line181">181: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(KSP_MatMult(guess-&gt;ksp, guess-&gt;A, itg-&gt;xtilde[curl], itg-&gt;Ax)); <font color="#B22222">/* norm = sqrt(xtilde[curl]'Axtilde[curl]) */</font>
+<a name="line182">182: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDot.html">VecDot</a>(itg-&gt;xtilde[curl], itg-&gt;Ax, &amp;norm));
+<a name="line183">183: </a>    <font color="#4169E1">if</font> (PetscAbsScalar(norm) != 0.0) {
+<a name="line184">184: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecScale.html">VecScale</a>(itg-&gt;xtilde[curl], 1.0 / PetscSqrtScalar(norm)));
+<a name="line185">185: </a>      itg-&gt;curl++;
+<a name="line186">186: </a>    } <font color="#4169E1">else</font> {
+<a name="line187">187: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(guess-&gt;ksp, <font color="#666666">"Not increasing dimension of Fischer space because new direction is identical to previous\n"</font>));
+<a name="line188">188: </a>    }
+<a name="line189">189: </a>  }
+<a name="line190">190: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line191">191: </a>}
+
+<a name="line193">193: </a><font color="#B22222">/*</font>
+<a name="line194">194: </a><font color="#B22222">  Rather than the standard algorithm implemented in 2, we treat the provided x and b vectors to be spanning sets (not necessarily linearly independent) and use them to compute a windowed correlation matrix. Since the correlation matrix may be singular we solve it with the pseudoinverse, provided by SYEV/HEEV.</font>
+<a name="line195">195: </a><font color="#B22222">*/</font>
+<a name="line196">196: </a><strong><font color="#4169E1"><a name="KSPGuessFormGuess_Fischer_3"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessFormGuess_Fischer_3(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line197">197: </a>{
+<a name="line198">198: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+<a name="line199">199: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         i, j, m;
+<a name="line200">200: </a>  <a href="../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>       *s_values;
+<a name="line201">201: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>     *corr, *work, *scratch_vec, zero = 0.0, one = 1.0;
+<a name="line202">202: </a>  <a href="../../../../../../manualpages/Sys/PetscBLASInt.html">PetscBLASInt</a>     blas_m, blas_info, blas_rank = 0, blas_lwork, blas_one = 1;
+<a name="line203">203: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line204">204: </a>  <a href="../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *rwork;
+<a name="line205">205: </a><font color="#A020F0">#endif</font>
+
+<a name="line207">207: </a>  <font color="#B22222">/* project provided b onto space of stored btildes */</font>
+<a name="line208">208: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line209">209: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecSet.html">VecSet</a>(x, 0.0));
+<a name="line210">210: </a>  m           = itg-&gt;curl;
+<a name="line211">211: </a>  itg-&gt;last_b = b;
+<a name="line212">212: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectStateGet.html">PetscObjectStateGet</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)b, &amp;itg-&gt;last_b_state));
+<a name="line213">213: </a>  <font color="#4169E1">if</font> (m &gt; 0) {
+<a name="line214">214: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscBLASIntCast.html">PetscBLASIntCast</a>(m, &amp;blas_m));
+<a name="line215">215: </a>    blas_lwork = (<font color="#B22222">/* assume a block size of m */</font> blas_m + 2) * blas_m;
+<a name="line216">216: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line217">217: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscCalloc5.html">PetscCalloc5</a>(m * m, &amp;corr, m, &amp;s_values, blas_lwork, &amp;work, 3 * m - 2, &amp;rwork, m, &amp;scratch_vec));
+<a name="line218">218: </a><font color="#A020F0">#else</font>
+<a name="line219">219: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscCalloc4.html">PetscCalloc4</a>(m * m, &amp;corr, m, &amp;s_values, blas_lwork, &amp;work, m, &amp;scratch_vec));
+<a name="line220">220: </a><font color="#A020F0">#endif</font>
+<a name="line221">221: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMDot.html">VecMDot</a>(b, itg-&gt;curl, itg-&gt;btilde, itg-&gt;last_b_coefs));
+<a name="line222">222: </a>    <font color="#4169E1">for</font> (j = 0; j &lt; m; ++j) {
+<a name="line223">223: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; m; ++i) corr[m * j + i] = itg-&gt;corr[(itg-&gt;maxl) * j + i];
+<a name="line224">224: </a>    }
+<a name="line225">225: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFPTrapPush.html">PetscFPTrapPush</a>(<a href="../../../../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_OFF</a>));
+<a name="line226">226: </a>    <a href="../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> max_s_value = 0.0;
+<a name="line227">227: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line228">228: </a>    <a href="../../../../../../manualpages/Sys/PetscCallBLAS.html">PetscCallBLAS</a>(<font color="#666666">"LAPACKheev"</font>, LAPACKheev_(<font color="#666666">"V"</font>, <font color="#666666">"L"</font>, &amp;blas_m, corr, &amp;blas_m, s_values, work, &amp;blas_lwork, rwork, &amp;blas_info));
+<a name="line229">229: </a><font color="#A020F0">#else</font>
+<a name="line230">230: </a>    <a href="../../../../../../manualpages/Sys/PetscCallBLAS.html">PetscCallBLAS</a>(<font color="#666666">"LAPACKsyev"</font>, LAPACKsyev_(<font color="#666666">"V"</font>, <font color="#666666">"L"</font>, &amp;blas_m, corr, &amp;blas_m, s_values, work, &amp;blas_lwork, &amp;blas_info));
+<a name="line231">231: </a><font color="#A020F0">#endif</font>
+
+<a name="line233">233: </a>    <font color="#4169E1">if</font> (blas_info == 0) {
+<a name="line234">234: </a>      <font color="#B22222">/* make corr store singular vectors and s_values store singular values */</font>
+<a name="line235">235: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; m; ++j) {
+<a name="line236">236: </a>        <font color="#4169E1">if</font> (s_values[j] &lt; 0.0) {
+<a name="line237">237: </a>          s_values[j] = <a href="../../../../../../manualpages/Sys/PetscAbsReal.html">PetscAbsReal</a>(s_values[j]);
+<a name="line238">238: </a>          <font color="#4169E1">for</font> (i = 0; i &lt; m; ++i) corr[m * j + i] *= -1.0;
+<a name="line239">239: </a>        }
+<a name="line240">240: </a>        max_s_value = <a href="../../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(max_s_value, s_values[j]);
+<a name="line241">241: </a>      }
+
+<a name="line243">243: </a>      <font color="#B22222">/* manually apply the action of the pseudoinverse */</font>
+<a name="line244">244: </a>      <a href="../../../../../../manualpages/Sys/PetscCallBLAS.html">PetscCallBLAS</a>(<font color="#666666">"BLASgemv"</font>, BLASgemv_(<font color="#666666">"T"</font>, &amp;blas_m, &amp;blas_m, &amp;one, corr, &amp;blas_m, itg-&gt;last_b_coefs, &amp;blas_one, &amp;zero, scratch_vec, &amp;blas_one));
+<a name="line245">245: </a>      <font color="#4169E1">for</font> (j = 0; j &lt; m; ++j) {
+<a name="line246">246: </a>        <font color="#4169E1">if</font> (s_values[j] &gt; itg-&gt;tol * max_s_value) {
+<a name="line247">247: </a>          scratch_vec[j] /= s_values[j];
+<a name="line248">248: </a>          blas_rank += 1;
+<a name="line249">249: </a>        } <font color="#4169E1">else</font> {
+<a name="line250">250: </a>          scratch_vec[j] = 0.0;
+<a name="line251">251: </a>        }
+<a name="line252">252: </a>      }
+<a name="line253">253: </a>      <a href="../../../../../../manualpages/Sys/PetscCallBLAS.html">PetscCallBLAS</a>(<font color="#666666">"BLASgemv"</font>, BLASgemv_(<font color="#666666">"N"</font>, &amp;blas_m, &amp;blas_m, &amp;one, corr, &amp;blas_m, scratch_vec, &amp;blas_one, &amp;zero, itg-&gt;alpha, &amp;blas_one));
+
+<a name="line255">255: </a>    } <font color="#4169E1">else</font> {
+<a name="line256">256: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(guess, <font color="#666666">"Warning eigenvalue solver failed with error code %d - setting initial guess to zero\n"</font>, (int)blas_info));
+<a name="line257">257: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMemzero.html">PetscMemzero</a>(itg-&gt;alpha, <font color="#4169E1">sizeof</font>(*itg-&gt;alpha) * itg-&gt;maxl));
+<a name="line258">258: </a>    }
+<a name="line259">259: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>());
+
+<a name="line261">261: </a>    <font color="#4169E1">if</font> (itg-&gt;monitor &amp;&amp; blas_info == 0) {
+<a name="line262">262: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"KSPFischerGuess correlation rank = %d\n"</font>, (int)blas_rank));
+<a name="line263">263: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"KSPFischerGuess singular values = "</font>));
+<a name="line264">264: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; itg-&gt;curl; i++) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">" %g"</font>, (double)s_values[i]));
+<a name="line265">265: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"\n"</font>));
+
+<a name="line267">267: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"KSPFischerGuess alphas ="</font>));
+<a name="line268">268: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; itg-&gt;curl; i++) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">" %g"</font>, (double)PetscAbsScalar(itg-&gt;alpha[i])));
+<a name="line269">269: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;comm, <font color="#666666">"\n"</font>));
+<a name="line270">270: </a>    }
+<a name="line271">271: </a>    <font color="#B22222">/* Form the initial guess by using b's projection coefficients with the xs */</font>
+<a name="line272">272: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMAXPY.html">VecMAXPY</a>(x, itg-&gt;curl, itg-&gt;alpha, itg-&gt;xtilde));
+<a name="line273">273: </a><font color="#A020F0">#if defined(PETSC_USE_COMPLEX)</font>
+<a name="line274">274: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree5.html">PetscFree5</a>(corr, s_values, work, rwork, scratch_vec));
+<a name="line275">275: </a><font color="#A020F0">#else</font>
+<a name="line276">276: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree4.html">PetscFree4</a>(corr, s_values, work, scratch_vec));
+<a name="line277">277: </a><font color="#A020F0">#endif</font>
+<a name="line278">278: </a>  }
+<a name="line279">279: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line280">280: </a>}
+
+<a name="line282">282: </a><strong><font color="#4169E1"><a name="KSPGuessUpdate_Fischer_3"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessUpdate_Fischer_3(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line283">283: </a>{
+<a name="line284">284: </a>  KSPGuessFischer *itg    = (KSPGuessFischer *)guess-&gt;data;
+<a name="line285">285: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        rotate = itg-&gt;curl == itg-&gt;maxl ? <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a> : <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line286">286: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         i, j;
+<a name="line287">287: </a>  <a href="../../../../../../manualpages/Sys/PetscObjectState.html">PetscObjectState</a> b_state;
+<a name="line288">288: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>     *last_column;
+<a name="line289">289: </a>  <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a>              oldest;
+
+<a name="line291">291: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line292">292: </a>  <font color="#4169E1">if</font> (rotate) {
+<a name="line293">293: </a>    <font color="#B22222">/* we have the maximum number of vectors so rotate: oldest vector is at index 0 */</font>
+<a name="line294">294: </a>    oldest = itg-&gt;xtilde[0];
+<a name="line295">295: </a>    <font color="#4169E1">for</font> (i = 1; i &lt; itg-&gt;curl; ++i) itg-&gt;xtilde[i - 1] = itg-&gt;xtilde[i];
+<a name="line296">296: </a>    itg-&gt;xtilde[itg-&gt;curl - 1] = oldest;
+<a name="line297">297: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;xtilde[itg-&gt;curl - 1]));
+
+<a name="line299">299: </a>    oldest = itg-&gt;btilde[0];
+<a name="line300">300: </a>    <font color="#4169E1">for</font> (i = 1; i &lt; itg-&gt;curl; ++i) itg-&gt;btilde[i - 1] = itg-&gt;btilde[i];
+<a name="line301">301: </a>    itg-&gt;btilde[itg-&gt;curl - 1] = oldest;
+<a name="line302">302: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(b, itg-&gt;btilde[itg-&gt;curl - 1]));
+<a name="line303">303: </a>    <font color="#B22222">/* shift correlation matrix up and left */</font>
+<a name="line304">304: </a>    <font color="#4169E1">for</font> (j = 1; j &lt; itg-&gt;maxl; ++j) {
+<a name="line305">305: </a>      <font color="#4169E1">for</font> (i = 1; i &lt; itg-&gt;maxl; ++i) itg-&gt;corr[(j - 1) * itg-&gt;maxl + i - 1] = itg-&gt;corr[j * itg-&gt;maxl + i];
+<a name="line306">306: </a>    }
+<a name="line307">307: </a>  } <font color="#4169E1">else</font> {
+<a name="line308">308: </a>    <font color="#B22222">/* append new vectors */</font>
+<a name="line309">309: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(x, itg-&gt;xtilde[itg-&gt;curl]));
+<a name="line310">310: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(b, itg-&gt;btilde[itg-&gt;curl]));
+<a name="line311">311: </a>    itg-&gt;curl++;
+<a name="line312">312: </a>  }
+
+<a name="line314">314: </a>  <font color="#B22222">/*</font>
+<a name="line315">315: </a><font color="#B22222">      Populate new column of the correlation matrix and then copy it into the</font>
+<a name="line316">316: </a><font color="#B22222">      row. itg-&gt;maxl is the allocated length per column: itg-&gt;curl is the actual</font>
+<a name="line317">317: </a><font color="#B22222">      column length.</font>
+<a name="line318">318: </a><font color="#B22222">      If possible reuse the dot products from FormGuess</font>
+<a name="line319">319: </a><font color="#B22222">  */</font>
+<a name="line320">320: </a>  last_column = itg-&gt;corr + (itg-&gt;curl - 1) * itg-&gt;maxl;
+<a name="line321">321: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectStateGet.html">PetscObjectStateGet</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)b, &amp;b_state));
+<a name="line322">322: </a>  <font color="#4169E1">if</font> (b_state == itg-&gt;last_b_state &amp;&amp; b == itg-&gt;last_b) {
+<a name="line323">323: </a>    <font color="#4169E1">if</font> (rotate) {
+<a name="line324">324: </a>      <font color="#4169E1">for</font> (i = 1; i &lt; itg-&gt;maxl; ++i) itg-&gt;last_b_coefs[i - 1] = itg-&gt;last_b_coefs[i];
+<a name="line325">325: </a>    }
+<a name="line326">326: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDot.html">VecDot</a>(b, b, &amp;itg-&gt;last_b_coefs[itg-&gt;curl - 1]));
+<a name="line327">327: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(last_column, itg-&gt;last_b_coefs, itg-&gt;curl));
+<a name="line328">328: </a>  } <font color="#4169E1">else</font> {
+<a name="line329">329: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecMDot.html">VecMDot</a>(b, itg-&gt;curl, itg-&gt;btilde, last_column));
+<a name="line330">330: </a>  }
+<a name="line331">331: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; itg-&gt;curl; ++i) itg-&gt;corr[i * itg-&gt;maxl + itg-&gt;curl - 1] = last_column[i];
+<a name="line332">332: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line333">333: </a>}
+
+<a name="line335">335: </a><strong><font color="#4169E1"><a name="KSPGuessSetFromOptions_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessSetFromOptions_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess)</font></strong>
+<a name="line336">336: </a>{
+<a name="line337">337: </a>  KSPGuessFischer *ITG  = (KSPGuessFischer *)guess-&gt;data;
+<a name="line338">338: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         nmax = 2, model[2];
+<a name="line339">339: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        flg;
+
+<a name="line341">341: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line342">342: </a>  model[0] = ITG-&gt;method;
+<a name="line343">343: </a>  model[1] = ITG-&gt;maxl;
+<a name="line344">344: </a>  <a href="../../../../../../manualpages/Sys/PetscOptionsBegin.html">PetscOptionsBegin</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess), ((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess)-&gt;prefix, <font color="#666666">"Fischer guess options"</font>, <font color="#666666">"<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a>"</font>);
+<a name="line345">345: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscOptionsIntArray.html">PetscOptionsIntArray</a>(<font color="#666666">"-ksp_guess_fischer_model"</font>, <font color="#666666">"Model type and dimension of basis"</font>, <font color="#666666">"<a href="../../../../../../manualpages/KSP/KSPGuessFischerSetModel.html">KSPGuessFischerSetModel</a>"</font>, model, &amp;nmax, &amp;flg));
+<a name="line346">346: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/KSP/KSPGuessFischerSetModel.html">KSPGuessFischerSetModel</a>(guess, model[0], model[1]));
+<a name="line347">347: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-ksp_guess_fischer_tol"</font>, <font color="#666666">"Tolerance to determine rank via ratio of singular values"</font>, <font color="#666666">"<a href="../../../../../../manualpages/KSP/KSPGuessSetTolerance.html">KSPGuessSetTolerance</a>"</font>, ITG-&gt;tol, &amp;ITG-&gt;tol, NULL));
+<a name="line348">348: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-ksp_guess_fischer_monitor"</font>, <font color="#666666">"Monitor the guess"</font>, NULL, ITG-&gt;monitor, &amp;ITG-&gt;monitor, NULL));
+<a name="line349">349: </a>  <a href="../../../../../../manualpages/Sys/PetscOptionsEnd.html">PetscOptionsEnd</a>();
+<a name="line350">350: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line351">351: </a>}
+
+<a name="line353">353: </a><strong><font color="#4169E1"><a name="KSPGuessSetTolerance_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessSetTolerance_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> tol)</font></strong>
+<a name="line354">354: </a>{
+<a name="line355">355: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+
+<a name="line357">357: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line358">358: </a>  itg-&gt;tol = tol;
+<a name="line359">359: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line360">360: </a>}
+
+<a name="line362">362: </a><strong><font color="#4169E1"><a name="KSPGuessView_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessView_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line363">363: </a>{
+<a name="line364">364: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+<a name="line365">365: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        isascii;
+
+<a name="line367">367: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line368">368: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;isascii));
+<a name="line369">369: </a>  <font color="#4169E1">if</font> (isascii) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"Model %"</font> PetscInt_FMT <font color="#666666">", size %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, itg-&gt;method, itg-&gt;maxl));
+<a name="line370">370: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line371">371: </a>}
+
+<a name="line373">373: </a><font color="#B22222">/*@</font>
+<a name="line374">374: </a><font color="#B22222">   <a href="../../../../../../manualpages/KSP/KSPGuessFischerSetModel.html">KSPGuessFischerSetModel</a> - Use the Paul Fischer algorithm or its variants to compute the initial guess</font>
+
+<a name="line376">376: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line378">378: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line379">379: </a><font color="#B22222">+  guess - the initial guess context</font>
+<a name="line380">380: </a><font color="#B22222">.  model - use model 1, model 2, model 3, or any other number to turn it off</font>
+<a name="line381">381: </a><font color="#B22222">-  size  - size of subspace used to generate initial guess</font>
+
+<a name="line383">383: </a><font color="#B22222">    Options Database Key:</font>
+<a name="line384">384: </a><font color="#B22222">.   -ksp_guess_fischer_model &lt;model,size&gt; - uses the Fischer initial guess generator for repeated linear solves</font>
+
+<a name="line386">386: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line388">388: </a><font color="#B22222">.seealso: [](chapter_ksp), `<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a>`, `<a href="../../../../../../manualpages/KSP/KSPGuessCreate.html">KSPGuessCreate</a>()`, `<a href="../../../../../../manualpages/KSP/KSPSetUseFischerGuess.html">KSPSetUseFischerGuess</a>()`, `<a href="../../../../../../manualpages/KSP/KSPSetGuess.html">KSPSetGuess</a>()`, `<a href="../../../../../../manualpages/KSP/KSPGetGuess.html">KSPGetGuess</a>()`, `<a href="../../../../../../manualpages/KSP/KSP.html">KSP</a>`</font>
+<a name="line389">389: </a><font color="#B22222">@*/</font>
+<a name="line390">390: </a><strong><font color="#4169E1"><a name="KSPGuessFischerSetModel"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/KSP/KSPGuessFischerSetModel.html">KSPGuessFischerSetModel</a>(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> model, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> size)</font></strong>
+<a name="line391">391: </a>{
+<a name="line392">392: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line395">395: </a>  <a href="../../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(guess, <font color="#666666">"KSPGuessFischerSetModel_C"</font>, (<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a>, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>), (guess, model, size));
+<a name="line396">396: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line397">397: </a>}
+
+<a name="line399">399: </a><strong><font color="#4169E1"><a name="KSPGuessFischerSetModel_Fischer"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessFischerSetModel_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> model, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> size)</font></strong>
+<a name="line400">400: </a>{
+<a name="line401">401: </a>  KSPGuessFischer *itg = (KSPGuessFischer *)guess-&gt;data;
+
+<a name="line403">403: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line404">404: </a>  <font color="#4169E1">if</font> (model == 1) {
+<a name="line405">405: </a>    guess-&gt;ops-&gt;update    = KSPGuessUpdate_Fischer_1;
+<a name="line406">406: </a>    guess-&gt;ops-&gt;formguess = KSPGuessFormGuess_Fischer_1;
+<a name="line407">407: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (model == 2) {
+<a name="line408">408: </a>    guess-&gt;ops-&gt;update    = KSPGuessUpdate_Fischer_2;
+<a name="line409">409: </a>    guess-&gt;ops-&gt;formguess = KSPGuessFormGuess_Fischer_2;
+<a name="line410">410: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (model == 3) {
+<a name="line411">411: </a>    guess-&gt;ops-&gt;update    = KSPGuessUpdate_Fischer_3;
+<a name="line412">412: </a>    guess-&gt;ops-&gt;formguess = KSPGuessFormGuess_Fischer_3;
+<a name="line413">413: </a>  } <font color="#4169E1">else</font> {
+<a name="line414">414: </a>    guess-&gt;ops-&gt;update    = NULL;
+<a name="line415">415: </a>    guess-&gt;ops-&gt;formguess = NULL;
+<a name="line416">416: </a>    itg-&gt;method           = 0;
+<a name="line417">417: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line418">418: </a>  }
+<a name="line419">419: </a>  <font color="#4169E1">if</font> (size != itg-&gt;maxl) {
+<a name="line420">420: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(itg-&gt;alpha));
+<a name="line421">421: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(itg-&gt;maxl, &amp;itg-&gt;btilde));
+<a name="line422">422: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(itg-&gt;maxl, &amp;itg-&gt;xtilde));
+<a name="line423">423: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;itg-&gt;guess));
+<a name="line424">424: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;itg-&gt;Ax));
+<a name="line425">425: </a>  }
+<a name="line426">426: </a>  itg-&gt;method = model;
+<a name="line427">427: </a>  itg-&gt;maxl   = size;
+<a name="line428">428: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line429">429: </a>}
+
+<a name="line431">431: </a><font color="#B22222">/*</font>
+<a name="line432">432: </a><font color="#B22222">    KSPGUESSFISCHER - Implements Paul Fischer's two initial guess algorithms and a nonorthogonalizing variant for situations where</font>
+<a name="line433">433: </a><font color="#B22222">    a linear system is solved repeatedly</font>
+
+<a name="line435">435: </a><font color="#B22222">  References:</font>
+<a name="line436">436: </a><font color="#B22222">. * - https://ntrs.nasa.gov/archive/nasa/casi.ntrs.nasa.gov/19940020363_1994020363.pdf</font>
+
+<a name="line438">438: </a><font color="#B22222">   Notes:</font>
+<a name="line439">439: </a><font color="#B22222">    the algorithm is different from Fischer's paper because we do not CHANGE the right hand side of the new</font>
+<a name="line440">440: </a><font color="#B22222">    problem and solve the problem with an initial guess of zero, rather we solve the original problem</font>
+<a name="line441">441: </a><font color="#B22222">    with a nonzero initial guess (this is done so that the linear solver convergence tests are based on</font>
+<a name="line442">442: </a><font color="#B22222">    the original RHS). We use the xtilde = x - xguess as the new direction so that it is not</font>
+<a name="line443">443: </a><font color="#B22222">    mostly orthogonal to the previous solutions.</font>
+
+<a name="line445">445: </a><font color="#B22222">    These are not intended to be used directly, they are called by <a href="../../../../../../manualpages/KSP/KSP.html">KSP</a> automatically with the command line options -ksp_guess_type fischer -ksp_guess_fischer_model &lt;int,int&gt; or programmatically as</font>
+<a name="line446">446: </a><font color="#B22222">.vb</font>
+<a name="line447">447: </a><font color="#B22222">    <a href="../../../../../../manualpages/KSP/KSPGetGuess.html">KSPGetGuess</a>(ksp,&amp;guess);</font>
+<a name="line448">448: </a><font color="#B22222">    <a href="../../../../../../manualpages/KSP/KSPGuessSetType.html">KSPGuessSetType</a>(guess,KSPGUESSFISCHER);</font>
+<a name="line449">449: </a><font color="#B22222">    <a href="../../../../../../manualpages/KSP/KSPGuessFischerSetModel.html">KSPGuessFischerSetModel</a>(guess,model,basis);</font>
+<a name="line450">450: </a><font color="#B22222">    <a href="../../../../../../manualpages/KSP/KSPGuessSetTolerance.html">KSPGuessSetTolerance</a>(guess,PETSC_MACHINE_EPSILON);</font>
+
+<a name="line452">452: </a><font color="#B22222">    The default tolerance (which is only used in Method 3) is 32*PETSC_MACHINE_EPSILON. This value was chosen</font>
+<a name="line453">453: </a><font color="#B22222">    empirically by trying a range of tolerances and picking the one that lowered the solver iteration count the most</font>
+<a name="line454">454: </a><font color="#B22222">    with five vectors.</font>
+
+<a name="line456">456: </a><font color="#B22222">    Method 2 is only for positive definite matrices, since it uses the A norm.</font>
+
+<a name="line458">458: </a><font color="#B22222">    Method 3 is not in the original paper. It is the same as the first two methods except that it</font>
+<a name="line459">459: </a><font color="#B22222">    does not orthogonalize the input vectors or use A at all. This choice is faster but provides a</font>
+<a name="line460">460: </a><font color="#B22222">    less effective initial guess for large (about 10) numbers of stored vectors.</font>
+
+<a name="line462">462: </a><font color="#B22222">    Developer note:</font>
+<a name="line463">463: </a><font color="#B22222">      The option -ksp_fischer_guess &lt;int,int&gt; is still available for backward compatibility</font>
+
+<a name="line465">465: </a><font color="#B22222">    Level: intermediate</font>
+
+<a name="line467">467: </a><font color="#B22222">@*/</font>
+<a name="line468">468: </a><strong><font color="#4169E1"><a name="KSPGuessCreate_Fischer"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> KSPGuessCreate_Fischer(<a href="../../../../../../manualpages/KSP/KSPGuess.html">KSPGuess</a> guess)</font></strong>
+<a name="line469">469: </a>{
+<a name="line470">470: </a>  KSPGuessFischer *fischer;
+
+<a name="line472">472: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line473">473: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;fischer));
+<a name="line474">474: </a>  fischer-&gt;method = 1; <font color="#B22222">/* defaults to method 1 */</font>
+<a name="line475">475: </a>  fischer-&gt;maxl   = 10;
+<a name="line476">476: </a>  fischer-&gt;tol    = 32.0 * PETSC_MACHINE_EPSILON;
+<a name="line477">477: </a>  guess-&gt;data     = fischer;
+
+<a name="line479">479: </a>  guess-&gt;ops-&gt;setfromoptions = KSPGuessSetFromOptions_Fischer;
+<a name="line480">480: </a>  guess-&gt;ops-&gt;destroy        = KSPGuessDestroy_Fischer;
+<a name="line481">481: </a>  guess-&gt;ops-&gt;settolerance   = KSPGuessSetTolerance_Fischer;
+<a name="line482">482: </a>  guess-&gt;ops-&gt;setup          = KSPGuessSetUp_Fischer;
+<a name="line483">483: </a>  guess-&gt;ops-&gt;view           = KSPGuessView_Fischer;
+<a name="line484">484: </a>  guess-&gt;ops-&gt;reset          = KSPGuessReset_Fischer;
+<a name="line485">485: </a>  guess-&gt;ops-&gt;update         = KSPGuessUpdate_Fischer_1;
+<a name="line486">486: </a>  guess-&gt;ops-&gt;formguess      = KSPGuessFormGuess_Fischer_1;
+
+<a name="line488">488: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)guess, <font color="#666666">"KSPGuessFischerSetModel_C"</font>, KSPGuessFischerSetModel_Fischer));
+<a name="line489">489: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line490">490: </a>}
+</pre>
+</body>
+
+</html>

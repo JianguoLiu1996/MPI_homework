@@ -1,0 +1,334 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/snes/linesearch/impls/nleqerr/linesearchnleqerr.c">Actual source code: linesearchnleqerr.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:20+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsc/private/linesearchimpl.h.html">&lt;petsc/private/linesearchimpl.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../include/petsc/private/snesimpl.h.html">&lt;petsc/private/snesimpl.h&gt;</A>
+
+<a name="line4">  4: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line5">  5: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> norm_delta_x_prev;     <font color="#B22222">/* norm of previous update */</font>
+<a name="line6">  6: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> norm_bar_delta_x_prev; <font color="#B22222">/* norm of previous bar update */</font>
+<a name="line7">  7: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> mu_curr;               <font color="#B22222">/* current local Lipschitz estimate */</font>
+<a name="line8">  8: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> lambda_prev;           <font color="#B22222">/* previous step length: for some reason <a href="../../../../../manualpages/SNES/SNESLineSearchGetLambda.html">SNESLineSearchGetLambda</a> returns 1 instead of the previous step length */</font>
+<a name="line9">  9: </a>} SNESLineSearch_NLEQERR;
+
+<a name="line11"> 11: </a>static <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  NLEQERR_cited      = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line12"> 12: </a>static const char NLEQERR_citation[] = <font color="#666666">"@book{deuflhard2011,\n"</font>
+<a name="line13"> 13: </a>                                       <font color="#666666">"  title = {Newton Methods for Nonlinear Problems},\n"</font>
+<a name="line14"> 14: </a>                                       <font color="#666666">"  author = {Peter Deuflhard},\n"</font>
+<a name="line15"> 15: </a>                                       <font color="#666666">"  volume = 35,\n"</font>
+<a name="line16"> 16: </a>                                       <font color="#666666">"  year = 2011,\n"</font>
+<a name="line17"> 17: </a>                                       <font color="#666666">"  isbn = {978-3-642-23898-7},\n"</font>
+<a name="line18"> 18: </a>                                       <font color="#666666">"  doi  = {10.1007/978-3-642-23899-4},\n"</font>
+<a name="line19"> 19: </a>                                       <font color="#666666">"  publisher = {Springer-Verlag},\n"</font>
+<a name="line20"> 20: </a>                                       <font color="#666666">"  address = {Berlin, Heidelberg}\n}\n"</font>;
+
+<a name="line22"> 22: </a><strong><font color="#4169E1"><a name="SNESLineSearchReset_NLEQERR"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SNESLineSearchReset_NLEQERR(<a href="../../../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch)</font></strong>
+<a name="line23"> 23: </a>{
+<a name="line24"> 24: </a>  SNESLineSearch_NLEQERR *nleqerr = (SNESLineSearch_NLEQERR *)linesearch-&gt;data;
+
+<a name="line26"> 26: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line27"> 27: </a>  nleqerr-&gt;mu_curr               = 0.0;
+<a name="line28"> 28: </a>  nleqerr-&gt;norm_delta_x_prev     = -1.0;
+<a name="line29"> 29: </a>  nleqerr-&gt;norm_bar_delta_x_prev = -1.0;
+<a name="line30"> 30: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line31"> 31: </a>}
+
+<a name="line33"> 33: </a><strong><font color="#4169E1"><a name="SNESLineSearchApply_NLEQERR"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SNESLineSearchApply_NLEQERR(<a href="../../../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch)</font></strong>
+<a name="line34"> 34: </a>{
+<a name="line35"> 35: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>               changed_y, changed_w;
+<a name="line36"> 36: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>                     X, F, Y, W, G;
+<a name="line37"> 37: </a>  <a href="../../../../../manualpages/SNES/SNES.html">SNES</a>                    snes;
+<a name="line38"> 38: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>               fnorm, xnorm, ynorm, gnorm, wnorm;
+<a name="line39"> 39: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>               lambda, minlambda, stol;
+<a name="line40"> 40: </a>  <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a>             monitor;
+<a name="line41"> 41: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                max_its, count, snes_iteration;
+<a name="line42"> 42: </a>  <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a>               theta, mudash, lambdadash;
+<a name="line43"> 43: </a>  SNESLineSearch_NLEQERR *nleqerr = (SNESLineSearch_NLEQERR *)linesearch-&gt;data;
+<a name="line44"> 44: </a>  <a href="../../../../../manualpages/KSP/KSPConvergedReason.html">KSPConvergedReason</a>      kspreason;
+
+<a name="line46"> 46: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line47"> 47: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCitationsRegister.html">PetscCitationsRegister</a>(NLEQERR_citation, &amp;NLEQERR_cited));
+
+<a name="line49"> 49: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchGetVecs.html">SNESLineSearchGetVecs</a>(linesearch, &amp;X, &amp;F, &amp;Y, &amp;W, &amp;G));
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchGetNorms.html">SNESLineSearchGetNorms</a>(linesearch, &amp;xnorm, &amp;fnorm, &amp;ynorm));
+<a name="line51"> 51: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchGetLambda.html">SNESLineSearchGetLambda</a>(linesearch, &amp;lambda));
+<a name="line52"> 52: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchGetSNES.html">SNESLineSearchGetSNES</a>(linesearch, &amp;snes));
+<a name="line53"> 53: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchGetDefaultMonitor.html">SNESLineSearchGetDefaultMonitor</a>(linesearch, &amp;monitor));
+<a name="line54"> 54: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchGetTolerances.html">SNESLineSearchGetTolerances</a>(linesearch, &amp;minlambda, NULL, NULL, NULL, NULL, &amp;max_its));
+<a name="line55"> 55: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESGetTolerances.html">SNESGetTolerances</a>(snes, NULL, NULL, &amp;stol, NULL, NULL));
+
+<a name="line57"> 57: </a>  <font color="#B22222">/* reset the state of the Lipschitz estimates */</font>
+<a name="line58"> 58: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESGetIterationNumber.html">SNESGetIterationNumber</a>(snes, &amp;snes_iteration));
+<a name="line59"> 59: </a>  <font color="#4169E1">if</font> (!snes_iteration) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(SNESLineSearchReset_NLEQERR(linesearch));
+
+<a name="line61"> 61: </a>  <font color="#B22222">/* precheck */</font>
+<a name="line62"> 62: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchPreCheck.html">SNESLineSearchPreCheck</a>(linesearch, X, Y, &amp;changed_y));
+<a name="line63"> 63: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetReason.html">SNESLineSearchSetReason</a>(linesearch, <a href="../../../../../manualpages/SNES/SNESLineSearchReason.html">SNES_LINESEARCH_SUCCEEDED</a>));
+
+<a name="line65"> 65: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>(Y, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;ynorm));
+<a name="line66"> 66: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>(X, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;xnorm));
+<a name="line67"> 67: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>(Y, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;ynorm));
+<a name="line68"> 68: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>(X, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;xnorm));
+
+<a name="line70"> 70: </a>  <font color="#B22222">/* Note: Y is *minus* the Newton step. For whatever reason PETSc doesn't solve with the minus on  the RHS. */</font>
+
+<a name="line72"> 72: </a>  <font color="#4169E1">if</font> (ynorm == 0.0) {
+<a name="line73"> 73: </a>    <font color="#4169E1">if</font> (monitor) {
+<a name="line74"> 74: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line75"> 75: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: Initial direction and size is 0\n"</font>));
+<a name="line76"> 76: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line77"> 77: </a>    }
+<a name="line78"> 78: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(X, W));
+<a name="line79"> 79: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(F, G));
+<a name="line80"> 80: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetNorms.html">SNESLineSearchSetNorms</a>(linesearch, xnorm, fnorm, ynorm));
+<a name="line81"> 81: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetReason.html">SNESLineSearchSetReason</a>(linesearch, <a href="../../../../../manualpages/SNES/SNESLineSearchReason.html">SNES_LINESEARCH_FAILED_REDUCT</a>));
+<a name="line82"> 82: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line83"> 83: </a>  }
+
+<a name="line85"> 85: </a>  <font color="#B22222">/* At this point, we've solved the Newton system for delta_x, and we assume that</font>
+<a name="line86"> 86: </a><font color="#B22222">     its norm is greater than the solution tolerance (otherwise we wouldn't be in</font>
+<a name="line87"> 87: </a><font color="#B22222">     here). So let's go ahead and estimate the Lipschitz constant.</font>
+
+<a name="line89"> 89: </a><font color="#B22222">     W contains bar_delta_x_prev at this point. */</font>
+
+<a name="line91"> 91: </a>  <font color="#4169E1">if</font> (monitor) {
+<a name="line92"> 92: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line93"> 93: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: norm of Newton step: %14.12e\n"</font>, (double)ynorm));
+<a name="line94"> 94: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line95"> 95: </a>  }
+
+<a name="line97"> 97: </a>  <font color="#B22222">/* this needs information from a previous iteration, so can't do it on the first one */</font>
+<a name="line98"> 98: </a>  <font color="#4169E1">if</font> (nleqerr-&gt;norm_delta_x_prev &gt; 0 &amp;&amp; nleqerr-&gt;norm_bar_delta_x_prev &gt; 0) {
+<a name="line99"> 99: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(G, +1.0, Y, W)); <font color="#B22222">/* bar_delta_x - delta_x; +1 because Y is -delta_x */</font>
+<a name="line100">100: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>(G, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;gnorm));
+<a name="line101">101: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>(G, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;gnorm));
+
+<a name="line103">103: </a>    nleqerr-&gt;mu_curr = nleqerr-&gt;lambda_prev * (nleqerr-&gt;norm_delta_x_prev * nleqerr-&gt;norm_bar_delta_x_prev) / (gnorm * ynorm);
+<a name="line104">104: </a>    lambda           = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(1.0, nleqerr-&gt;mu_curr);
+
+<a name="line106">106: </a>    <font color="#4169E1">if</font> (monitor) {
+<a name="line107">107: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line108">108: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: Lipschitz estimate: %14.12e; lambda: %14.12e\n"</font>, (double)nleqerr-&gt;mu_curr, (double)lambda));
+<a name="line109">109: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line110">110: </a>    }
+<a name="line111">111: </a>  } <font color="#4169E1">else</font> {
+<a name="line112">112: </a>    lambda = linesearch-&gt;damping;
+<a name="line113">113: </a>  }
+
+<a name="line115">115: </a>  <font color="#B22222">/* The main while loop of the algorithm.</font>
+<a name="line116">116: </a><font color="#B22222">     At the end of this while loop, G should have the accepted new X in it. */</font>
+
+<a name="line118">118: </a>  count = 0;
+<a name="line119">119: </a>  <font color="#4169E1">while</font> (<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>) {
+<a name="line120">120: </a>    <font color="#4169E1">if</font> (monitor) {
+<a name="line121">121: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line122">122: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: entering iteration with lambda: %14.12e\n"</font>, (double)lambda));
+<a name="line123">123: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line124">124: </a>    }
+
+<a name="line126">126: </a>    <font color="#B22222">/* Check that we haven't performed too many iterations */</font>
+<a name="line127">127: </a>    count += 1;
+<a name="line128">128: </a>    <font color="#4169E1">if</font> (count &gt;= max_its) {
+<a name="line129">129: </a>      <font color="#4169E1">if</font> (monitor) {
+<a name="line130">130: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line131">131: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: maximum iterations reached\n"</font>));
+<a name="line132">132: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line133">133: </a>      }
+<a name="line134">134: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetReason.html">SNESLineSearchSetReason</a>(linesearch, <a href="../../../../../manualpages/SNES/SNESLineSearchReason.html">SNES_LINESEARCH_FAILED_REDUCT</a>));
+<a name="line135">135: </a>      <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line136">136: </a>    }
+
+<a name="line138">138: </a>    <font color="#B22222">/* Now comes the Regularity Test. */</font>
+<a name="line139">139: </a>    <font color="#4169E1">if</font> (lambda &lt;= minlambda) {
+<a name="line140">140: </a>      <font color="#B22222">/* This isn't what is suggested by Deuflhard, but it works better in my experience */</font>
+<a name="line141">141: </a>      <font color="#4169E1">if</font> (monitor) {
+<a name="line142">142: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line143">143: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: lambda has reached lambdamin, taking full Newton step\n"</font>));
+<a name="line144">144: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line145">145: </a>      }
+<a name="line146">146: </a>      lambda = 1.0;
+<a name="line147">147: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(G, -lambda, Y, X));
+
+<a name="line149">149: </a>      <font color="#B22222">/* and clean up the state for next time */</font>
+<a name="line150">150: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(SNESLineSearchReset_NLEQERR(linesearch));
+<a name="line151">151: </a>      <font color="#B22222">/*</font>
+<a name="line152">152: </a><font color="#B22222">         The clang static analyzer detected a problem here; once the loop is broken the values</font>
+<a name="line153">153: </a><font color="#B22222">         nleqerr-&gt;norm_delta_x_prev     = ynorm;</font>
+<a name="line154">154: </a><font color="#B22222">         nleqerr-&gt;norm_bar_delta_x_prev = wnorm;</font>
+<a name="line155">155: </a><font color="#B22222">         are set, but wnorm has not even been computed.</font>
+<a name="line156">156: </a><font color="#B22222">         I don't know if this is the correct fix but by setting ynorm and wnorm to -1.0 at</font>
+<a name="line157">157: </a><font color="#B22222">         least the linesearch object is kept in the state set by the SNESLineSearchReset_NLEQERR() call above</font>
+<a name="line158">158: </a><font color="#B22222">      */</font>
+<a name="line159">159: </a>      ynorm = wnorm = -1.0;
+<a name="line160">160: </a>      <font color="#4169E1">break</font>;
+<a name="line161">161: </a>    }
+
+<a name="line163">163: </a>    <font color="#B22222">/* Compute new trial iterate */</font>
+<a name="line164">164: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(W, -lambda, Y, X));
+<a name="line165">165: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESComputeFunction.html">SNESComputeFunction</a>(snes, W, G));
+
+<a name="line167">167: </a>    <font color="#B22222">/* Solve linear system for bar_delta_x_curr: old Jacobian, new RHS. Note absence of minus sign, compared to Deuflhard, in keeping with PETSc convention */</font>
+<a name="line168">168: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(snes-&gt;ksp, G, W));
+<a name="line169">169: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetConvergedReason.html">KSPGetConvergedReason</a>(snes-&gt;ksp, &amp;kspreason));
+<a name="line170">170: </a>    <font color="#4169E1">if</font> (kspreason &lt; 0) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(snes, <font color="#666666">"Solution for \\bar{delta x}^{k+1} failed."</font>));
+
+<a name="line172">172: </a>    <font color="#B22222">/* W now contains -bar_delta_x_curr. */</font>
+
+<a name="line174">174: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(W, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;wnorm));
+<a name="line175">175: </a>    <font color="#4169E1">if</font> (monitor) {
+<a name="line176">176: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line177">177: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: norm of simplified Newton update: %14.12e\n"</font>, (double)wnorm));
+<a name="line178">178: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line179">179: </a>    }
+
+<a name="line181">181: </a>    <font color="#B22222">/* compute the monitoring quantities theta and mudash. */</font>
+
+<a name="line183">183: </a>    theta = wnorm / ynorm;
+
+<a name="line185">185: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(G, -(1.0 - lambda), Y, W));
+<a name="line186">186: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(G, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;gnorm));
+
+<a name="line188">188: </a>    mudash = (0.5 * ynorm * lambda * lambda) / gnorm;
+
+<a name="line190">190: </a>    <font color="#B22222">/* Check for termination of the linesearch */</font>
+<a name="line191">191: </a>    <font color="#4169E1">if</font> (theta &gt;= 1.0) {
+<a name="line192">192: </a>      <font color="#B22222">/* need to go around again with smaller lambda */</font>
+<a name="line193">193: </a>      <font color="#4169E1">if</font> (monitor) {
+<a name="line194">194: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIAddTab.html">PetscViewerASCIIAddTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line195">195: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(monitor, <font color="#666666">"    Line search: monotonicity check failed, ratio: %14.12e\n"</font>, (double)theta));
+<a name="line196">196: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIISubtractTab.html">PetscViewerASCIISubtractTab</a>(monitor, ((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)linesearch)-&gt;tablevel));
+<a name="line197">197: </a>      }
+<a name="line198">198: </a>      lambda = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(mudash, 0.5 * lambda);
+<a name="line199">199: </a>      lambda = <a href="../../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(lambda, minlambda);
+<a name="line200">200: </a>      <font color="#B22222">/* continue through the loop, i.e. go back to regularity test */</font>
+<a name="line201">201: </a>    } <font color="#4169E1">else</font> {
+<a name="line202">202: </a>      <font color="#B22222">/* linesearch terminated */</font>
+<a name="line203">203: </a>      lambdadash = <a href="../../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(1.0, mudash);
+
+<a name="line205">205: </a>      <font color="#4169E1">if</font> (lambdadash == 1.0 &amp;&amp; lambda == 1.0 &amp;&amp; wnorm &lt;= stol) {
+<a name="line206">206: </a>        <font color="#B22222">/* store the updated state, X - Y - W, in G:</font>
+<a name="line207">207: </a><font color="#B22222">           I need to keep W for the next linesearch */</font>
+<a name="line208">208: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(G, -1.0, Y, X));
+<a name="line209">209: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(G, -1.0, W));
+<a name="line210">210: </a>        <font color="#4169E1">break</font>;
+<a name="line211">211: </a>      }
+
+<a name="line213">213: </a>      <font color="#B22222">/* Deuflhard suggests to add the following:</font>
+<a name="line214">214: </a><font color="#B22222">      else if (lambdadash &gt;= 4.0 * lambda) {</font>
+<a name="line215">215: </a><font color="#B22222">        lambda = lambdadash;</font>
+<a name="line216">216: </a><font color="#B22222">      }</font>
+<a name="line217">217: </a><font color="#B22222">      to continue through the loop, i.e. go back to regularity test.</font>
+<a name="line218">218: </a><font color="#B22222">      I deliberately exclude this, as I have practical experience of this</font>
+<a name="line219">219: </a><font color="#B22222">      getting stuck in infinite loops (on e.g. an Allen--Cahn problem). */</font>
+
+<a name="line221">221: </a>      <font color="#4169E1">else</font> {
+<a name="line222">222: </a>        <font color="#B22222">/* accept iterate without adding on, i.e. don't use bar_delta_x;</font>
+<a name="line223">223: </a><font color="#B22222">           again, I need to keep W for the next linesearch */</font>
+<a name="line224">224: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(G, -lambda, Y, X));
+<a name="line225">225: </a>        <font color="#4169E1">break</font>;
+<a name="line226">226: </a>      }
+<a name="line227">227: </a>    }
+<a name="line228">228: </a>  }
+
+<a name="line230">230: </a>  <font color="#4169E1">if</font> (linesearch-&gt;ops-&gt;viproject) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*linesearch-&gt;ops-&gt;viproject)(snes, G));
+
+<a name="line232">232: </a>  <font color="#B22222">/* W currently contains -bar_delta_u. Scale it so that it contains bar_delta_u. */</font>
+<a name="line233">233: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecScale.html">VecScale</a>(W, -1.0));
+
+<a name="line235">235: </a>  <font color="#B22222">/* postcheck */</font>
+<a name="line236">236: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchPostCheck.html">SNESLineSearchPostCheck</a>(linesearch, X, Y, G, &amp;changed_y, &amp;changed_w));
+<a name="line237">237: </a>  <font color="#4169E1">if</font> (changed_y || changed_w) {
+<a name="line238">238: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetReason.html">SNESLineSearchSetReason</a>(linesearch, <a href="../../../../../manualpages/SNES/SNESLineSearchReason.html">SNES_LINESEARCH_FAILED_USER</a>));
+<a name="line239">239: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(snes, <font color="#666666">"Changing the search direction here doesn't make sense.\n"</font>));
+<a name="line240">240: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line241">241: </a>  }
+
+<a name="line243">243: </a>  <font color="#B22222">/* copy the solution and information from this iteration over */</font>
+<a name="line244">244: </a>  nleqerr-&gt;norm_delta_x_prev     = ynorm;
+<a name="line245">245: </a>  nleqerr-&gt;norm_bar_delta_x_prev = wnorm;
+<a name="line246">246: </a>  nleqerr-&gt;lambda_prev           = lambda;
+
+<a name="line248">248: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(G, X));
+<a name="line249">249: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESComputeFunction.html">SNESComputeFunction</a>(snes, X, F));
+<a name="line250">250: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(X, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;xnorm));
+<a name="line251">251: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(F, <a href="../../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;fnorm));
+<a name="line252">252: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetLambda.html">SNESLineSearchSetLambda</a>(linesearch, lambda));
+<a name="line253">253: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/SNES/SNESLineSearchSetNorms.html">SNESLineSearchSetNorms</a>(linesearch, xnorm, fnorm, (ynorm &lt; 0 ? PETSC_INFINITY : ynorm)));
+<a name="line254">254: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line255">255: </a>}
+
+<a name="line257">257: </a><strong><font color="#4169E1"><a name="SNESLineSearchView_NLEQERR"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SNESLineSearchView_NLEQERR(<a href="../../../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line258">258: </a>{
+<a name="line259">259: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>               iascii;
+<a name="line260">260: </a>  SNESLineSearch_NLEQERR *nleqerr;
+
+<a name="line262">262: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line263">263: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line264">264: </a>  nleqerr = (SNESLineSearch_NLEQERR *)linesearch-&gt;data;
+<a name="line265">265: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line266">266: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"  NLEQ-ERR affine-covariant linesearch"</font>));
+<a name="line267">267: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"  current local Lipschitz estimate omega=%e\n"</font>, (double)nleqerr-&gt;mu_curr));
+<a name="line268">268: </a>  }
+<a name="line269">269: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line270">270: </a>}
+
+<a name="line272">272: </a><strong><font color="#4169E1"><a name="SNESLineSearchDestroy_NLEQERR"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SNESLineSearchDestroy_NLEQERR(<a href="../../../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch)</font></strong>
+<a name="line273">273: </a>{
+<a name="line274">274: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line275">275: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(linesearch-&gt;data));
+<a name="line276">276: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line277">277: </a>}
+
+<a name="line279">279: </a><font color="#B22222">/*MC</font>
+<a name="line280">280: </a><font color="#B22222">   <a href="../../../../../manualpages/SNES/SNESLINESEARCHNLEQERR.html">SNESLINESEARCHNLEQERR</a> - Error-oriented affine-covariant globalised Newton algorithm of Deuflhard (2011).</font>
+
+<a name="line282">282: </a><font color="#B22222">   This linesearch is intended for Newton-type methods which are affine covariant. Affine covariance</font>
+<a name="line283">283: </a><font color="#B22222">   means that Newton's method will give the same iterations for F(x) = 0 and AF(x) = 0 for a nonsingular</font>
+<a name="line284">284: </a><font color="#B22222">   matrix A. This is a fundamental property; the philosophy of this linesearch is that globalisations</font>
+<a name="line285">285: </a><font color="#B22222">   of Newton's method should carefully preserve it.</font>
+
+<a name="line287">287: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line288">288: </a><font color="#B22222">+  -snes_linesearch_damping&lt;1.0&gt; - initial step length</font>
+<a name="line289">289: </a><font color="#B22222">-  -snes_linesearch_minlambda&lt;1e-12&gt; - minimum step length allowed</font>
+
+<a name="line291">291: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line293">293: </a><font color="#B22222">   Note:</font>
+<a name="line294">294: </a><font color="#B22222">   Contributed by Patrick Farrell &lt;patrick.farrell@maths.ox.ac.uk&gt;</font>
+
+<a name="line296">296: </a><font color="#B22222">   Reference:</font>
+<a name="line297">297: </a><font color="#B22222">.  - * - Newton Methods for Nonlinear Problems, Deuflhard, P. 2011, Springer-Verlag, page 148</font>
+
+<a name="line299">299: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a>`, `<a href="../../../../../manualpages/SNES/SNES.html">SNES</a>`, `<a href="../../../../../manualpages/SNES/SNESLineSearchCreate.html">SNESLineSearchCreate</a>()`, `<a href="../../../../../manualpages/SNES/SNESLineSearchSetType.html">SNESLineSearchSetType</a>()`</font>
+<a name="line300">300: </a><font color="#B22222">M*/</font>
+<a name="line301">301: </a><strong><font color="#4169E1"><a name="SNESLineSearchCreate_NLEQERR"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> SNESLineSearchCreate_NLEQERR(<a href="../../../../../manualpages/SNES/SNESLineSearch.html">SNESLineSearch</a> linesearch)</font></strong>
+<a name="line302">302: </a>{
+<a name="line303">303: </a>  SNESLineSearch_NLEQERR *nleqerr;
+
+<a name="line305">305: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line306">306: </a>  linesearch-&gt;ops-&gt;apply          = SNESLineSearchApply_NLEQERR;
+<a name="line307">307: </a>  linesearch-&gt;ops-&gt;destroy        = SNESLineSearchDestroy_NLEQERR;
+<a name="line308">308: </a>  linesearch-&gt;ops-&gt;setfromoptions = NULL;
+<a name="line309">309: </a>  linesearch-&gt;ops-&gt;reset          = SNESLineSearchReset_NLEQERR;
+<a name="line310">310: </a>  linesearch-&gt;ops-&gt;view           = SNESLineSearchView_NLEQERR;
+<a name="line311">311: </a>  linesearch-&gt;ops-&gt;setup          = NULL;
+
+<a name="line313">313: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;nleqerr));
+
+<a name="line315">315: </a>  linesearch-&gt;data    = (void *)nleqerr;
+<a name="line316">316: </a>  linesearch-&gt;max_its = 40;
+<a name="line317">317: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(SNESLineSearchReset_NLEQERR(linesearch));
+<a name="line318">318: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line319">319: </a>}
+</pre>
+</body>
+
+</html>

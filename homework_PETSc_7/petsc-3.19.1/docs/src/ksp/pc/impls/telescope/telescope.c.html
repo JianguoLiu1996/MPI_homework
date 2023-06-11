@@ -1,0 +1,1390 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/pc/impls/telescope/telescope.c">Actual source code: telescope.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:20:01+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsc/private/petscimpl.h.html">&lt;petsc/private/petscimpl.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../include/petsc/private/matimpl.h.html">&lt;petsc/private/matimpl.h&gt;</A>
+<a name="line3">  3: </a>#include <A href="../../../../../include/petsc/private/pcimpl.h.html">&lt;petsc/private/pcimpl.h&gt;</A>
+<a name="line4">  4: </a>#include <A href="../../../../../include/petscksp.h.html">&lt;petscksp.h&gt;</A>
+<a name="line5">  5: </a>#include <A href="../../../../../include/petscdm.h.html">&lt;petscdm.h&gt;</A>
+<a name="line6">  6: </a><font color="#A020F0">#include </font><font color="#666666">"../src/ksp/pc/impls/telescope/telescope.h"</font><font color="#A020F0"></font>
+
+<a name="line8">  8: </a>static <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  cited      = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line9">  9: </a>static const char citation[] = <font color="#666666">"@inproceedings{MaySananRuppKnepleySmith2016,\n"</font>
+<a name="line10"> 10: </a>                               <font color="#666666">"  title     = {Extreme-Scale Multigrid Components within PETSc},\n"</font>
+<a name="line11"> 11: </a>                               <font color="#666666">"  author    = {Dave A. May and Patrick Sanan and Karl Rupp and Matthew G. Knepley and Barry F. Smith},\n"</font>
+<a name="line12"> 12: </a>                               <font color="#666666">"  booktitle = {Proceedings of the Platform for Advanced Scientific Computing Conference},\n"</font>
+<a name="line13"> 13: </a>                               <font color="#666666">"  series    = {PASC '16},\n"</font>
+<a name="line14"> 14: </a>                               <font color="#666666">"  isbn      = {978-1-4503-4126-4},\n"</font>
+<a name="line15"> 15: </a>                               <font color="#666666">"  location  = {Lausanne, Switzerland},\n"</font>
+<a name="line16"> 16: </a>                               <font color="#666666">"  pages     = {5:1--5:12},\n"</font>
+<a name="line17"> 17: </a>                               <font color="#666666">"  articleno = {5},\n"</font>
+<a name="line18"> 18: </a>                               <font color="#666666">"  numpages  = {12},\n"</font>
+<a name="line19"> 19: </a>                               <font color="#666666">"  url       = {https://doi.acm.org/10.1145/2929908.2929913},\n"</font>
+<a name="line20"> 20: </a>                               <font color="#666666">"  doi       = {10.1145/2929908.2929913},\n"</font>
+<a name="line21"> 21: </a>                               <font color="#666666">"  acmid     = {2929913},\n"</font>
+<a name="line22"> 22: </a>                               <font color="#666666">"  publisher = {ACM},\n"</font>
+<a name="line23"> 23: </a>                               <font color="#666666">"  address   = {New York, NY, USA},\n"</font>
+<a name="line24"> 24: </a>                               <font color="#666666">"  keywords  = {GPU, HPC, agglomeration, coarse-level solver, multigrid, parallel computing, preconditioning},\n"</font>
+<a name="line25"> 25: </a>                               <font color="#666666">"  year      = {2016}\n"</font>
+<a name="line26"> 26: </a>                               <font color="#666666">"}\n"</font>;
+
+<a name="line28"> 28: </a><font color="#B22222">/*</font>
+<a name="line29"> 29: </a><font color="#B22222"> default setup mode</font>
+
+<a name="line31"> 31: </a><font color="#B22222"> [1a] scatter to (FORWARD)</font>
+<a name="line32"> 32: </a><font color="#B22222"> x(comm) -&gt; xtmp(comm)</font>
+<a name="line33"> 33: </a><font color="#B22222"> [1b] local copy (to) ranks with color = 0</font>
+<a name="line34"> 34: </a><font color="#B22222"> xred(subcomm) &lt;- xtmp</font>
+
+<a name="line36"> 36: </a><font color="#B22222"> [2] solve on sub <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> to obtain yred(subcomm)</font>
+
+<a name="line38"> 38: </a><font color="#B22222"> [3a] local copy (from) ranks with color = 0</font>
+<a name="line39"> 39: </a><font color="#B22222"> yred(subcomm) --&gt; xtmp</font>
+<a name="line40"> 40: </a><font color="#B22222"> [2b] scatter from (REVERSE)</font>
+<a name="line41"> 41: </a><font color="#B22222"> xtmp(comm) -&gt; y(comm)</font>
+<a name="line42"> 42: </a><font color="#B22222">*/</font>
+
+<a name="line44"> 44: </a><font color="#B22222">/*</font>
+<a name="line45"> 45: </a><font color="#B22222">  Collective[comm_f]</font>
+<a name="line46"> 46: </a><font color="#B22222">  Notes</font>
+<a name="line47"> 47: </a><font color="#B22222">   * Using comm_f = MPI_COMM_NULL will result in an error</font>
+<a name="line48"> 48: </a><font color="#B22222">   * Using comm_c = MPI_COMM_NULL is valid. If all instances of comm_c are NULL the subcomm is not valid.</font>
+<a name="line49"> 49: </a><font color="#B22222">   * If any non NULL comm_c communicator cannot map any of its ranks to comm_f, the subcomm is not valid.</font>
+<a name="line50"> 50: </a><font color="#B22222">*/</font>
+<a name="line51"> 51: </a><strong><font color="#4169E1"><a name="PCTelescopeTestValidSubcomm"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeTestValidSubcomm(<a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm_f, <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm_c, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *isvalid)</font></strong>
+<a name="line52"> 52: </a>{
+<a name="line53"> 53: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     valid = 1;
+<a name="line54"> 54: </a>  MPI_Group    group_f, group_c;
+<a name="line55"> 55: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  count, k, size_f = 0, size_c = 0, size_c_sum = 0;
+<a name="line56"> 56: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *ranks_f, *ranks_c;
+
+<a name="line58"> 58: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line59"> 59: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(comm_f != MPI_COMM_NULL, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"comm_f cannot be MPI_COMM_NULL"</font>);
+
+<a name="line61"> 61: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_group.html#MPI_Comm_group">MPI_Comm_group</a>(comm_f, &amp;group_f));
+<a name="line62"> 62: </a>  <font color="#4169E1">if</font> (comm_c != MPI_COMM_NULL) <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_group.html#MPI_Comm_group">MPI_Comm_group</a>(comm_c, &amp;group_c));
+
+<a name="line64"> 64: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm_f, &amp;size_f));
+<a name="line65"> 65: </a>  <font color="#4169E1">if</font> (comm_c != MPI_COMM_NULL) <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm_c, &amp;size_c));
+
+<a name="line67"> 67: </a>  <font color="#B22222">/* check not all comm_c's are NULL */</font>
+<a name="line68"> 68: </a>  size_c_sum = size_c;
+<a name="line69"> 69: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</a>(MPI_IN_PLACE, &amp;size_c_sum, 1, MPI_INT, MPI_SUM, comm_f));
+<a name="line70"> 70: </a>  <font color="#4169E1">if</font> (size_c_sum == 0) valid = 0;
+
+<a name="line72"> 72: </a>  <font color="#B22222">/* check we can map at least 1 rank in comm_c to comm_f */</font>
+<a name="line73"> 73: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(size_f, &amp;ranks_f));
+<a name="line74"> 74: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(size_c, &amp;ranks_c));
+<a name="line75"> 75: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; size_f; k++) ranks_f[k] = MPI_UNDEFINED;
+<a name="line76"> 76: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; size_c; k++) ranks_c[k] = k;
+
+<a name="line78"> 78: </a>  <font color="#B22222">/*</font>
+<a name="line79"> 79: </a><font color="#B22222">   <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_translate_ranks.html#MPI_Group_translate_ranks">MPI_Group_translate_ranks</a>() returns a non-zero exit code if any rank cannot be translated.</font>
+<a name="line80"> 80: </a><font color="#B22222">   I do not want the code to terminate immediately if this occurs, rather I want to throw</font>
+<a name="line81"> 81: </a><font color="#B22222">   the error later (during PCSetUp_Telescope()) via <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>() with a message indicating</font>
+<a name="line82"> 82: </a><font color="#B22222">   that comm_c is not a valid sub-communicator.</font>
+<a name="line83"> 83: </a><font color="#B22222">   Hence I purposefully do not call <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>() after <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_translate_ranks.html#MPI_Group_translate_ranks">MPI_Group_translate_ranks</a>().</font>
+<a name="line84"> 84: </a><font color="#B22222">  */</font>
+<a name="line85"> 85: </a>  count = 0;
+<a name="line86"> 86: </a>  <font color="#4169E1">if</font> (comm_c != MPI_COMM_NULL) {
+<a name="line87"> 87: </a>    (void)<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_translate_ranks.html#MPI_Group_translate_ranks">MPI_Group_translate_ranks</a>(group_c, size_c, ranks_c, group_f, ranks_f);
+<a name="line88"> 88: </a>    <font color="#4169E1">for</font> (k = 0; k &lt; size_f; k++) {
+<a name="line89"> 89: </a>      <font color="#4169E1">if</font> (ranks_f[k] == MPI_UNDEFINED) count++;
+<a name="line90"> 90: </a>    }
+<a name="line91"> 91: </a>  }
+<a name="line92"> 92: </a>  <font color="#4169E1">if</font> (count == size_f) valid = 0;
+
+<a name="line94"> 94: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(MPI_IN_PLACE, &amp;valid, 1, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, MPI_MIN, comm_f));
+<a name="line95"> 95: </a>  <font color="#4169E1">if</font> (valid == 1) *isvalid = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line96"> 96: </a>  <font color="#4169E1">else</font> *isvalid = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line98"> 98: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(ranks_f));
+<a name="line99"> 99: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(ranks_c));
+<a name="line100">100: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_free.html#MPI_Group_free">MPI_Group_free</a>(&amp;group_f));
+<a name="line101">101: </a>  <font color="#4169E1">if</font> (comm_c != MPI_COMM_NULL) <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_free.html#MPI_Group_free">MPI_Group_free</a>(&amp;group_c));
+<a name="line102">102: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line103">103: </a>}
+
+<a name="line105">105: </a><strong><font color="#4169E1"><a name="private_PCTelescopeGetSubDM"></a><a href="../../../../../manualpages/DM/DM.html">DM</a> private_PCTelescopeGetSubDM(PC_Telescope sred)</font></strong>
+<a name="line106">106: </a>{
+<a name="line107">107: </a>  <a href="../../../../../manualpages/DM/DM.html">DM</a> subdm = NULL;
+
+<a name="line109">109: </a>  <font color="#4169E1">if</font> (!PCTelescope_isActiveRank(sred)) {
+<a name="line110">110: </a>    subdm = NULL;
+<a name="line111">111: </a>  } <font color="#4169E1">else</font> {
+<a name="line112">112: </a>    <font color="#4169E1">switch</font> (sred-&gt;sr_type) {
+<a name="line113">113: </a>    <font color="#4169E1">case</font> TELESCOPE_DEFAULT:
+<a name="line114">114: </a>      subdm = NULL;
+<a name="line115">115: </a>      <font color="#4169E1">break</font>;
+<a name="line116">116: </a>    <font color="#4169E1">case</font> TELESCOPE_DMDA:
+<a name="line117">117: </a>      subdm = ((PC_Telescope_DMDACtx *)sred-&gt;dm_ctx)-&gt;dmrepart;
+<a name="line118">118: </a>      <font color="#4169E1">break</font>;
+<a name="line119">119: </a>    <font color="#4169E1">case</font> TELESCOPE_DMPLEX:
+<a name="line120">120: </a>      subdm = NULL;
+<a name="line121">121: </a>      <font color="#4169E1">break</font>;
+<a name="line122">122: </a>    <font color="#4169E1">case</font> TELESCOPE_COARSEDM:
+<a name="line123">123: </a>      <font color="#4169E1">if</font> (sred-&gt;ksp) <a href="../../../../../manualpages/Sys/PetscCallAbort.html">PetscCallAbort</a>(<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/KSP/KSPGetDM.html">KSPGetDM</a>(sred-&gt;ksp, &amp;subdm));
+<a name="line124">124: </a>      <font color="#4169E1">break</font>;
+<a name="line125">125: </a>    }
+<a name="line126">126: </a>  }
+<a name="line127">127: </a>  <font color="#4169E1">return</font> subdm;
+<a name="line128">128: </a>}
+
+<a name="line130">130: </a><strong><font color="#4169E1"><a name="PCTelescopeSetUp_default"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSetUp_default(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PC_Telescope sred)</font></strong>
+<a name="line131">131: </a>{
+<a name="line132">132: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   m, M, bs, st, ed;
+<a name="line133">133: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>        x, xred, yred, xtmp;
+<a name="line134">134: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>        B;
+<a name="line135">135: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>   comm, subcomm;
+<a name="line136">136: </a>  <a href="../../../../../manualpages/PetscSF/VecScatter.html">VecScatter</a> scatter;
+<a name="line137">137: </a>  <a href="../../../../../manualpages/IS/IS.html">IS</a>         isin;
+<a name="line138">138: </a>  <a href="../../../../../manualpages/Vec/VecType.html">VecType</a>    vectype;
+
+<a name="line140">140: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line141">141: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: setup (default)\n"</font>));
+<a name="line142">142: </a>  comm    = PetscSubcommParent(sred-&gt;psubcomm);
+<a name="line143">143: </a>  subcomm = PetscSubcommChild(sred-&gt;psubcomm);
+
+<a name="line145">145: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetOperators.html">PCGetOperators</a>(pc, NULL, &amp;B));
+<a name="line146">146: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetSize.html">MatGetSize</a>(B, &amp;M, NULL));
+<a name="line147">147: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetBlockSize.html">MatGetBlockSize</a>(B, &amp;bs));
+<a name="line148">148: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(B, &amp;x, NULL));
+<a name="line149">149: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetVecType.html">MatGetVecType</a>(B, &amp;vectype));
+
+<a name="line151">151: </a>  xred = NULL;
+<a name="line152">152: </a>  m    = 0;
+<a name="line153">153: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line154">154: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(subcomm, &amp;xred));
+<a name="line155">155: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(xred, <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, M));
+<a name="line156">156: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetBlockSize.html">VecSetBlockSize</a>(xred, bs));
+<a name="line157">157: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetType.html">VecSetType</a>(xred, vectype)); <font color="#B22222">/* Use the preconditioner matrix's vectype by default */</font>
+<a name="line158">158: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(xred));
+<a name="line159">159: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(xred, &amp;m));
+<a name="line160">160: </a>  }
+
+<a name="line162">162: </a>  yred = NULL;
+<a name="line163">163: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(xred, &amp;yred));
+
+<a name="line165">165: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(comm, &amp;xtmp));
+<a name="line166">166: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(xtmp, m, <a href="../../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>));
+<a name="line167">167: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetBlockSize.html">VecSetBlockSize</a>(xtmp, bs));
+<a name="line168">168: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecSetType.html">VecSetType</a>(xtmp, vectype));
+
+<a name="line170">170: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line171">171: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(xred, &amp;st, &amp;ed));
+<a name="line172">172: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISCreateStride.html">ISCreateStride</a>(comm, (ed - st), st, 1, &amp;isin));
+<a name="line173">173: </a>  } <font color="#4169E1">else</font> {
+<a name="line174">174: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(x, &amp;st, &amp;ed));
+<a name="line175">175: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISCreateStride.html">ISCreateStride</a>(comm, 0, st, 1, &amp;isin));
+<a name="line176">176: </a>  }
+<a name="line177">177: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISSetBlockSize.html">ISSetBlockSize</a>(isin, bs));
+
+<a name="line179">179: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterCreate.html">VecScatterCreate</a>(x, isin, xtmp, NULL, &amp;scatter));
+
+<a name="line181">181: </a>  sred-&gt;isin    = isin;
+<a name="line182">182: </a>  sred-&gt;scatter = scatter;
+<a name="line183">183: </a>  sred-&gt;xred    = xred;
+<a name="line184">184: </a>  sred-&gt;yred    = yred;
+<a name="line185">185: </a>  sred-&gt;xtmp    = xtmp;
+<a name="line186">186: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;x));
+<a name="line187">187: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line188">188: </a>}
+
+<a name="line190">190: </a><strong><font color="#4169E1"><a name="PCTelescopeMatCreate_default"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeMatCreate_default(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PC_Telescope sred, <a href="../../../../../manualpages/Mat/MatReuse.html">MatReuse</a> reuse, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> *A)</font></strong>
+<a name="line191">191: </a>{
+<a name="line192">192: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, subcomm;
+<a name="line193">193: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>      Bred, B;
+<a name="line194">194: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nr, nc, bs;
+<a name="line195">195: </a>  <a href="../../../../../manualpages/IS/IS.html">IS</a>       isrow, iscol;
+<a name="line196">196: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>      Blocal, *_Blocal;
+
+<a name="line198">198: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line199">199: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: updating the redundant preconditioned operator (default)\n"</font>));
+<a name="line200">200: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, &amp;comm));
+<a name="line201">201: </a>  subcomm = PetscSubcommChild(sred-&gt;psubcomm);
+<a name="line202">202: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetOperators.html">PCGetOperators</a>(pc, NULL, &amp;B));
+<a name="line203">203: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetSize.html">MatGetSize</a>(B, &amp;nr, &amp;nc));
+<a name="line204">204: </a>  isrow = sred-&gt;isin;
+<a name="line205">205: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISCreateStride.html">ISCreateStride</a>(<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, nc, 0, 1, &amp;iscol));
+<a name="line206">206: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISSetIdentity.html">ISSetIdentity</a>(iscol));
+<a name="line207">207: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetBlockSizes.html">MatGetBlockSizes</a>(B, NULL, &amp;bs));
+<a name="line208">208: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISSetBlockSize.html">ISSetBlockSize</a>(iscol, bs));
+<a name="line209">209: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetOption.html">MatSetOption</a>(B, <a href="../../../../../manualpages/Mat/MatOption.html">MAT_SUBMAT_SINGLEIS</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line210">210: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateSubMatrices.html">MatCreateSubMatrices</a>(B, 1, &amp;isrow, &amp;iscol, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, &amp;_Blocal));
+<a name="line211">211: </a>  Blocal = *_Blocal;
+<a name="line212">212: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(_Blocal));
+<a name="line213">213: </a>  Bred = NULL;
+<a name="line214">214: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line215">215: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> mm;
+
+<a name="line217">217: </a>    <font color="#4169E1">if</font> (reuse != <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>) Bred = *A;
+
+<a name="line219">219: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetSize.html">MatGetSize</a>(Blocal, &amp;mm, NULL));
+<a name="line220">220: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateMPIMatConcatenateSeqMat.html">MatCreateMPIMatConcatenateSeqMat</a>(subcomm, Blocal, mm, reuse, &amp;Bred));
+<a name="line221">221: </a>  }
+<a name="line222">222: </a>  *A = Bred;
+<a name="line223">223: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISDestroy.html">ISDestroy</a>(&amp;iscol));
+<a name="line224">224: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;Blocal));
+<a name="line225">225: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line226">226: </a>}
+
+<a name="line228">228: </a><strong><font color="#4169E1"><a name="PCTelescopeSubNullSpaceCreate_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSubNullSpaceCreate_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PC_Telescope sred, <a href="../../../../../manualpages/Mat/MatNullSpace.html">MatNullSpace</a> nullspace, <a href="../../../../../manualpages/Mat/MatNullSpace.html">MatNullSpace</a> *sub_nullspace)</font></strong>
+<a name="line229">229: </a>{
+<a name="line230">230: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  has_const;
+<a name="line231">231: </a>  const <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> *vecs;
+<a name="line232">232: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       *sub_vecs = NULL;
+<a name="line233">233: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>   i, k, n = 0;
+<a name="line234">234: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>   subcomm;
+
+<a name="line236">236: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line237">237: </a>  subcomm = PetscSubcommChild(sred-&gt;psubcomm);
+<a name="line238">238: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatNullSpaceGetVecs.html">MatNullSpaceGetVecs</a>(nullspace, &amp;has_const, &amp;n, &amp;vecs));
+
+<a name="line240">240: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line241">241: </a>    <font color="#4169E1">if</font> (n) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDuplicateVecs.html">VecDuplicateVecs</a>(sred-&gt;xred, n, &amp;sub_vecs));
+<a name="line242">242: </a>  }
+
+<a name="line244">244: </a>  <font color="#B22222">/* copy entries */</font>
+<a name="line245">245: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; n; k++) {
+<a name="line246">246: </a>    const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x_array;
+<a name="line247">247: </a>    <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *LA_sub_vec;
+<a name="line248">248: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           st, ed;
+
+<a name="line250">250: </a>    <font color="#B22222">/* pull in vector x-&gt;xtmp */</font>
+<a name="line251">251: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterBegin.html">VecScatterBegin</a>(sred-&gt;scatter, vecs[k], sred-&gt;xtmp, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>));
+<a name="line252">252: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterEnd.html">VecScatterEnd</a>(sred-&gt;scatter, vecs[k], sred-&gt;xtmp, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>));
+<a name="line253">253: </a>    <font color="#4169E1">if</font> (sub_vecs) {
+<a name="line254">254: </a>      <font color="#B22222">/* copy vector entries into xred */</font>
+<a name="line255">255: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(sred-&gt;xtmp, &amp;x_array));
+<a name="line256">256: </a>      <font color="#4169E1">if</font> (sub_vecs[k]) {
+<a name="line257">257: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(sub_vecs[k], &amp;st, &amp;ed));
+<a name="line258">258: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(sub_vecs[k], &amp;LA_sub_vec));
+<a name="line259">259: </a>        <font color="#4169E1">for</font> (i = 0; i &lt; ed - st; i++) LA_sub_vec[i] = x_array[i];
+<a name="line260">260: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(sub_vecs[k], &amp;LA_sub_vec));
+<a name="line261">261: </a>      }
+<a name="line262">262: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(sred-&gt;xtmp, &amp;x_array));
+<a name="line263">263: </a>    }
+<a name="line264">264: </a>  }
+
+<a name="line266">266: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line267">267: </a>    <font color="#B22222">/* create new (near) nullspace for redundant object */</font>
+<a name="line268">268: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatNullSpaceCreate.html">MatNullSpaceCreate</a>(subcomm, has_const, n, sub_vecs, sub_nullspace));
+<a name="line269">269: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroyVecs.html">VecDestroyVecs</a>(n, &amp;sub_vecs));
+<a name="line270">270: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!nullspace-&gt;remove, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Propagation of custom remove callbacks not supported when propagating (near) nullspaces with PCTelescope"</font>);
+<a name="line271">271: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!nullspace-&gt;rmctx, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Propagation of custom remove callback context not supported when propagating (near) nullspaces with PCTelescope"</font>);
+<a name="line272">272: </a>  }
+<a name="line273">273: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line274">274: </a>}
+
+<a name="line276">276: </a><strong><font color="#4169E1"><a name="PCTelescopeMatNullSpaceCreate_default"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeMatNullSpaceCreate_default(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PC_Telescope sred, <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> sub_mat)</font></strong>
+<a name="line277">277: </a>{
+<a name="line278">278: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a> B;
+
+<a name="line280">280: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line281">281: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetOperators.html">PCGetOperators</a>(pc, NULL, &amp;B));
+<a name="line282">282: </a>  <font color="#B22222">/* Propagate the nullspace if it exists */</font>
+<a name="line283">283: </a>  {
+<a name="line284">284: </a>    <a href="../../../../../manualpages/Mat/MatNullSpace.html">MatNullSpace</a> nullspace, sub_nullspace;
+<a name="line285">285: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetNullSpace.html">MatGetNullSpace</a>(B, &amp;nullspace));
+<a name="line286">286: </a>    <font color="#4169E1">if</font> (nullspace) {
+<a name="line287">287: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: generating nullspace (default)\n"</font>));
+<a name="line288">288: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCTelescopeSubNullSpaceCreate_Telescope(pc, sred, nullspace, &amp;sub_nullspace));
+<a name="line289">289: </a>      <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line290">290: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetNullSpace.html">MatSetNullSpace</a>(sub_mat, sub_nullspace));
+<a name="line291">291: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatNullSpaceDestroy.html">MatNullSpaceDestroy</a>(&amp;sub_nullspace));
+<a name="line292">292: </a>      }
+<a name="line293">293: </a>    }
+<a name="line294">294: </a>  }
+<a name="line295">295: </a>  <font color="#B22222">/* Propagate the near nullspace if it exists */</font>
+<a name="line296">296: </a>  {
+<a name="line297">297: </a>    <a href="../../../../../manualpages/Mat/MatNullSpace.html">MatNullSpace</a> nearnullspace, sub_nearnullspace;
+<a name="line298">298: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetNearNullSpace.html">MatGetNearNullSpace</a>(B, &amp;nearnullspace));
+<a name="line299">299: </a>    <font color="#4169E1">if</font> (nearnullspace) {
+<a name="line300">300: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: generating near nullspace (default)\n"</font>));
+<a name="line301">301: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCTelescopeSubNullSpaceCreate_Telescope(pc, sred, nearnullspace, &amp;sub_nearnullspace));
+<a name="line302">302: </a>      <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line303">303: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSetNearNullSpace.html">MatSetNearNullSpace</a>(sub_mat, sub_nearnullspace));
+<a name="line304">304: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatNullSpaceDestroy.html">MatNullSpaceDestroy</a>(&amp;sub_nearnullspace));
+<a name="line305">305: </a>      }
+<a name="line306">306: </a>    }
+<a name="line307">307: </a>  }
+<a name="line308">308: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line309">309: </a>}
+
+<a name="line311">311: </a><strong><font color="#4169E1"><a name="PCView_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCView_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line312">312: </a>{
+<a name="line313">313: </a>  PC_Telescope sred = (PC_Telescope)pc-&gt;data;
+<a name="line314">314: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>    iascii, isstring;
+<a name="line315">315: </a>  <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a>  subviewer;
+
+<a name="line317">317: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line318">318: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line319">319: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERSTRING.html">PETSCVIEWERSTRING</a>, &amp;isstring));
+<a name="line320">320: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line321">321: </a>    {
+<a name="line322">322: </a>      <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>    comm, subcomm;
+<a name="line323">323: </a>      <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> comm_size, subcomm_size;
+<a name="line324">324: </a>      <a href="../../../../../manualpages/DM/DM.html">DM</a>          dm = NULL, subdm = NULL;
+
+<a name="line326">326: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetDM.html">PCGetDM</a>(pc, &amp;dm));
+<a name="line327">327: </a>      subdm = private_PCTelescopeGetSubDM(sred);
+
+<a name="line329">329: </a>      <font color="#4169E1">if</font> (sred-&gt;psubcomm) {
+<a name="line330">330: </a>        comm    = PetscSubcommParent(sred-&gt;psubcomm);
+<a name="line331">331: </a>        subcomm = PetscSubcommChild(sred-&gt;psubcomm);
+<a name="line332">332: </a>        <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm, &amp;comm_size));
+<a name="line333">333: </a>        <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(subcomm, &amp;subcomm_size));
+
+<a name="line335">335: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPushTab.html">PetscViewerASCIIPushTab</a>(viewer));
+<a name="line336">336: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"petsc subcomm: parent comm size reduction factor = %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, sred-&gt;redfactor));
+<a name="line337">337: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"petsc subcomm: parent_size = %d , subcomm_size = %d\n"</font>, (int)comm_size, (int)subcomm_size));
+<a name="line338">338: </a>        <font color="#4169E1">switch</font> (sred-&gt;subcommtype) {
+<a name="line339">339: </a>        <font color="#4169E1">case</font> PETSC_SUBCOMM_INTERLACED:
+<a name="line340">340: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"petsc subcomm: type = %s\n"</font>, PetscSubcommTypes[sred-&gt;subcommtype]));
+<a name="line341">341: </a>          <font color="#4169E1">break</font>;
+<a name="line342">342: </a>        <font color="#4169E1">case</font> PETSC_SUBCOMM_CONTIGUOUS:
+<a name="line343">343: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"petsc subcomm type = %s\n"</font>, PetscSubcommTypes[sred-&gt;subcommtype]));
+<a name="line344">344: </a>          <font color="#4169E1">break</font>;
+<a name="line345">345: </a><strong><font color="#FF0000">        default:</font></strong>
+<a name="line346">346: </a>          <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"General subcomm type not supported by PCTelescope"</font>);
+<a name="line347">347: </a>        }
+<a name="line348">348: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPopTab.html">PetscViewerASCIIPopTab</a>(viewer));
+<a name="line349">349: </a>      } <font color="#4169E1">else</font> {
+<a name="line350">350: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, &amp;comm));
+<a name="line351">351: </a>        subcomm = sred-&gt;subcomm;
+<a name="line352">352: </a>        <font color="#4169E1">if</font> (!PCTelescope_isActiveRank(sred)) subcomm = <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>;
+
+<a name="line354">354: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPushTab.html">PetscViewerASCIIPushTab</a>(viewer));
+<a name="line355">355: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"subcomm: using user provided sub-communicator\n"</font>));
+<a name="line356">356: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPopTab.html">PetscViewerASCIIPopTab</a>(viewer));
+<a name="line357">357: </a>      }
+
+<a name="line359">359: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerGetSubViewer.html">PetscViewerGetSubViewer</a>(viewer, subcomm, &amp;subviewer));
+<a name="line360">360: </a>      <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line361">361: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPushTab.html">PetscViewerASCIIPushTab</a>(subviewer));
+
+<a name="line363">363: </a>        <font color="#4169E1">if</font> (dm &amp;&amp; sred-&gt;ignore_dm) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"ignoring <a href="../../../../../manualpages/DM/DM.html">DM</a>\n"</font>));
+<a name="line364">364: </a>        <font color="#4169E1">if</font> (sred-&gt;ignore_kspcomputeoperators) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"ignoring KSPComputeOperators\n"</font>));
+<a name="line365">365: </a>        <font color="#4169E1">switch</font> (sred-&gt;sr_type) {
+<a name="line366">366: </a>        <font color="#4169E1">case</font> TELESCOPE_DEFAULT:
+<a name="line367">367: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"setup type: default\n"</font>));
+<a name="line368">368: </a>          <font color="#4169E1">break</font>;
+<a name="line369">369: </a>        <font color="#4169E1">case</font> TELESCOPE_DMDA:
+<a name="line370">370: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"setup type: <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> auto-repartitioning\n"</font>));
+<a name="line371">371: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(DMView_DA_Short(subdm, subviewer));
+<a name="line372">372: </a>          <font color="#4169E1">break</font>;
+<a name="line373">373: </a>        <font color="#4169E1">case</font> TELESCOPE_DMPLEX:
+<a name="line374">374: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"setup type: <a href="../../../../../manualpages/DMPlex/DMPLEX.html">DMPLEX</a> auto-repartitioning\n"</font>));
+<a name="line375">375: </a>          <font color="#4169E1">break</font>;
+<a name="line376">376: </a>        <font color="#4169E1">case</font> TELESCOPE_COARSEDM:
+<a name="line377">377: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"setup type: coarse <a href="../../../../../manualpages/DM/DM.html">DM</a>\n"</font>));
+<a name="line378">378: </a>          <font color="#4169E1">break</font>;
+<a name="line379">379: </a>        }
+
+<a name="line381">381: </a>        <font color="#4169E1">if</font> (dm) {
+<a name="line382">382: </a>          <a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a> obj = (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm;
+<a name="line383">383: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"Parent <a href="../../../../../manualpages/DM/DM.html">DM</a> object:"</font>));
+<a name="line384">384: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIUseTabs.html">PetscViewerASCIIUseTabs</a>(subviewer, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line385">385: </a>          <font color="#4169E1">if</font> (obj-&gt;type_name) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">" type = %s;"</font>, obj-&gt;type_name));
+<a name="line386">386: </a>          <font color="#4169E1">if</font> (obj-&gt;name) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">" name = %s;"</font>, obj-&gt;name));
+<a name="line387">387: </a>          <font color="#4169E1">if</font> (obj-&gt;prefix) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">" prefix = %s"</font>, obj-&gt;prefix));
+<a name="line388">388: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"\n"</font>));
+<a name="line389">389: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIUseTabs.html">PetscViewerASCIIUseTabs</a>(subviewer, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line390">390: </a>        } <font color="#4169E1">else</font> {
+<a name="line391">391: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"Parent <a href="../../../../../manualpages/DM/DM.html">DM</a> object: NULL\n"</font>));
+<a name="line392">392: </a>        }
+<a name="line393">393: </a>        <font color="#4169E1">if</font> (subdm) {
+<a name="line394">394: </a>          <a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a> obj = (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)subdm;
+<a name="line395">395: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"Sub <a href="../../../../../manualpages/DM/DM.html">DM</a> object:"</font>));
+<a name="line396">396: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIUseTabs.html">PetscViewerASCIIUseTabs</a>(subviewer, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line397">397: </a>          <font color="#4169E1">if</font> (obj-&gt;type_name) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">" type = %s;"</font>, obj-&gt;type_name));
+<a name="line398">398: </a>          <font color="#4169E1">if</font> (obj-&gt;name) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">" name = %s;"</font>, obj-&gt;name));
+<a name="line399">399: </a>          <font color="#4169E1">if</font> (obj-&gt;prefix) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">" prefix = %s"</font>, obj-&gt;prefix));
+<a name="line400">400: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"\n"</font>));
+<a name="line401">401: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIUseTabs.html">PetscViewerASCIIUseTabs</a>(subviewer, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line402">402: </a>        } <font color="#4169E1">else</font> {
+<a name="line403">403: </a>          <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(subviewer, <font color="#666666">"Sub <a href="../../../../../manualpages/DM/DM.html">DM</a> object: NULL\n"</font>));
+<a name="line404">404: </a>        }
+
+<a name="line406">406: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPView.html">KSPView</a>(sred-&gt;ksp, subviewer));
+<a name="line407">407: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPopTab.html">PetscViewerASCIIPopTab</a>(subviewer));
+<a name="line408">408: </a>      }
+<a name="line409">409: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerRestoreSubViewer.html">PetscViewerRestoreSubViewer</a>(viewer, subcomm, &amp;subviewer));
+<a name="line410">410: </a>    }
+<a name="line411">411: </a>  }
+<a name="line412">412: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line413">413: </a>}
+
+<a name="line415">415: </a><strong><font color="#4169E1"><a name="PCSetUp_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line416">416: </a>{
+<a name="line417">417: </a>  PC_Telescope    sred = (PC_Telescope)pc-&gt;data;
+<a name="line418">418: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>        comm, subcomm = 0;
+<a name="line419">419: </a>  PCTelescopeType sr_type;
+
+<a name="line421">421: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line422">422: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, &amp;comm));
+
+<a name="line424">424: </a>  <font color="#B22222">/* Determine type of setup/update */</font>
+<a name="line425">425: </a>  <font color="#4169E1">if</font> (!pc-&gt;setupcalled) {
+<a name="line426">426: </a>    <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> has_dm, same;
+<a name="line427">427: </a>    <a href="../../../../../manualpages/DM/DM.html">DM</a>        dm;
+
+<a name="line429">429: </a>    sr_type = TELESCOPE_DEFAULT;
+<a name="line430">430: </a>    has_dm  = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line431">431: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetDM.html">PCGetDM</a>(pc, &amp;dm));
+<a name="line432">432: </a>    <font color="#4169E1">if</font> (dm) has_dm = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line433">433: </a>    <font color="#4169E1">if</font> (has_dm) {
+<a name="line434">434: </a>      <font color="#B22222">/* check for dmda */</font>
+<a name="line435">435: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm, <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>, &amp;same));
+<a name="line436">436: </a>      <font color="#4169E1">if</font> (same) {
+<a name="line437">437: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: found <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>\n"</font>));
+<a name="line438">438: </a>        sr_type = TELESCOPE_DMDA;
+<a name="line439">439: </a>      }
+<a name="line440">440: </a>      <font color="#B22222">/* check for dmplex */</font>
+<a name="line441">441: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm, <a href="../../../../../manualpages/DMPlex/DMPLEX.html">DMPLEX</a>, &amp;same));
+<a name="line442">442: </a>      <font color="#4169E1">if</font> (same) {
+<a name="line443">443: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: found <a href="../../../../../manualpages/DMPlex/DMPLEX.html">DMPLEX</a>\n"</font>));
+<a name="line444">444: </a>        sr_type = TELESCOPE_DMPLEX;
+<a name="line445">445: </a>      }
+
+<a name="line447">447: </a>      <font color="#4169E1">if</font> (sred-&gt;use_coarse_dm) {
+<a name="line448">448: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: using coarse <a href="../../../../../manualpages/DM/DM.html">DM</a>\n"</font>));
+<a name="line449">449: </a>        sr_type = TELESCOPE_COARSEDM;
+<a name="line450">450: </a>      }
+
+<a name="line452">452: </a>      <font color="#4169E1">if</font> (sred-&gt;ignore_dm) {
+<a name="line453">453: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: ignoring <a href="../../../../../manualpages/DM/DM.html">DM</a>\n"</font>));
+<a name="line454">454: </a>        sr_type = TELESCOPE_DEFAULT;
+<a name="line455">455: </a>      }
+<a name="line456">456: </a>    }
+<a name="line457">457: </a>    sred-&gt;sr_type = sr_type;
+<a name="line458">458: </a>  } <font color="#4169E1">else</font> {
+<a name="line459">459: </a>    sr_type = sred-&gt;sr_type;
+<a name="line460">460: </a>  }
+
+<a name="line462">462: </a>  <font color="#B22222">/* set function pointers for repartition setup, matrix creation/update, matrix (near) nullspace, and reset functionality */</font>
+<a name="line463">463: </a>  <font color="#4169E1">switch</font> (sr_type) {
+<a name="line464">464: </a>  <font color="#4169E1">case</font> TELESCOPE_DEFAULT:
+<a name="line465">465: </a>    sred-&gt;pctelescope_setup_type              = PCTelescopeSetUp_default;
+<a name="line466">466: </a>    sred-&gt;pctelescope_matcreate_type          = PCTelescopeMatCreate_default;
+<a name="line467">467: </a>    sred-&gt;pctelescope_matnullspacecreate_type = PCTelescopeMatNullSpaceCreate_default;
+<a name="line468">468: </a>    sred-&gt;pctelescope_reset_type              = NULL;
+<a name="line469">469: </a>    <font color="#4169E1">break</font>;
+<a name="line470">470: </a>  <font color="#4169E1">case</font> TELESCOPE_DMDA:
+<a name="line471">471: </a>    pc-&gt;ops-&gt;apply                            = PCApply_Telescope_dmda;
+<a name="line472">472: </a>    pc-&gt;ops-&gt;applyrichardson                  = PCApplyRichardson_Telescope_dmda;
+<a name="line473">473: </a>    sred-&gt;pctelescope_setup_type              = PCTelescopeSetUp_dmda;
+<a name="line474">474: </a>    sred-&gt;pctelescope_matcreate_type          = PCTelescopeMatCreate_dmda;
+<a name="line475">475: </a>    sred-&gt;pctelescope_matnullspacecreate_type = PCTelescopeMatNullSpaceCreate_dmda;
+<a name="line476">476: </a>    sred-&gt;pctelescope_reset_type              = PCReset_Telescope_dmda;
+<a name="line477">477: </a>    <font color="#4169E1">break</font>;
+<a name="line478">478: </a>  <font color="#4169E1">case</font> TELESCOPE_DMPLEX:
+<a name="line479">479: </a>    <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Support for <a href="../../../../../manualpages/DMPlex/DMPLEX.html">DMPLEX</a> is currently not available"</font>);
+<a name="line480">480: </a>  <font color="#4169E1">case</font> TELESCOPE_COARSEDM:
+<a name="line481">481: </a>    pc-&gt;ops-&gt;apply                            = PCApply_Telescope_CoarseDM;
+<a name="line482">482: </a>    pc-&gt;ops-&gt;applyrichardson                  = PCApplyRichardson_Telescope_CoarseDM;
+<a name="line483">483: </a>    sred-&gt;pctelescope_setup_type              = PCTelescopeSetUp_CoarseDM;
+<a name="line484">484: </a>    sred-&gt;pctelescope_matcreate_type          = NULL;
+<a name="line485">485: </a>    sred-&gt;pctelescope_matnullspacecreate_type = NULL; <font color="#B22222">/* PCTelescopeMatNullSpaceCreate_CoarseDM; */</font>
+<a name="line486">486: </a>    sred-&gt;pctelescope_reset_type              = PCReset_Telescope_CoarseDM;
+<a name="line487">487: </a>    <font color="#4169E1">break</font>;
+<a name="line488">488: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line489">489: </a>    <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Support only provided for: repartitioning an operator; repartitioning a <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>; or using a coarse <a href="../../../../../manualpages/DM/DM.html">DM</a>"</font>);
+<a name="line490">490: </a>  }
+
+<a name="line492">492: </a>  <font color="#B22222">/* subcomm definition */</font>
+<a name="line493">493: </a>  <font color="#4169E1">if</font> (!pc-&gt;setupcalled) {
+<a name="line494">494: </a>    <font color="#4169E1">if</font> ((sr_type == TELESCOPE_DEFAULT) || (sr_type == TELESCOPE_DMDA)) {
+<a name="line495">495: </a>      <font color="#4169E1">if</font> (!sred-&gt;psubcomm) {
+<a name="line496">496: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscSubcommCreate.html">PetscSubcommCreate</a>(comm, &amp;sred-&gt;psubcomm));
+<a name="line497">497: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscSubcommSetNumber.html">PetscSubcommSetNumber</a>(sred-&gt;psubcomm, sred-&gt;redfactor));
+<a name="line498">498: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscSubcommSetType.html">PetscSubcommSetType</a>(sred-&gt;psubcomm, sred-&gt;subcommtype));
+<a name="line499">499: </a>        sred-&gt;subcomm = PetscSubcommChild(sred-&gt;psubcomm);
+<a name="line500">500: </a>      }
+<a name="line501">501: </a>    } <font color="#4169E1">else</font> { <font color="#B22222">/* query <a href="../../../../../manualpages/PC/PC.html">PC</a> for <a href="../../../../../manualpages/DM/DM.html">DM</a>, check communicators */</font>
+<a name="line502">502: </a>      <a href="../../../../../manualpages/DM/DM.html">DM</a>          dm, dm_coarse_partition          = NULL;
+<a name="line503">503: </a>      <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>    comm_fine, comm_coarse_partition = MPI_COMM_NULL;
+<a name="line504">504: </a>      <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> csize_fine = 0, csize_coarse_partition = 0, cs[2], csg[2], cnt = 0;
+<a name="line505">505: </a>      <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   isvalidsubcomm;
+
+<a name="line507">507: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetDM.html">PCGetDM</a>(pc, &amp;dm));
+<a name="line508">508: </a>      comm_fine = <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm);
+<a name="line509">509: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DM/DMGetCoarseDM.html">DMGetCoarseDM</a>(dm, &amp;dm_coarse_partition));
+<a name="line510">510: </a>      <font color="#4169E1">if</font> (dm_coarse_partition) cnt = 1;
+<a name="line511">511: </a>      <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</a>(MPI_IN_PLACE, &amp;cnt, 1, MPI_INT, MPI_SUM, comm_fine));
+<a name="line512">512: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(cnt != 0, comm_fine, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Zero instances of a coarse <a href="../../../../../manualpages/DM/DM.html">DM</a> were found"</font>);
+
+<a name="line514">514: </a>      <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm_fine, &amp;csize_fine));
+<a name="line515">515: </a>      <font color="#4169E1">if</font> (dm_coarse_partition) {
+<a name="line516">516: </a>        comm_coarse_partition = <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm_coarse_partition);
+<a name="line517">517: </a>        <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm_coarse_partition, &amp;csize_coarse_partition));
+<a name="line518">518: </a>      }
+
+<a name="line520">520: </a>      cs[0] = csize_fine;
+<a name="line521">521: </a>      cs[1] = csize_coarse_partition;
+<a name="line522">522: </a>      <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</a>(cs, csg, 2, MPI_INT, MPI_MAX, comm_fine));
+<a name="line523">523: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(csg[0] != csg[1], comm_fine, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Coarse <a href="../../../../../manualpages/DM/DM.html">DM</a> uses the same size communicator as the parent <a href="../../../../../manualpages/DM/DM.html">DM</a> attached to the <a href="../../../../../manualpages/PC/PC.html">PC</a>"</font>);
+
+<a name="line525">525: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCTelescopeTestValidSubcomm(comm_fine, comm_coarse_partition, &amp;isvalidsubcomm));
+<a name="line526">526: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(isvalidsubcomm, comm_fine, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Coarse <a href="../../../../../manualpages/DM/DM.html">DM</a> communicator is not a sub-communicator of parentDM-&gt;comm"</font>);
+<a name="line527">527: </a>      sred-&gt;subcomm = comm_coarse_partition;
+<a name="line528">528: </a>    }
+<a name="line529">529: </a>  }
+<a name="line530">530: </a>  subcomm = sred-&gt;subcomm;
+
+<a name="line532">532: </a>  <font color="#B22222">/* internal <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> */</font>
+<a name="line533">533: </a>  <font color="#4169E1">if</font> (!pc-&gt;setupcalled) {
+<a name="line534">534: </a>    const char *prefix;
+
+<a name="line536">536: </a>    <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line537">537: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCreate.html">KSPCreate</a>(subcomm, &amp;sred-&gt;ksp));
+<a name="line538">538: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetErrorIfNotConverged.html">KSPSetErrorIfNotConverged</a>(sred-&gt;ksp, pc-&gt;erroriffailure));
+<a name="line539">539: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectIncrementTabLevel.html">PetscObjectIncrementTabLevel</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sred-&gt;ksp, (<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, 1));
+<a name="line540">540: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetType.html">KSPSetType</a>(sred-&gt;ksp, <a href="../../../../../manualpages/KSP/KSPPREONLY.html">KSPPREONLY</a>));
+<a name="line541">541: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCGetOptionsPrefix.html">PCGetOptionsPrefix</a>(pc, &amp;prefix));
+<a name="line542">542: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetOptionsPrefix.html">KSPSetOptionsPrefix</a>(sred-&gt;ksp, prefix));
+<a name="line543">543: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPAppendOptionsPrefix.html">KSPAppendOptionsPrefix</a>(sred-&gt;ksp, <font color="#666666">"telescope_"</font>));
+<a name="line544">544: </a>    }
+<a name="line545">545: </a>  }
+
+<a name="line547">547: </a>  <font color="#B22222">/* setup */</font>
+<a name="line548">548: </a>  <font color="#4169E1">if</font> (!pc-&gt;setupcalled &amp;&amp; sred-&gt;pctelescope_setup_type) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(sred-&gt;pctelescope_setup_type(pc, sred));
+<a name="line549">549: </a>  <font color="#B22222">/* update */</font>
+<a name="line550">550: </a>  <font color="#4169E1">if</font> (!pc-&gt;setupcalled) {
+<a name="line551">551: </a>    <font color="#4169E1">if</font> (sred-&gt;pctelescope_matcreate_type) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(sred-&gt;pctelescope_matcreate_type(pc, sred, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, &amp;sred-&gt;Bred));
+<a name="line552">552: </a>    <font color="#4169E1">if</font> (sred-&gt;pctelescope_matnullspacecreate_type) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(sred-&gt;pctelescope_matnullspacecreate_type(pc, sred, sred-&gt;Bred));
+<a name="line553">553: </a>  } <font color="#4169E1">else</font> {
+<a name="line554">554: </a>    <font color="#4169E1">if</font> (sred-&gt;pctelescope_matcreate_type) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(sred-&gt;pctelescope_matcreate_type(pc, sred, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_REUSE_MATRIX</a>, &amp;sred-&gt;Bred));
+<a name="line555">555: </a>  }
+
+<a name="line557">557: </a>  <font color="#B22222">/* common - no construction */</font>
+<a name="line558">558: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line559">559: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetOperators.html">KSPSetOperators</a>(sred-&gt;ksp, sred-&gt;Bred, sred-&gt;Bred));
+<a name="line560">560: </a>    <font color="#4169E1">if</font> (pc-&gt;setfromoptionscalled &amp;&amp; !pc-&gt;setupcalled) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetFromOptions.html">KSPSetFromOptions</a>(sred-&gt;ksp));
+<a name="line561">561: </a>  }
+<a name="line562">562: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line563">563: </a>}
+
+<a name="line565">565: </a><strong><font color="#4169E1"><a name="PCApply_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCApply_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line566">566: </a>{
+<a name="line567">567: </a>  PC_Telescope       sred = (PC_Telescope)pc-&gt;data;
+<a name="line568">568: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>                xtmp, xred, yred;
+<a name="line569">569: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i, st, ed;
+<a name="line570">570: </a>  <a href="../../../../../manualpages/PetscSF/VecScatter.html">VecScatter</a>         scatter;
+<a name="line571">571: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *array;
+<a name="line572">572: </a>  const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x_array;
+
+<a name="line574">574: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line575">575: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscCitationsRegister.html">PetscCitationsRegister</a>(citation, &amp;cited));
+
+<a name="line577">577: </a>  xtmp    = sred-&gt;xtmp;
+<a name="line578">578: </a>  scatter = sred-&gt;scatter;
+<a name="line579">579: </a>  xred    = sred-&gt;xred;
+<a name="line580">580: </a>  yred    = sred-&gt;yred;
+
+<a name="line582">582: </a>  <font color="#B22222">/* pull in vector x-&gt;xtmp */</font>
+<a name="line583">583: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterBegin.html">VecScatterBegin</a>(scatter, x, xtmp, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>));
+<a name="line584">584: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterEnd.html">VecScatterEnd</a>(scatter, x, xtmp, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>));
+
+<a name="line586">586: </a>  <font color="#B22222">/* copy vector entries into xred */</font>
+<a name="line587">587: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(xtmp, &amp;x_array));
+<a name="line588">588: </a>  <font color="#4169E1">if</font> (xred) {
+<a name="line589">589: </a>    <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *LA_xred;
+<a name="line590">590: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(xred, &amp;st, &amp;ed));
+<a name="line591">591: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(xred, &amp;LA_xred));
+<a name="line592">592: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; ed - st; i++) LA_xred[i] = x_array[i];
+<a name="line593">593: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(xred, &amp;LA_xred));
+<a name="line594">594: </a>  }
+<a name="line595">595: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(xtmp, &amp;x_array));
+<a name="line596">596: </a>  <font color="#B22222">/* solve */</font>
+<a name="line597">597: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line598">598: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(sred-&gt;ksp, xred, yred));
+<a name="line599">599: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPCheckSolve.html">KSPCheckSolve</a>(sred-&gt;ksp, pc, yred));
+<a name="line600">600: </a>  }
+<a name="line601">601: </a>  <font color="#B22222">/* return vector */</font>
+<a name="line602">602: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(xtmp, &amp;array));
+<a name="line603">603: </a>  <font color="#4169E1">if</font> (yred) {
+<a name="line604">604: </a>    const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *LA_yred;
+<a name="line605">605: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(yred, &amp;st, &amp;ed));
+<a name="line606">606: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(yred, &amp;LA_yred));
+<a name="line607">607: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; ed - st; i++) array[i] = LA_yred[i];
+<a name="line608">608: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(yred, &amp;LA_yred));
+<a name="line609">609: </a>  }
+<a name="line610">610: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(xtmp, &amp;array));
+<a name="line611">611: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterBegin.html">VecScatterBegin</a>(scatter, xtmp, y, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_REVERSE.html">SCATTER_REVERSE</a>));
+<a name="line612">612: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterEnd.html">VecScatterEnd</a>(scatter, xtmp, y, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_REVERSE.html">SCATTER_REVERSE</a>));
+<a name="line613">613: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line614">614: </a>}
+
+<a name="line616">616: </a><strong><font color="#4169E1"><a name="PCApplyRichardson_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCApplyRichardson_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> w, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> rtol, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> abstol, <a href="../../../../../manualpages/Sys/PetscReal.html">PetscReal</a> dtol, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> its, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> zeroguess, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *outits, <a href="../../../../../manualpages/PC/PCRichardsonConvergedReason.html">PCRichardsonConvergedReason</a> *reason)</font></strong>
+<a name="line617">617: </a>{
+<a name="line618">618: </a>  PC_Telescope       sred = (PC_Telescope)pc-&gt;data;
+<a name="line619">619: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>                xtmp, yred;
+<a name="line620">620: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i, st, ed;
+<a name="line621">621: </a>  <a href="../../../../../manualpages/PetscSF/VecScatter.html">VecScatter</a>         scatter;
+<a name="line622">622: </a>  const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x_array;
+<a name="line623">623: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>          default_init_guess_value;
+
+<a name="line625">625: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line626">626: </a>  xtmp    = sred-&gt;xtmp;
+<a name="line627">627: </a>  scatter = sred-&gt;scatter;
+<a name="line628">628: </a>  yred    = sred-&gt;yred;
+
+<a name="line630">630: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(its &lt;= 1, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"PCApplyRichardson_Telescope only supports max_it = 1"</font>);
+<a name="line631">631: </a>  *reason = (<a href="../../../../../manualpages/PC/PCRichardsonConvergedReason.html">PCRichardsonConvergedReason</a>)0;
+
+<a name="line633">633: </a>  <font color="#4169E1">if</font> (!zeroguess) {
+<a name="line634">634: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"PCTelescope: Scattering y for non-zero initial guess\n"</font>));
+<a name="line635">635: </a>    <font color="#B22222">/* pull in vector y-&gt;xtmp */</font>
+<a name="line636">636: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterBegin.html">VecScatterBegin</a>(scatter, y, xtmp, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>));
+<a name="line637">637: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterEnd.html">VecScatterEnd</a>(scatter, y, xtmp, <a href="../../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>, <a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>));
+
+<a name="line639">639: </a>    <font color="#B22222">/* copy vector entries into xred */</font>
+<a name="line640">640: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(xtmp, &amp;x_array));
+<a name="line641">641: </a>    <font color="#4169E1">if</font> (yred) {
+<a name="line642">642: </a>      <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *LA_yred;
+<a name="line643">643: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(yred, &amp;st, &amp;ed));
+<a name="line644">644: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(yred, &amp;LA_yred));
+<a name="line645">645: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; ed - st; i++) LA_yred[i] = x_array[i];
+<a name="line646">646: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(yred, &amp;LA_yred));
+<a name="line647">647: </a>    }
+<a name="line648">648: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(xtmp, &amp;x_array));
+<a name="line649">649: </a>  }
+
+<a name="line651">651: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) {
+<a name="line652">652: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPGetInitialGuessNonzero.html">KSPGetInitialGuessNonzero</a>(sred-&gt;ksp, &amp;default_init_guess_value));
+<a name="line653">653: </a>    <font color="#4169E1">if</font> (!zeroguess) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetInitialGuessNonzero.html">KSPSetInitialGuessNonzero</a>(sred-&gt;ksp, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line654">654: </a>  }
+
+<a name="line656">656: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCApply_Telescope(pc, x, y));
+
+<a name="line658">658: </a>  <font color="#4169E1">if</font> (PCTelescope_isActiveRank(sred)) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPSetInitialGuessNonzero.html">KSPSetInitialGuessNonzero</a>(sred-&gt;ksp, default_init_guess_value));
+
+<a name="line660">660: </a>  <font color="#4169E1">if</font> (!*reason) *reason = <a href="../../../../../manualpages/PC/PCRichardsonConvergedReason.html">PCRICHARDSON_CONVERGED_ITS</a>;
+<a name="line661">661: </a>  *outits = 1;
+<a name="line662">662: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line663">663: </a>}
+
+<a name="line665">665: </a><strong><font color="#4169E1"><a name="PCReset_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCReset_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line666">666: </a>{
+<a name="line667">667: </a>  PC_Telescope sred = (PC_Telescope)pc-&gt;data;
+
+<a name="line669">669: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line670">670: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/IS/ISDestroy.html">ISDestroy</a>(&amp;sred-&gt;isin));
+<a name="line671">671: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PetscSF/VecScatterDestroy.html">VecScatterDestroy</a>(&amp;sred-&gt;scatter));
+<a name="line672">672: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;sred-&gt;xred));
+<a name="line673">673: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;sred-&gt;yred));
+<a name="line674">674: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;sred-&gt;xtmp));
+<a name="line675">675: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;sred-&gt;Bred));
+<a name="line676">676: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPReset.html">KSPReset</a>(sred-&gt;ksp));
+<a name="line677">677: </a>  <font color="#4169E1">if</font> (sred-&gt;pctelescope_reset_type) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(sred-&gt;pctelescope_reset_type(pc));
+<a name="line678">678: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line679">679: </a>}
+
+<a name="line681">681: </a><strong><font color="#4169E1"><a name="PCDestroy_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCDestroy_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line682">682: </a>{
+<a name="line683">683: </a>  PC_Telescope sred = (PC_Telescope)pc-&gt;data;
+
+<a name="line685">685: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line686">686: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCReset_Telescope(pc));
+<a name="line687">687: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/KSP/KSPDestroy.html">KSPDestroy</a>(&amp;sred-&gt;ksp));
+<a name="line688">688: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscSubcommDestroy.html">PetscSubcommDestroy</a>(&amp;sred-&gt;psubcomm));
+<a name="line689">689: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(sred-&gt;dm_ctx));
+<a name="line690">690: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetKSP_C"</font>, NULL));
+<a name="line691">691: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetSubcommType_C"</font>, NULL));
+<a name="line692">692: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetSubcommType_C"</font>, NULL));
+<a name="line693">693: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetReductionFactor_C"</font>, NULL));
+<a name="line694">694: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetReductionFactor_C"</font>, NULL));
+<a name="line695">695: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetIgnoreDM_C"</font>, NULL));
+<a name="line696">696: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetIgnoreDM_C"</font>, NULL));
+<a name="line697">697: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetIgnoreKSPComputeOperators_C"</font>, NULL));
+<a name="line698">698: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetIgnoreKSPComputeOperators_C"</font>, NULL));
+<a name="line699">699: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetDM_C"</font>, NULL));
+<a name="line700">700: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetUseCoarseDM_C"</font>, NULL));
+<a name="line701">701: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetUseCoarseDM_C"</font>, NULL));
+<a name="line702">702: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(pc-&gt;data));
+<a name="line703">703: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line704">704: </a>}
+
+<a name="line706">706: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetFromOptions_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line707">707: </a>{
+<a name="line708">708: </a>  PC_Telescope     sred = (PC_Telescope)pc-&gt;data;
+<a name="line709">709: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>         comm;
+<a name="line710">710: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>      size;
+<a name="line711">711: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        flg;
+<a name="line712">712: </a>  PetscSubcommType subcommtype;
+
+<a name="line714">714: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line715">715: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, &amp;comm));
+<a name="line716">716: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(comm, &amp;size));
+<a name="line717">717: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"Telescope options"</font>);
+<a name="line718">718: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-pc_telescope_subcomm_type"</font>, <font color="#666666">"Subcomm type (interlaced or contiguous)"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCTelescopeSetSubcommType.html">PCTelescopeSetSubcommType</a>"</font>, PetscSubcommTypes, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)sred-&gt;subcommtype, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;subcommtype, &amp;flg));
+<a name="line719">719: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCTelescopeSetSubcommType.html">PCTelescopeSetSubcommType</a>(pc, subcommtype));
+<a name="line720">720: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_telescope_reduction_factor"</font>, <font color="#666666">"Factor to reduce comm size by"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCTelescopeSetReductionFactor.html">PCTelescopeSetReductionFactor</a>"</font>, sred-&gt;redfactor, &amp;sred-&gt;redfactor, NULL));
+<a name="line721">721: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sred-&gt;redfactor &lt;= size, comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"-pc_telescope_reduction_factor &lt;= comm size"</font>);
+<a name="line722">722: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_telescope_ignore_dm"</font>, <font color="#666666">"Ignore any <a href="../../../../../manualpages/DM/DM.html">DM</a> attached to the <a href="../../../../../manualpages/PC/PC.html">PC</a>"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>"</font>, sred-&gt;ignore_dm, &amp;sred-&gt;ignore_dm, NULL));
+<a name="line723">723: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_telescope_ignore_kspcomputeoperators"</font>, <font color="#666666">"Ignore method used to compute A"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreKSPComputeOperators.html">PCTelescopeSetIgnoreKSPComputeOperators</a>"</font>, sred-&gt;ignore_kspcomputeoperators, &amp;sred-&gt;ignore_kspcomputeoperators, NULL));
+<a name="line724">724: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_telescope_use_coarse_dm"</font>, <font color="#666666">"Define sub-communicator from the coarse <a href="../../../../../manualpages/DM/DM.html">DM</a>"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>"</font>, sred-&gt;use_coarse_dm, &amp;sred-&gt;use_coarse_dm, NULL));
+<a name="line725">725: </a>  PetscOptionsHeadEnd();
+<a name="line726">726: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line727">727: </a>}
+
+<a name="line729">729: </a><font color="#B22222">/* <a href="../../../../../manualpages/PC/PC.html">PC</a> simplementation specific API's */</font>
+
+<a name="line731">731: </a><strong><font color="#4169E1"><a name="PCTelescopeGetKSP_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetKSP_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> *ksp)</font></strong>
+<a name="line732">732: </a>{
+<a name="line733">733: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line734">734: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line735">735: </a>  <font color="#4169E1">if</font> (ksp) *ksp = red-&gt;ksp;
+<a name="line736">736: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line737">737: </a>}
+
+<a name="line739">739: </a><strong><font color="#4169E1"><a name="PCTelescopeGetSubcommType_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetSubcommType_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscSubcommType *subcommtype)</font></strong>
+<a name="line740">740: </a>{
+<a name="line741">741: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line742">742: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line743">743: </a>  <font color="#4169E1">if</font> (subcommtype) *subcommtype = red-&gt;subcommtype;
+<a name="line744">744: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line745">745: </a>}
+
+<a name="line747">747: </a><strong><font color="#4169E1"><a name="PCTelescopeSetSubcommType_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSetSubcommType_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscSubcommType subcommtype)</font></strong>
+<a name="line748">748: </a>{
+<a name="line749">749: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+
+<a name="line751">751: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line752">752: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!pc-&gt;setupcalled, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"You cannot change the subcommunicator type for PCTelescope after it has been set up."</font>);
+<a name="line753">753: </a>  red-&gt;subcommtype = subcommtype;
+<a name="line754">754: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line755">755: </a>}
+
+<a name="line757">757: </a><strong><font color="#4169E1"><a name="PCTelescopeGetReductionFactor_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetReductionFactor_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *fact)</font></strong>
+<a name="line758">758: </a>{
+<a name="line759">759: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line760">760: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line761">761: </a>  <font color="#4169E1">if</font> (fact) *fact = red-&gt;redfactor;
+<a name="line762">762: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line763">763: </a>}
+
+<a name="line765">765: </a><strong><font color="#4169E1"><a name="PCTelescopeSetReductionFactor_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSetReductionFactor_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> fact)</font></strong>
+<a name="line766">766: </a>{
+<a name="line767">767: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line768">768: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  size;
+
+<a name="line770">770: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line771">771: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), &amp;size));
+<a name="line772">772: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(fact &gt; 0, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Reduction factor of telescoping <a href="../../../../../manualpages/PC/PC.html">PC</a> %"</font> PetscInt_FMT <font color="#666666">" must be positive"</font>, fact);
+<a name="line773">773: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(fact &lt;= size, <a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Reduction factor of telescoping <a href="../../../../../manualpages/PC/PC.html">PC</a> %"</font> PetscInt_FMT <font color="#666666">" must be &lt;= comm.size"</font>, fact);
+<a name="line774">774: </a>  red-&gt;redfactor = fact;
+<a name="line775">775: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line776">776: </a>}
+
+<a name="line778">778: </a><strong><font color="#4169E1"><a name="PCTelescopeGetIgnoreDM_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetIgnoreDM_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *v)</font></strong>
+<a name="line779">779: </a>{
+<a name="line780">780: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line781">781: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line782">782: </a>  <font color="#4169E1">if</font> (v) *v = red-&gt;ignore_dm;
+<a name="line783">783: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line784">784: </a>}
+
+<a name="line786">786: </a><strong><font color="#4169E1"><a name="PCTelescopeSetIgnoreDM_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSetIgnoreDM_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> v)</font></strong>
+<a name="line787">787: </a>{
+<a name="line788">788: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line789">789: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line790">790: </a>  red-&gt;ignore_dm = v;
+<a name="line791">791: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line792">792: </a>}
+
+<a name="line794">794: </a><strong><font color="#4169E1"><a name="PCTelescopeGetUseCoarseDM_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetUseCoarseDM_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *v)</font></strong>
+<a name="line795">795: </a>{
+<a name="line796">796: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line797">797: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line798">798: </a>  <font color="#4169E1">if</font> (v) *v = red-&gt;use_coarse_dm;
+<a name="line799">799: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line800">800: </a>}
+
+<a name="line802">802: </a><strong><font color="#4169E1"><a name="PCTelescopeSetUseCoarseDM_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSetUseCoarseDM_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> v)</font></strong>
+<a name="line803">803: </a>{
+<a name="line804">804: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line805">805: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line806">806: </a>  red-&gt;use_coarse_dm = v;
+<a name="line807">807: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line808">808: </a>}
+
+<a name="line810">810: </a><strong><font color="#4169E1"><a name="PCTelescopeGetIgnoreKSPComputeOperators_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetIgnoreKSPComputeOperators_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *v)</font></strong>
+<a name="line811">811: </a>{
+<a name="line812">812: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line813">813: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line814">814: </a>  <font color="#4169E1">if</font> (v) *v = red-&gt;ignore_kspcomputeoperators;
+<a name="line815">815: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line816">816: </a>}
+
+<a name="line818">818: </a><strong><font color="#4169E1"><a name="PCTelescopeSetIgnoreKSPComputeOperators_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeSetIgnoreKSPComputeOperators_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> v)</font></strong>
+<a name="line819">819: </a>{
+<a name="line820">820: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line821">821: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line822">822: </a>  red-&gt;ignore_kspcomputeoperators = v;
+<a name="line823">823: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line824">824: </a>}
+
+<a name="line826">826: </a><strong><font color="#4169E1"><a name="PCTelescopeGetDM_Telescope"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCTelescopeGetDM_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/DM/DM.html">DM</a> *dm)</font></strong>
+<a name="line827">827: </a>{
+<a name="line828">828: </a>  PC_Telescope red = (PC_Telescope)pc-&gt;data;
+<a name="line829">829: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line830">830: </a>  *dm = private_PCTelescopeGetSubDM(red);
+<a name="line831">831: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line832">832: </a>}
+
+<a name="line834">834: </a><font color="#B22222">/*@</font>
+<a name="line835">835: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetKSP.html">PCTelescopeGetKSP</a> - Gets the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` created by the telescoping `<a href="../../../../../manualpages/PC/PC.html">PC</a>`.</font>
+
+<a name="line837">837: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line839">839: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line840">840: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line842">842: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line843">843: </a><font color="#B22222">.  subksp - the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` defined the smaller set of processes</font>
+
+<a name="line845">845: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line847">847: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`</font>
+<a name="line848">848: </a><font color="#B22222">@*/</font>
+<a name="line849">849: </a><strong><font color="#4169E1"><a name="PCTelescopeGetKSP"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetKSP.html">PCTelescopeGetKSP</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> *subksp)</font></strong>
+<a name="line850">850: </a>{
+<a name="line851">851: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line852">852: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetKSP_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/KSP/KSP.html">KSP</a> *), (pc, subksp));
+<a name="line853">853: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line854">854: </a>}
+
+<a name="line856">856: </a><font color="#B22222">/*@</font>
+<a name="line857">857: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetReductionFactor.html">PCTelescopeGetReductionFactor</a> - Gets the factor by which the original number of MPI ranks  has been reduced by.</font>
+
+<a name="line859">859: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line861">861: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line862">862: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line864">864: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line865">865: </a><font color="#B22222">.  fact - the reduction factor</font>
+
+<a name="line867">867: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line869">869: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetReductionFactor.html">PCTelescopeSetReductionFactor</a>()`</font>
+<a name="line870">870: </a><font color="#B22222">@*/</font>
+<a name="line871">871: </a><strong><font color="#4169E1"><a name="PCTelescopeGetReductionFactor"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetReductionFactor.html">PCTelescopeGetReductionFactor</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *fact)</font></strong>
+<a name="line872">872: </a>{
+<a name="line873">873: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line874">874: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetReductionFactor_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *), (pc, fact));
+<a name="line875">875: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line876">876: </a>}
+
+<a name="line878">878: </a><font color="#B22222">/*@</font>
+<a name="line879">879: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeSetReductionFactor.html">PCTelescopeSetReductionFactor</a> - Sets the factor by which the original number of MPI ranks will been reduced by.</font>
+
+<a name="line881">881: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line883">883: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line884">884: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line886">886: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line887">887: </a><font color="#B22222">.  fact - the reduction factor</font>
+
+<a name="line889">889: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line891">891: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeGetReductionFactor.html">PCTelescopeGetReductionFactor</a>()`</font>
+<a name="line892">892: </a><font color="#B22222">@*/</font>
+<a name="line893">893: </a><strong><font color="#4169E1"><a name="PCTelescopeSetReductionFactor"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeSetReductionFactor.html">PCTelescopeSetReductionFactor</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> fact)</font></strong>
+<a name="line894">894: </a>{
+<a name="line895">895: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line896">896: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCTelescopeSetReductionFactor_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>), (pc, fact));
+<a name="line897">897: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line898">898: </a>}
+
+<a name="line900">900: </a><font color="#B22222">/*@</font>
+<a name="line901">901: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreDM.html">PCTelescopeGetIgnoreDM</a> - Get the flag indicating if any `<a href="../../../../../manualpages/DM/DM.html">DM</a>` attached to the `<a href="../../../../../manualpages/PC/PC.html">PC</a>` will be used.</font>
+
+<a name="line903">903: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line905">905: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line906">906: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line908">908: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line909">909: </a><font color="#B22222">.  v - the flag</font>
+
+<a name="line911">911: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line913">913: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`</font>
+<a name="line914">914: </a><font color="#B22222">@*/</font>
+<a name="line915">915: </a><strong><font color="#4169E1"><a name="PCTelescopeGetIgnoreDM"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreDM.html">PCTelescopeGetIgnoreDM</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *v)</font></strong>
+<a name="line916">916: </a>{
+<a name="line917">917: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line918">918: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetIgnoreDM_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *), (pc, v));
+<a name="line919">919: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line920">920: </a>}
+
+<a name="line922">922: </a><font color="#B22222">/*@</font>
+<a name="line923">923: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a> - Set a flag to ignore any <a href="../../../../../manualpages/DM/DM.html">DM</a> attached to the <a href="../../../../../manualpages/PC/PC.html">PC</a>.</font>
+
+<a name="line925">925: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line927">927: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line928">928: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line930">930: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line931">931: </a><font color="#B22222">.  v - Use <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a> to ignore any <a href="../../../../../manualpages/DM/DM.html">DM</a></font>
+
+<a name="line933">933: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line935">935: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreDM.html">PCTelescopeGetIgnoreDM</a>()`</font>
+<a name="line936">936: </a><font color="#B22222">@*/</font>
+<a name="line937">937: </a><strong><font color="#4169E1"><a name="PCTelescopeSetIgnoreDM"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> v)</font></strong>
+<a name="line938">938: </a>{
+<a name="line939">939: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line940">940: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCTelescopeSetIgnoreDM_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, v));
+<a name="line941">941: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line942">942: </a>}
+
+<a name="line944">944: </a><font color="#B22222">/*@</font>
+<a name="line945">945: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetUseCoarseDM.html">PCTelescopeGetUseCoarseDM</a> - Get the flag indicating if the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>` attached to `<a href="../../../../../manualpages/DM/DM.html">DM</a>` associated with the `<a href="../../../../../manualpages/PC/PC.html">PC</a>` will be used.</font>
+
+<a name="line947">947: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line949">949: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line950">950: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line952">952: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line953">953: </a><font color="#B22222">.  v - the flag</font>
+
+<a name="line955">955: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line957">957: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>()`</font>
+<a name="line958">958: </a><font color="#B22222">@*/</font>
+<a name="line959">959: </a><strong><font color="#4169E1"><a name="PCTelescopeGetUseCoarseDM"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetUseCoarseDM.html">PCTelescopeGetUseCoarseDM</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *v)</font></strong>
+<a name="line960">960: </a>{
+<a name="line961">961: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line962">962: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetUseCoarseDM_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *), (pc, v));
+<a name="line963">963: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line964">964: </a>}
+
+<a name="line966">966: </a><font color="#B22222">/*@</font>
+<a name="line967">967: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a> - Set a flag to query the `<a href="../../../../../manualpages/DM/DM.html">DM</a>` attached to the `<a href="../../../../../manualpages/PC/PC.html">PC</a>` if it also has a coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`</font>
+
+<a name="line969">969: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line971">971: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line972">972: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line974">974: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line975">975: </a><font color="#B22222">.  v - Use `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>` to ignore any coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`</font>
+
+<a name="line977">977: </a><font color="#B22222"> Notes:</font>
+<a name="line978">978: </a><font color="#B22222"> When you have specified to use a coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`, the communicator used to create the sub-<a href="../../../../../manualpages/KSP/KSP.html">KSP</a> within `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`</font>
+<a name="line979">979: </a><font color="#B22222"> will be that of the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`. Hence the flags -pc_telescope_reduction_factor and</font>
+<a name="line980">980: </a><font color="#B22222"> -pc_telescope_subcomm_type will no longer have any meaning.</font>
+<a name="line981">981: </a><font color="#B22222"> It is required that the communicator associated with the parent (fine) and the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>` are of different sizes.</font>
+<a name="line982">982: </a><font color="#B22222"> An error will occur of the size of the communicator associated with the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`</font>
+<a name="line983">983: </a><font color="#B22222"> is the same as that of the parent `<a href="../../../../../manualpages/DM/DM.html">DM</a>`.</font>
+<a name="line984">984: </a><font color="#B22222"> Furthermore, it is required that the communicator on the coarse <a href="../../../../../manualpages/DM/DM.html">DM</a> is a sub-communicator of the parent.</font>
+<a name="line985">985: </a><font color="#B22222"> This will be checked at the time the preconditioner is setup and an error will occur if</font>
+<a name="line986">986: </a><font color="#B22222"> the coarse <a href="../../../../../manualpages/DM/DM.html">DM</a> does not define a sub-communicator of that used by the parent <a href="../../../../../manualpages/DM/DM.html">DM</a>.</font>
+
+<a name="line988">988: </a><font color="#B22222"> The particular Telescope setup invoked when using a coarse <a href="../../../../../manualpages/DM/DM.html">DM</a> is agnostic with respect to the type of</font>
+<a name="line989">989: </a><font color="#B22222"> the `<a href="../../../../../manualpages/DM/DM.html">DM</a>` used (e.g. it supports `DMSHELL`, `<a href="../../../../../manualpages/DMPlex/DMPLEX.html">DMPLEX</a>`, etc).</font>
+
+<a name="line991">991: </a><font color="#B22222"> Support is currently only provided for the case when you are using `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()`</font>
+
+<a name="line993">993: </a><font color="#B22222"> The user is required to compose a function with the parent <a href="../../../../../manualpages/DM/DM.html">DM</a> to facilitate the transfer of fields (`<a href="../../../../../manualpages/Vec/Vec.html">Vec</a>`) between the different decompositions defined by the fine and coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`s.</font>
+<a name="line994">994: </a><font color="#B22222"> In the user code, this is achieved via</font>
+<a name="line995">995: </a><font color="#B22222">.vb</font>
+<a name="line996">996: </a><font color="#B22222">   {</font>
+<a name="line997">997: </a><font color="#B22222">     <a href="../../../../../manualpages/DM/DM.html">DM</a> dm_fine;</font>
+<a name="line998">998: </a><font color="#B22222">     <a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm_fine,"PCTelescopeFieldScatter",your_field_scatter_method);</font>
+<a name="line999">999: </a><font color="#B22222">   }</font>
+<a name="line1000">1000: </a><font color="#B22222">.ve</font>
+<a name="line1001">1001: </a><font color="#B22222"> The signature of the user provided field scatter method is</font>
+<a name="line1002">1002: </a><font color="#B22222">.vb</font>
+<a name="line1003">1003: </a><font color="#B22222">   <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> your_field_scatter_method(<a href="../../../../../manualpages/DM/DM.html">DM</a> dm_fine,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x_fine,<a href="../../../../../manualpages/Vec/ScatterMode.html">ScatterMode</a> mode,<a href="../../../../../manualpages/DM/DM.html">DM</a> dm_coarse,<a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x_coarse);</font>
+<a name="line1004">1004: </a><font color="#B22222">.ve</font>
+<a name="line1005">1005: </a><font color="#B22222"> The user must provide support for both mode = `<a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>` and mode = `<a href="../../../../../manualpages/Vec/SCATTER_REVERSE.html">SCATTER_REVERSE</a>`.</font>
+<a name="line1006">1006: </a><font color="#B22222"> `<a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>` implies the direction of transfer is from the parent (fine) `<a href="../../../../../manualpages/DM/DM.html">DM</a>` to the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`.</font>
+
+<a name="line1008">1008: </a><font color="#B22222"> Optionally, the user may also compose a function with the parent <a href="../../../../../manualpages/DM/DM.html">DM</a> to facilitate the transfer</font>
+<a name="line1009">1009: </a><font color="#B22222"> of state variables between the fine and coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`s.</font>
+<a name="line1010">1010: </a><font color="#B22222"> In the context of a finite element discretization, an example state variable might be</font>
+<a name="line1011">1011: </a><font color="#B22222"> values associated with quadrature points within each element.</font>
+<a name="line1012">1012: </a><font color="#B22222"> A user provided state scatter method is composed via</font>
+<a name="line1013">1013: </a><font color="#B22222">.vb</font>
+<a name="line1014">1014: </a><font color="#B22222">   {</font>
+<a name="line1015">1015: </a><font color="#B22222">     <a href="../../../../../manualpages/DM/DM.html">DM</a> dm_fine;</font>
+<a name="line1016">1016: </a><font color="#B22222">     <a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm_fine,"PCTelescopeStateScatter",your_state_scatter_method);</font>
+<a name="line1017">1017: </a><font color="#B22222">   }</font>
+<a name="line1018">1018: </a><font color="#B22222">.ve</font>
+<a name="line1019">1019: </a><font color="#B22222"> The signature of the user provided state scatter method is</font>
+<a name="line1020">1020: </a><font color="#B22222">.vb</font>
+<a name="line1021">1021: </a><font color="#B22222">   <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> your_state_scatter_method(<a href="../../../../../manualpages/DM/DM.html">DM</a> dm_fine,<a href="../../../../../manualpages/Vec/ScatterMode.html">ScatterMode</a> mode,<a href="../../../../../manualpages/DM/DM.html">DM</a> dm_coarse);</font>
+<a name="line1022">1022: </a><font color="#B22222">.ve</font>
+<a name="line1023">1023: </a><font color="#B22222"> `<a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>` implies the direction of transfer is from the fine `<a href="../../../../../manualpages/DM/DM.html">DM</a>` to the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`.</font>
+<a name="line1024">1024: </a><font color="#B22222"> The user is only required to support mode = `<a href="../../../../../manualpages/Vec/SCATTER_FORWARD.html">SCATTER_FORWARD</a>`.</font>
+<a name="line1025">1025: </a><font color="#B22222"> No assumption is made about the data type of the state variables.</font>
+<a name="line1026">1026: </a><font color="#B22222"> These must be managed by the user and must be accessible from the `<a href="../../../../../manualpages/DM/DM.html">DM</a>`.</font>
+
+<a name="line1028">1028: </a><font color="#B22222"> Care must be taken in defining the user context passed to `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` which is to be</font>
+<a name="line1029">1029: </a><font color="#B22222"> associated with the sub-`<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` residing within `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`.</font>
+<a name="line1030">1030: </a><font color="#B22222"> In general, `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>` assumes that the context on the fine and coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>` used with</font>
+<a name="line1031">1031: </a><font color="#B22222"> `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` should be "similar" in type or origin.</font>
+<a name="line1032">1032: </a><font color="#B22222"> Specifically the following rules are used to infer what context on the sub-`<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` should be.</font>
+
+<a name="line1034">1034: </a><font color="#B22222"> First the contexts from the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` and the fine and coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`s are retrieved.</font>
+<a name="line1035">1035: </a><font color="#B22222"> Note that the special case of a `DMSHELL` context is queried.</font>
+
+<a name="line1037">1037: </a><font color="#B22222">.vb</font>
+<a name="line1038">1038: </a><font color="#B22222">   <a href="../../../../../manualpages/KSP/DMKSPGetComputeOperators.html">DMKSPGetComputeOperators</a>(dm_fine,&amp;dmfine_kspfunc,&amp;dmfine_kspctx);</font>
+<a name="line1039">1039: </a><font color="#B22222">   <a href="../../../../../manualpages/DM/DMGetApplicationContext.html">DMGetApplicationContext</a>(dm_fine,&amp;dmfine_appctx);</font>
+<a name="line1040">1040: </a><font color="#B22222">   <a href="../../../../../manualpages/DM/DMShellGetContext.html">DMShellGetContext</a>(dm_fine,&amp;dmfine_shellctx);</font>
+
+<a name="line1042">1042: </a><font color="#B22222">   <a href="../../../../../manualpages/DM/DMGetApplicationContext.html">DMGetApplicationContext</a>(dm_coarse,&amp;dmcoarse_appctx);</font>
+<a name="line1043">1043: </a><font color="#B22222">   <a href="../../../../../manualpages/DM/DMShellGetContext.html">DMShellGetContext</a>(dm_coarse,&amp;dmcoarse_shellctx);</font>
+<a name="line1044">1044: </a><font color="#B22222">.ve</font>
+
+<a name="line1046">1046: </a><font color="#B22222"> The following rules are then enforced:</font>
+
+<a name="line1048">1048: </a><font color="#B22222"> 1. If dmfine_kspctx = NULL, then we provide a NULL pointer as the context for the sub-<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>:</font>
+<a name="line1049">1049: </a><font color="#B22222"> `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>`(sub_ksp,dmfine_kspfunc,NULL);</font>
+
+<a name="line1051">1051: </a><font color="#B22222"> 2. If dmfine_kspctx != NULL and dmfine_kspctx == dmfine_appctx,</font>
+<a name="line1052">1052: </a><font color="#B22222"> check that dmcoarse_appctx is also non-NULL. If this is true, then:</font>
+<a name="line1053">1053: </a><font color="#B22222"> `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>`(sub_ksp,dmfine_kspfunc,dmcoarse_appctx);</font>
+
+<a name="line1055">1055: </a><font color="#B22222"> 3. If dmfine_kspctx != NULL and dmfine_kspctx == dmfine_shellctx,</font>
+<a name="line1056">1056: </a><font color="#B22222"> check that dmcoarse_shellctx is also non-NULL. If this is true, then:</font>
+<a name="line1057">1057: </a><font color="#B22222"> `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>`(sub_ksp,dmfine_kspfunc,dmcoarse_shellctx);</font>
+
+<a name="line1059">1059: </a><font color="#B22222"> If neither of the above three tests passed, then `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>` cannot safely determine what</font>
+<a name="line1060">1060: </a><font color="#B22222"> context should be provided to `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` for use with the sub-`<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>`.</font>
+<a name="line1061">1061: </a><font color="#B22222"> In this case, an additional mechanism is provided via a composed function which will return</font>
+<a name="line1062">1062: </a><font color="#B22222"> the actual context to be used. To use this feature you must compose the "getter" function</font>
+<a name="line1063">1063: </a><font color="#B22222"> with the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>`, e.g.</font>
+<a name="line1064">1064: </a><font color="#B22222">.vb</font>
+<a name="line1065">1065: </a><font color="#B22222">   {</font>
+<a name="line1066">1066: </a><font color="#B22222">     <a href="../../../../../manualpages/DM/DM.html">DM</a> dm_coarse;</font>
+<a name="line1067">1067: </a><font color="#B22222">     <a href="../../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm_coarse,"PCTelescopeGetCoarseDMKSPContext",your_coarse_context_getter);</font>
+<a name="line1068">1068: </a><font color="#B22222">   }</font>
+<a name="line1069">1069: </a><font color="#B22222">.ve</font>
+<a name="line1070">1070: </a><font color="#B22222"> The signature of the user provided method is</font>
+<a name="line1071">1071: </a><font color="#B22222">.vb</font>
+<a name="line1072">1072: </a><font color="#B22222">   <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> your_coarse_context_getter(<a href="../../../../../manualpages/DM/DM.html">DM</a> dm_coarse,void **your_kspcontext);</font>
+<a name="line1073">1073: </a><font color="#B22222">.ve</font>
+
+<a name="line1075">1075: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line1077">1077: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>()`</font>
+<a name="line1078">1078: </a><font color="#B22222">@*/</font>
+<a name="line1079">1079: </a><strong><font color="#4169E1"><a name="PCTelescopeSetUseCoarseDM"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> v)</font></strong>
+<a name="line1080">1080: </a>{
+<a name="line1081">1081: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1082">1082: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCTelescopeSetUseCoarseDM_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, v));
+<a name="line1083">1083: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1084">1084: </a>}
+
+<a name="line1086">1086: </a><font color="#B22222">/*@</font>
+<a name="line1087">1087: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreKSPComputeOperators.html">PCTelescopeGetIgnoreKSPComputeOperators</a> - Get the flag indicating if `KSPComputeOperators()` will be used.</font>
+
+<a name="line1089">1089: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line1091">1091: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line1092">1092: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line1094">1094: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line1095">1095: </a><font color="#B22222">.  v - the flag</font>
+
+<a name="line1097">1097: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line1099">1099: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreKSPComputeOperators.html">PCTelescopeSetIgnoreKSPComputeOperators</a>()`</font>
+<a name="line1100">1100: </a><font color="#B22222">@*/</font>
+<a name="line1101">1101: </a><strong><font color="#4169E1"><a name="PCTelescopeGetIgnoreKSPComputeOperators"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreKSPComputeOperators.html">PCTelescopeGetIgnoreKSPComputeOperators</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *v)</font></strong>
+<a name="line1102">1102: </a>{
+<a name="line1103">1103: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1104">1104: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetIgnoreKSPComputeOperators_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *), (pc, v));
+<a name="line1105">1105: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1106">1106: </a>}
+
+<a name="line1108">1108: </a><font color="#B22222">/*@</font>
+<a name="line1109">1109: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreKSPComputeOperators.html">PCTelescopeSetIgnoreKSPComputeOperators</a> - Set a flag to ignore `KSPComputeOperators()`.</font>
+
+<a name="line1111">1111: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line1113">1113: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line1114">1114: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line1116">1116: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line1117">1117: </a><font color="#B22222">.  v - Use `<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>` to ignore the method (if defined) set via `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` on pc</font>
+
+<a name="line1119">1119: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line1121">1121: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreKSPComputeOperators.html">PCTelescopeGetIgnoreKSPComputeOperators</a>()`</font>
+<a name="line1122">1122: </a><font color="#B22222">@*/</font>
+<a name="line1123">1123: </a><strong><font color="#4169E1"><a name="PCTelescopeSetIgnoreKSPComputeOperators"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreKSPComputeOperators.html">PCTelescopeSetIgnoreKSPComputeOperators</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> v)</font></strong>
+<a name="line1124">1124: </a>{
+<a name="line1125">1125: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1126">1126: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCTelescopeSetIgnoreKSPComputeOperators_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, v));
+<a name="line1127">1127: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1128">1128: </a>}
+
+<a name="line1130">1130: </a><font color="#B22222">/*@</font>
+<a name="line1131">1131: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetDM.html">PCTelescopeGetDM</a> - Get the re-partitioned `<a href="../../../../../manualpages/DM/DM.html">DM</a>` attached to the sub-`<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>`.</font>
+
+<a name="line1133">1133: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line1135">1135: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line1136">1136: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line1138">1138: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line1139">1139: </a><font color="#B22222">.  subdm - The re-partitioned <a href="../../../../../manualpages/DM/DM.html">DM</a></font>
+
+<a name="line1141">1141: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line1143">1143: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreKSPComputeOperators.html">PCTelescopeGetIgnoreKSPComputeOperators</a>()`</font>
+<a name="line1144">1144: </a><font color="#B22222">@*/</font>
+<a name="line1145">1145: </a><strong><font color="#4169E1"><a name="PCTelescopeGetDM"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetDM.html">PCTelescopeGetDM</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/DM/DM.html">DM</a> *subdm)</font></strong>
+<a name="line1146">1146: </a>{
+<a name="line1147">1147: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1148">1148: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetDM_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/DM/DM.html">DM</a> *), (pc, subdm));
+<a name="line1149">1149: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1150">1150: </a>}
+
+<a name="line1152">1152: </a><font color="#B22222">/*@</font>
+<a name="line1153">1153: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeSetSubcommType.html">PCTelescopeSetSubcommType</a> - set subcommunicator type (interlaced or contiguous)</font>
+
+<a name="line1155">1155: </a><font color="#B22222"> Logically Collective</font>
+
+<a name="line1157">1157: </a><font color="#B22222"> Input Parameters:</font>
+<a name="line1158">1158: </a><font color="#B22222">+  pc - the preconditioner context</font>
+<a name="line1159">1159: </a><font color="#B22222">-  subcommtype - the subcommunicator type (see `PetscSubcommType`)</font>
+
+<a name="line1161">1161: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line1163">1163: </a><font color="#B22222">.seealso: `PetscSubcommType`, `<a href="../../../../../manualpages/Sys/PetscSubcomm.html">PetscSubcomm</a>`, `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`</font>
+<a name="line1164">1164: </a><font color="#B22222">@*/</font>
+<a name="line1165">1165: </a><strong><font color="#4169E1"><a name="PCTelescopeSetSubcommType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeSetSubcommType.html">PCTelescopeSetSubcommType</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscSubcommType subcommtype)</font></strong>
+<a name="line1166">1166: </a>{
+<a name="line1167">1167: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1168">1168: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCTelescopeSetSubcommType_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, PetscSubcommType), (pc, subcommtype));
+<a name="line1169">1169: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1170">1170: </a>}
+
+<a name="line1172">1172: </a><font color="#B22222">/*@</font>
+<a name="line1173">1173: </a><font color="#B22222"> <a href="../../../../../manualpages/PC/PCTelescopeGetSubcommType.html">PCTelescopeGetSubcommType</a> - Get the subcommunicator type (interlaced or contiguous)</font>
+
+<a name="line1175">1175: </a><font color="#B22222"> Not Collective</font>
+
+<a name="line1177">1177: </a><font color="#B22222"> Input Parameter:</font>
+<a name="line1178">1178: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line1180">1180: </a><font color="#B22222"> Output Parameter:</font>
+<a name="line1181">1181: </a><font color="#B22222">.  subcommtype - the subcommunicator type (see `PetscSubcommType`)</font>
+
+<a name="line1183">1183: </a><font color="#B22222"> Level: advanced</font>
+
+<a name="line1185">1185: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Sys/PetscSubcomm.html">PetscSubcomm</a>`, `PetscSubcommType`, `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`</font>
+<a name="line1186">1186: </a><font color="#B22222">@*/</font>
+<a name="line1187">1187: </a><strong><font color="#4169E1"><a name="PCTelescopeGetSubcommType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCTelescopeGetSubcommType.html">PCTelescopeGetSubcommType</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscSubcommType *subcommtype)</font></strong>
+<a name="line1188">1188: </a>{
+<a name="line1189">1189: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1190">1190: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCTelescopeGetSubcommType_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, PetscSubcommType *), (pc, subcommtype));
+<a name="line1191">1191: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1192">1192: </a>}
+
+<a name="line1194">1194: </a><font color="#B22222">/*MC</font>
+<a name="line1195">1195: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a> - Runs a `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` solver on a sub-communicator. MPI ranks not in the sub-communicator are idle during the solve.</font>
+
+<a name="line1197">1197: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line1198">1198: </a><font color="#B22222">+  -pc_telescope_reduction_factor &lt;r&gt; - factor to reduce the communicator size by. e.g. with 64 MPI ranks and r=4, the new sub-communicator will have 64/4 = 16 ranks.</font>
+<a name="line1199">1199: </a><font color="#B22222">.  -pc_telescope_ignore_dm  - flag to indicate whether an attached <a href="../../../../../manualpages/DM/DM.html">DM</a> should be ignored.</font>
+<a name="line1200">1200: </a><font color="#B22222">.  -pc_telescope_subcomm_type &lt;interlaced,contiguous&gt; - defines the selection of MPI ranks on the sub-communicator. see <a href="../../../../../manualpages/Sys/PetscSubcomm.html">PetscSubcomm</a> for more information.</font>
+<a name="line1201">1201: </a><font color="#B22222">.  -pc_telescope_ignore_kspcomputeoperators - flag to indicate whether `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` should be used on the sub-<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>.</font>
+<a name="line1202">1202: </a><font color="#B22222">-  -pc_telescope_use_coarse_dm - flag to indicate whether the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>` should be used to define the sub-communicator.</font>
+
+<a name="line1204">1204: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line1206">1206: </a><font color="#B22222">   Notes:</font>
+<a name="line1207">1207: </a><font color="#B22222">   Assuming that the parent preconditioner `<a href="../../../../../manualpages/PC/PC.html">PC</a>` is defined on a communicator c, this implementation</font>
+<a name="line1208">1208: </a><font color="#B22222">   creates a child sub-communicator (c') containing fewer MPI ranks than the original parent preconditioner `<a href="../../../../../manualpages/PC/PC.html">PC</a>`.</font>
+<a name="line1209">1209: </a><font color="#B22222">   The preconditioner is deemed telescopic as it only calls `<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>()` on a single</font>
+<a name="line1210">1210: </a><font color="#B22222">   sub-communicator, in contrast with `<a href="../../../../../manualpages/PC/PCREDUNDANT.html">PCREDUNDANT</a>` which calls `<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>()` on N sub-communicators.</font>
+<a name="line1211">1211: </a><font color="#B22222">   This means there will be MPI ranks which will be idle during the application of this preconditioner.</font>
+<a name="line1212">1212: </a><font color="#B22222">   Additionally, in comparison with `<a href="../../../../../manualpages/PC/PCREDUNDANT.html">PCREDUNDANT</a>`, `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>` can utilize an attached `<a href="../../../../../manualpages/DM/DM.html">DM</a>`.</font>
+
+<a name="line1214">1214: </a><font color="#B22222">   The default type of the sub `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` (the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` defined on c') is `<a href="../../../../../manualpages/KSP/KSPPREONLY.html">KSPPREONLY</a>`.</font>
+
+<a name="line1216">1216: </a><font color="#B22222">   There are three setup mechanisms for `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`. Features support by each type are described below.</font>
+<a name="line1217">1217: </a><font color="#B22222">   In the following, we will refer to the operators B and B', these are the Bmat provided to the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` on the</font>
+<a name="line1218">1218: </a><font color="#B22222">   communicators c and c' respectively.</font>
+
+<a name="line1220">1220: </a><font color="#B22222">   [1] Default setup</font>
+<a name="line1221">1221: </a><font color="#B22222">   The sub-communicator c' is created via `<a href="../../../../../manualpages/Sys/PetscSubcommCreate.html">PetscSubcommCreate</a>()`.</font>
+<a name="line1222">1222: </a><font color="#B22222">   Explicitly defined nullspace and near nullspace vectors will be propagated from B to B'.</font>
+<a name="line1223">1223: </a><font color="#B22222">   Currently there is no support define nullspaces via a user supplied method (e.g. as passed to `<a href="../../../../../manualpages/Mat/MatNullSpaceSetFunction.html">MatNullSpaceSetFunction</a>()`).</font>
+<a name="line1224">1224: </a><font color="#B22222">   No support is provided for `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()`.</font>
+<a name="line1225">1225: </a><font color="#B22222">   Currently there is no support for the flag -pc_use_amat.</font>
+
+<a name="line1227">1227: </a><font color="#B22222">   [2] `<a href="../../../../../manualpages/DM/DM.html">DM</a>` aware setup</font>
+<a name="line1228">1228: </a><font color="#B22222">   If a `<a href="../../../../../manualpages/DM/DM.html">DM</a>` is attached to the `<a href="../../../../../manualpages/PC/PC.html">PC</a>`, it is re-partitioned on the sub-communicator c'.</font>
+<a name="line1229">1229: </a><font color="#B22222">   c' is created via `<a href="../../../../../manualpages/Sys/PetscSubcommCreate.html">PetscSubcommCreate</a>()`.</font>
+<a name="line1230">1230: </a><font color="#B22222">   Both the Bmat operator and the right hand side vector are permuted into the new DOF ordering defined by the re-partitioned `<a href="../../../../../manualpages/DM/DM.html">DM</a>`.</font>
+<a name="line1231">1231: </a><font color="#B22222">   Currently only support for re-partitioning a `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` is provided.</font>
+<a name="line1232">1232: </a><font color="#B22222">   Any explicitly defined nullspace or near nullspace vectors attached to the original Bmat operator (B) are extracted, re-partitioned and set on the re-partitioned Bmat operator (B').</font>
+<a name="line1233">1233: </a><font color="#B22222">   Currently there is no support define nullspaces via a user supplied method (e.g. as passed to `<a href="../../../../../manualpages/Mat/MatNullSpaceSetFunction.html">MatNullSpaceSetFunction</a>()`).</font>
+<a name="line1234">1234: </a><font color="#B22222">   Support is provided for `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()`. The user provided function and context is propagated to the sub `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>`.</font>
+<a name="line1235">1235: </a><font color="#B22222">   This is fragile since the user must ensure that their user context is valid for use on c'.</font>
+<a name="line1236">1236: </a><font color="#B22222">   Currently there is no support for the flag -pc_use_amat.</font>
+
+<a name="line1238">1238: </a><font color="#B22222">   [3] Coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>` setup</font>
+<a name="line1239">1239: </a><font color="#B22222">   If a `<a href="../../../../../manualpages/DM/DM.html">DM</a>` (dmfine) is attached to the `<a href="../../../../../manualpages/PC/PC.html">PC</a>`, dmfine is queried for a "coarse" `<a href="../../../../../manualpages/DM/DM.html">DM</a>` (call this dmcoarse) via `<a href="../../../../../manualpages/DM/DMGetCoarseDM.html">DMGetCoarseDM</a>()`.</font>
+<a name="line1240">1240: </a><font color="#B22222">   `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>` will interpret the coarse `<a href="../../../../../manualpages/DM/DM.html">DM</a>` as being defined on a sub-communicator of c.</font>
+<a name="line1241">1241: </a><font color="#B22222">   The communicator associated with dmcoarse will define the c' to be used within `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>`.</font>
+<a name="line1242">1242: </a><font color="#B22222">   `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>` will check that c' is in fact a sub-communicator of c. If it is not, an error will be reported.</font>
+<a name="line1243">1243: </a><font color="#B22222">   The intention of this setup type is that `<a href="../../../../../manualpages/PC/PCTELESCOPE.html">PCTELESCOPE</a>` will use an existing (e.g. user defined) communicator hierarchy, say as would be</font>
+<a name="line1244">1244: </a><font color="#B22222">   available with using multi-grid on unstructured meshes.</font>
+<a name="line1245">1245: </a><font color="#B22222">   This setup will not use the command line options -pc_telescope_reduction_factor or -pc_telescope_subcomm_type.</font>
+<a name="line1246">1246: </a><font color="#B22222">   Any explicitly defined nullspace or near nullspace vectors attached to the original Bmat operator (B) are extracted, scattered into the correct ordering consistent with dmcoarse and set on B'.</font>
+<a name="line1247">1247: </a><font color="#B22222">   Currently there is no support define nullspaces via a user supplied method (e.g. as passed to `<a href="../../../../../manualpages/Mat/MatNullSpaceSetFunction.html">MatNullSpaceSetFunction</a>()`).</font>
+<a name="line1248">1248: </a><font color="#B22222">   There is no general method to permute field orderings, hence only `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` is supported.</font>
+<a name="line1249">1249: </a><font color="#B22222">   The user must use `<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>()` with dmfine to define the method to scatter fields from dmfine to dmcoarse.</font>
+<a name="line1250">1250: </a><font color="#B22222">   Propagation of the user context for `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` on the sub `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` is attempted by querying the `<a href="../../../../../manualpages/DM/DM.html">DM</a>` contexts associated with dmfine and dmcoarse. Alternatively, the user may use `<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>()` with dmcoarse to define a method which will return the appropriate user context for `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()`.</font>
+<a name="line1251">1251: </a><font color="#B22222">   Currently there is no support for the flag -pc_use_amat.</font>
+<a name="line1252">1252: </a><font color="#B22222">   This setup can be invoked by the option -pc_telescope_use_coarse_dm or by calling `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>`(pc,`<a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>`);</font>
+<a name="line1253">1253: </a><font color="#B22222">   Further information about the user-provided methods required by this setup type are described here `<a href="../../../../../manualpages/PC/PCTelescopeSetUseCoarseDM.html">PCTelescopeSetUseCoarseDM</a>()`.</font>
+
+<a name="line1255">1255: </a><font color="#B22222">   Developer Notes:</font>
+<a name="line1256">1256: </a><font color="#B22222">   During `PCSetup()`, the B operator is scattered onto c'.</font>
+<a name="line1257">1257: </a><font color="#B22222">   Within `<a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>()`, the RHS vector (x) is scattered into a redundant vector, xred (defined on c').</font>
+<a name="line1258">1258: </a><font color="#B22222">   Then, `<a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>()` is executed on the c' communicator.</font>
+
+<a name="line1260">1260: </a><font color="#B22222">   The communicator used within the telescoping preconditioner is defined by a `<a href="../../../../../manualpages/Sys/PetscSubcomm.html">PetscSubcomm</a>` using the INTERLACED</font>
+<a name="line1261">1261: </a><font color="#B22222">   creation routine by default (this can be changed with -pc_telescope_subcomm_type). We run the sub `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` on only the ranks within the communicator which have a color equal to zero.</font>
+
+<a name="line1263">1263: </a><font color="#B22222">   The telescoping preconditioner is aware of nullspaces and near nullspaces which are attached to the B operator.</font>
+<a name="line1264">1264: </a><font color="#B22222">   In the case where B has a (near) nullspace attached, the (near) nullspace vectors are extracted from B and mapped into</font>
+<a name="line1265">1265: </a><font color="#B22222">   a new (near) nullspace, defined on the sub-communicator, which is attached to B' (the B operator which was scattered to c')</font>
+
+<a name="line1267">1267: </a><font color="#B22222">   The telescoping preconditioner can re-partition an attached <a href="../../../../../manualpages/DM/DM.html">DM</a> if it is a `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` (2D or 3D -</font>
+<a name="line1268">1268: </a><font color="#B22222">   support for 1D `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>`s is not provided). If a `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` is found, a topologically equivalent `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` is created on c'</font>
+<a name="line1269">1269: </a><font color="#B22222">   and this new `<a href="../../../../../manualpages/DM/DM.html">DM</a>` is attached the sub `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>`. The design of telescope is such that it should be possible to extend support</font>
+<a name="line1270">1270: </a><font color="#B22222">   for re-partitioning other to <a href="../../../../../manualpages/DM/DM.html">DM</a>'s (e.g. `<a href="../../../../../manualpages/DMPlex/DMPLEX.html">DMPLEX</a>`). The user can supply a flag to ignore attached DMs.</font>
+<a name="line1271">1271: </a><font color="#B22222">   Alternatively, user-provided re-partitioned DMs can be used via -pc_telescope_use_coarse_dm.</font>
+
+<a name="line1273">1273: </a><font color="#B22222">   With the default setup mode, B' is defined by fusing rows (in order) associated with MPI ranks common to c and c'.</font>
+
+<a name="line1275">1275: </a><font color="#B22222">   When a `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` is attached to the parent preconditioner, B' is defined by: (i) performing a symmetric permutation of B</font>
+<a name="line1276">1276: </a><font color="#B22222">   into the ordering defined by the `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` on c', (ii) extracting the local chunks via `<a href="../../../../../manualpages/Mat/MatCreateSubMatrices.html">MatCreateSubMatrices</a>()`, (iii) fusing the</font>
+<a name="line1277">1277: </a><font color="#B22222">   locally (sequential) matrices defined on the ranks common to c and c' into B' using `<a href="../../../../../manualpages/Mat/MatCreateMPIMatConcatenateSeqMat.html">MatCreateMPIMatConcatenateSeqMat</a>()`</font>
+
+<a name="line1279">1279: </a><font color="#B22222">   Limitations/improvements include the following.</font>
+<a name="line1280">1280: </a><font color="#B22222">   `<a href="../../../../../manualpages/Vec/VecPlaceArray.html">VecPlaceArray</a>()` could be used within `<a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>()` to improve efficiency and reduce memory usage.</font>
+<a name="line1281">1281: </a><font color="#B22222">   A unified mechanism to query for user contexts as required by `<a href="../../../../../manualpages/KSP/KSPSetComputeOperators.html">KSPSetComputeOperators</a>()` and `<a href="../../../../../manualpages/Mat/MatNullSpaceSetFunction.html">MatNullSpaceSetFunction</a>()`.</font>
+
+<a name="line1283">1283: </a><font color="#B22222">   The symmetric permutation used when a `<a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a>` is encountered is performed via explicitly assembling a permutation matrix P,</font>
+<a name="line1284">1284: </a><font color="#B22222">   and performing P^T.A.P. Possibly it might be more efficient to use `<a href="../../../../../manualpages/Mat/MatPermute.html">MatPermute</a>()`. We opted to use P^T.A.P as it appears</font>
+<a name="line1285">1285: </a><font color="#B22222">   `<a href="../../../../../manualpages/Vec/VecPermute.html">VecPermute</a>()` does not support the use case required here. By computing P, one can permute both the operator and RHS in a</font>
+<a name="line1286">1286: </a><font color="#B22222">   consistent manner.</font>
+
+<a name="line1288">1288: </a><font color="#B22222">   Mapping of vectors (default setup mode) is performed in the following way.</font>
+<a name="line1289">1289: </a><font color="#B22222">   Suppose the parent communicator size was 4, and we set a reduction factor of 2; this would give a comm size on c' of 2.</font>
+<a name="line1290">1290: </a><font color="#B22222">   Using the interlaced creation routine, the ranks in c with color = 0 will be rank 0 and 2.</font>
+<a name="line1291">1291: </a><font color="#B22222">   We perform the scatter to the sub-communicator in the following way.</font>
+<a name="line1292">1292: </a><font color="#B22222">   [1] Given a vector x defined on communicator c</font>
+
+<a name="line1294">1294: </a><font color="#B22222">.vb</font>
+<a name="line1295">1295: </a><font color="#B22222">   rank(c)  local values of x</font>
+<a name="line1296">1296: </a><font color="#B22222">   ------- ----------------------------------------</font>
+<a name="line1297">1297: </a><font color="#B22222">        0   [  0.0,  1.0,  2.0,  3.0,  4.0,  5.0 ]</font>
+<a name="line1298">1298: </a><font color="#B22222">        1   [  6.0,  7.0,  8.0,  9.0, 10.0, 11.0 ]</font>
+<a name="line1299">1299: </a><font color="#B22222">        2   [ 12.0, 13.0, 14.0, 15.0, 16.0, 17.0 ]</font>
+<a name="line1300">1300: </a><font color="#B22222">        3   [ 18.0, 19.0, 20.0, 21.0, 22.0, 23.0 ]</font>
+<a name="line1301">1301: </a><font color="#B22222">.ve</font>
+
+<a name="line1303">1303: </a><font color="#B22222">   scatter into xtmp defined also on comm c, so that we have the following values</font>
+
+<a name="line1305">1305: </a><font color="#B22222">.vb</font>
+<a name="line1306">1306: </a><font color="#B22222">   rank(c)  local values of xtmp</font>
+<a name="line1307">1307: </a><font color="#B22222">   ------- ----------------------------------------------------------------------------</font>
+<a name="line1308">1308: </a><font color="#B22222">        0   [  0.0,  1.0,  2.0,  3.0,  4.0,  5.0,  6.0,  7.0,  8.0,  9.0, 10.0, 11.0 ]</font>
+<a name="line1309">1309: </a><font color="#B22222">        1   [ ]</font>
+<a name="line1310">1310: </a><font color="#B22222">        2   [ 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0 ]</font>
+<a name="line1311">1311: </a><font color="#B22222">        3   [ ]</font>
+<a name="line1312">1312: </a><font color="#B22222">.ve</font>
+
+<a name="line1314">1314: </a><font color="#B22222">   The entries on rank 1 and 3 (ranks which do not have a color = 0 in c') have no values</font>
+
+<a name="line1316">1316: </a><font color="#B22222">   [2] Copy the values from ranks 0, 2 (indices with respect to comm c) into the vector xred which is defined on communicator c'.</font>
+<a name="line1317">1317: </a><font color="#B22222">   Ranks 0 and 2 are the only ranks in the subcomm which have a color = 0.</font>
+
+<a name="line1319">1319: </a><font color="#B22222">.vb</font>
+<a name="line1320">1320: </a><font color="#B22222">   rank(c')  local values of xred</font>
+<a name="line1321">1321: </a><font color="#B22222">   -------- ----------------------------------------------------------------------------</font>
+<a name="line1322">1322: </a><font color="#B22222">         0   [  0.0,  1.0,  2.0,  3.0,  4.0,  5.0,  6.0,  7.0,  8.0,  9.0, 10.0, 11.0 ]</font>
+<a name="line1323">1323: </a><font color="#B22222">         1   [ 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0 ]</font>
+<a name="line1324">1324: </a><font color="#B22222">.ve</font>
+
+<a name="line1326">1326: </a><font color="#B22222">  Contributed by Dave May</font>
+
+<a name="line1328">1328: </a><font color="#B22222">  Reference:</font>
+<a name="line1329">1329: </a><font color="#B22222">  Dave A. May, Patrick Sanan, Karl Rupp, Matthew G. Knepley, and Barry F. Smith, "Extreme-Scale Multigrid Components within PETSc". 2016. In Proceedings of the Platform for Advanced Scientific Computing Conference (PASC '16). DOI: 10.1145/2929908.2929913</font>
+
+<a name="line1331">1331: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCTelescopeGetKSP.html">PCTelescopeGetKSP</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeGetDM.html">PCTelescopeGetDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeGetReductionFactor.html">PCTelescopeGetReductionFactor</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetReductionFactor.html">PCTelescopeSetReductionFactor</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeGetIgnoreDM.html">PCTelescopeGetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCTelescopeSetIgnoreDM.html">PCTelescopeSetIgnoreDM</a>()`, `<a href="../../../../../manualpages/PC/PCREDUNDANT.html">PCREDUNDANT</a>`</font>
+<a name="line1332">1332: </a><font color="#B22222">M*/</font>
+<a name="line1333">1333: </a><strong><font color="#4169E1"><a name="PCCreate_Telescope"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCCreate_Telescope(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line1334">1334: </a>{
+<a name="line1335">1335: </a>  <font color="#4169E1">struct _PC_Telescope</font> *sred;
+
+<a name="line1337">1337: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line1338">1338: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;sred));
+<a name="line1339">1339: </a>  sred-&gt;psubcomm                   = NULL;
+<a name="line1340">1340: </a>  sred-&gt;subcommtype                = PETSC_SUBCOMM_INTERLACED;
+<a name="line1341">1341: </a>  sred-&gt;subcomm                    = MPI_COMM_NULL;
+<a name="line1342">1342: </a>  sred-&gt;redfactor                  = 1;
+<a name="line1343">1343: </a>  sred-&gt;ignore_dm                  = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line1344">1344: </a>  sred-&gt;ignore_kspcomputeoperators = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line1345">1345: </a>  sred-&gt;use_coarse_dm              = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line1346">1346: </a>  pc-&gt;data                         = (void *)sred;
+
+<a name="line1348">1348: </a>  pc-&gt;ops-&gt;apply           = PCApply_Telescope;
+<a name="line1349">1349: </a>  pc-&gt;ops-&gt;applytranspose  = NULL;
+<a name="line1350">1350: </a>  pc-&gt;ops-&gt;applyrichardson = PCApplyRichardson_Telescope;
+<a name="line1351">1351: </a>  pc-&gt;ops-&gt;setup           = PCSetUp_Telescope;
+<a name="line1352">1352: </a>  pc-&gt;ops-&gt;destroy         = PCDestroy_Telescope;
+<a name="line1353">1353: </a>  pc-&gt;ops-&gt;reset           = PCReset_Telescope;
+<a name="line1354">1354: </a>  pc-&gt;ops-&gt;setfromoptions  = PCSetFromOptions_Telescope;
+<a name="line1355">1355: </a>  pc-&gt;ops-&gt;view            = PCView_Telescope;
+
+<a name="line1357">1357: </a>  sred-&gt;pctelescope_setup_type              = PCTelescopeSetUp_default;
+<a name="line1358">1358: </a>  sred-&gt;pctelescope_matcreate_type          = PCTelescopeMatCreate_default;
+<a name="line1359">1359: </a>  sred-&gt;pctelescope_matnullspacecreate_type = PCTelescopeMatNullSpaceCreate_default;
+<a name="line1360">1360: </a>  sred-&gt;pctelescope_reset_type              = NULL;
+
+<a name="line1362">1362: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetKSP_C"</font>, PCTelescopeGetKSP_Telescope));
+<a name="line1363">1363: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetSubcommType_C"</font>, PCTelescopeGetSubcommType_Telescope));
+<a name="line1364">1364: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetSubcommType_C"</font>, PCTelescopeSetSubcommType_Telescope));
+<a name="line1365">1365: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetReductionFactor_C"</font>, PCTelescopeGetReductionFactor_Telescope));
+<a name="line1366">1366: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetReductionFactor_C"</font>, PCTelescopeSetReductionFactor_Telescope));
+<a name="line1367">1367: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetIgnoreDM_C"</font>, PCTelescopeGetIgnoreDM_Telescope));
+<a name="line1368">1368: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetIgnoreDM_C"</font>, PCTelescopeSetIgnoreDM_Telescope));
+<a name="line1369">1369: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetIgnoreKSPComputeOperators_C"</font>, PCTelescopeGetIgnoreKSPComputeOperators_Telescope));
+<a name="line1370">1370: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetIgnoreKSPComputeOperators_C"</font>, PCTelescopeSetIgnoreKSPComputeOperators_Telescope));
+<a name="line1371">1371: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetDM_C"</font>, PCTelescopeGetDM_Telescope));
+<a name="line1372">1372: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeGetUseCoarseDM_C"</font>, PCTelescopeGetUseCoarseDM_Telescope));
+<a name="line1373">1373: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCTelescopeSetUseCoarseDM_C"</font>, PCTelescopeSetUseCoarseDM_Telescope));
+<a name="line1374">1374: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line1375">1375: </a>}
+</pre>
+</body>
+
+</html>

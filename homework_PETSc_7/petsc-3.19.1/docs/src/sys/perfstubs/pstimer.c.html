@@ -1,0 +1,436 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/sys/perfstubs/pstimer.c">Actual source code: pstimer.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:47+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>// Copyright (c) 2019 University of Oregon
+<a name="line2">  2: </a>// Distributed under the BSD Software License
+<a name="line3">  3: </a>// (See accompanying file LICENSE.txt)
+
+<a name="line5">  5: </a><font color="#A020F0">#ifndef _GNU_SOURCE</font>
+<a name="line6">  6: </a><strong><font color="#228B22">#define _GNU_SOURCE // needed to define RTLD_DEFAULT</font></strong>
+<a name="line7">  7: </a><font color="#A020F0">#endif</font>
+<a name="line8">  8: </a><font color="#A020F0">#include &lt;stdlib.h&gt;</font>
+<a name="line9">  9: </a><font color="#A020F0">#include &lt;stdio.h&gt;</font>
+<a name="line10"> 10: </a><font color="#A020F0">#include &lt;math.h&gt;</font>
+<a name="line11"> 11: </a><font color="#A020F0">#ifndef PERFSTUBS_STANDALONE</font>
+<a name="line12"> 12: </a><font color="#A020F0">#include </font><font color="#666666">"petscconf.h"</font><font color="#A020F0"></font>
+<a name="line13"> 13: </a><font color="#A020F0">#ifdef PETSC_HAVE_DLFCN_H</font>
+<a name="line14"> 14: </a><strong><font color="#228B22">#define PERFSTUBS_HAVE_DLFCN_H</font></strong>
+<a name="line15"> 15: </a><font color="#A020F0">#endif</font>
+<a name="line16"> 16: </a><font color="#A020F0">#endif</font>
+<a name="line17"> 17: </a><font color="#A020F0">#if defined(__linux__) &amp;&amp; defined(PERFSTUBS_HAVE_DLFCN_H)</font>
+<a name="line18"> 18: </a><font color="#A020F0">#include &lt;dlfcn.h&gt;</font>
+<a name="line19"> 19: </a><font color="#A020F0">#else</font>
+<a name="line20"> 20: </a><strong><font color="#228B22">#define PERFSTUBS_USE_STATIC 1</font></strong>
+<a name="line21"> 21: </a><font color="#A020F0">#endif</font>
+<a name="line22"> 22: </a><strong><font color="#228B22">#define PERFSTUBS_USE_TIMERS</font></strong>
+<a name="line23"> 23: </a><font color="#A020F0">#include </font><font color="#666666">"timer.h"</font><font color="#A020F0"></font>
+
+<a name="line25"> 25: </a><strong><font color="#228B22">#define MAX_TOOLS 1</font></strong>
+
+<a name="line27"> 27: </a><font color="#A020F0">#if defined(_WIN32)||defined(WIN32)||defined(_WIN64)||defined(WIN64)||defined(__CYGWIN__)||defined(__APPLE__)</font>
+<a name="line28"> 28: </a><strong><font color="#228B22">#define PERFSTUBS_OFF</font></strong>
+<a name="line29"> 29: </a><font color="#A020F0">#endif</font>
+
+<a name="line31"> 31: </a><font color="#B22222">/* Make sure that the Timer singleton is constructed when the</font>
+<a name="line32"> 32: </a><font color="#B22222"> * library is loaded.  This will ensure (on linux, anyway) that</font>
+<a name="line33"> 33: </a><font color="#B22222"> * we can assert that we have m_Initialized on the main thread. */</font>
+<a name="line34"> 34: </a>//static void __attribute__((constructor)) initialize_library(void);
+
+<a name="line36"> 36: </a><font color="#B22222">/* Globals for the plugin API */</font>
+
+<a name="line38"> 38: </a>int perfstubs_initialized = PERFSTUBS_UNKNOWN;
+<a name="line39"> 39: </a>int num_tools_registered = 0;
+<a name="line40"> 40: </a><font color="#B22222">/* Keep track of whether the thread has been registered */</font>
+<a name="line41"> 41: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF</font>
+<a name="line42"> 42: </a>__thread int thread_seen = 0;
+<a name="line43"> 43: </a><font color="#A020F0">#endif</font>
+<a name="line44"> 44: </a><font color="#B22222">/* Function pointers */</font>
+
+<a name="line46"> 46: </a>ps_initialize_t initialize_functions[MAX_TOOLS];
+<a name="line47"> 47: </a>ps_register_thread_t register_thread_functions[MAX_TOOLS];
+<a name="line48"> 48: </a>ps_finalize_t finalize_functions[MAX_TOOLS];
+<a name="line49"> 49: </a>ps_dump_data_t dump_data_functions[MAX_TOOLS];
+<a name="line50"> 50: </a>ps_timer_create_t timer_create_functions[MAX_TOOLS];
+<a name="line51"> 51: </a>ps_timer_start_t timer_start_functions[MAX_TOOLS];
+<a name="line52"> 52: </a>ps_timer_stop_t timer_stop_functions[MAX_TOOLS];
+<a name="line53"> 53: </a>ps_set_parameter_t set_parameter_functions[MAX_TOOLS];
+<a name="line54"> 54: </a>ps_dynamic_phase_start_t dynamic_phase_start_functions[MAX_TOOLS];
+<a name="line55"> 55: </a>ps_dynamic_phase_stop_t dynamic_phase_stop_functions[MAX_TOOLS];
+<a name="line56"> 56: </a>ps_create_counter_t create_counter_functions[MAX_TOOLS];
+<a name="line57"> 57: </a>ps_sample_counter_t sample_counter_functions[MAX_TOOLS];
+<a name="line58"> 58: </a>ps_set_metadata_t set_metadata_functions[MAX_TOOLS];
+<a name="line59"> 59: </a>ps_get_timer_data_t get_timer_data_functions[MAX_TOOLS];
+<a name="line60"> 60: </a>ps_get_counter_data_t get_counter_data_functions[MAX_TOOLS];
+<a name="line61"> 61: </a>ps_get_metadata_t get_metadata_functions[MAX_TOOLS];
+<a name="line62"> 62: </a>ps_free_timer_data_t free_timer_data_functions[MAX_TOOLS];
+<a name="line63"> 63: </a>ps_free_counter_data_t free_counter_data_functions[MAX_TOOLS];
+<a name="line64"> 64: </a>ps_free_metadata_t free_metadata_functions[MAX_TOOLS];
+
+<a name="line66"> 66: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF</font>
+
+<a name="line68"> 68: </a><font color="#A020F0">#ifdef PERFSTUBS_USE_STATIC</font>
+
+<a name="line70"> 70: </a><font color="#A020F0">#if defined(__clang__) &amp;&amp; defined(__APPLE__)</font>
+<a name="line71"> 71: </a><strong><font color="#228B22">#define PS_WEAK_PRE</font></strong>
+<a name="line72"> 72: </a><strong><font color="#228B22">#define PS_WEAK_POST __attribute__((weak_import))</font></strong>
+<a name="line73"> 73: </a><strong><font color="#228B22">#define PS_WEAK_POST_NULL __attribute__((weak_import))</font></strong>
+<a name="line74"> 74: </a><font color="#A020F0">#else</font>
+<a name="line75"> 75: </a><strong><font color="#228B22">#define PS_WEAK_PRE __attribute__((weak))</font></strong>
+<a name="line76"> 76: </a><strong><font color="#228B22">#define PS_WEAK_POST</font></strong>
+<a name="line77"> 77: </a><strong><font color="#228B22">#define PS_WEAK_POST_NULL</font></strong>
+<a name="line78"> 78: </a><font color="#A020F0">#endif</font>
+
+<a name="line80"> 80: </a><strong><font color="#4169E1"><a name="ps_tool_initialize"></a>PS_WEAK_PRE void ps_tool_initialize(void)</font></strong> PS_WEAK_POST;
+<a name="line81"> 81: </a><strong><font color="#4169E1"><a name="ps_tool_register_thread"></a>PS_WEAK_PRE void ps_tool_register_thread(void)</font></strong> PS_WEAK_POST;
+<a name="line82"> 82: </a><strong><font color="#4169E1"><a name="ps_tool_finalize"></a>PS_WEAK_PRE void ps_tool_finalize(void)</font></strong> PS_WEAK_POST;
+<a name="line83"> 83: </a><strong><font color="#4169E1"><a name="ps_tool_dump_data"></a>PS_WEAK_PRE void ps_tool_dump_data(void)</font></strong> PS_WEAK_POST;
+<a name="line84"> 84: </a><strong><font color="#4169E1"><a name="ps_tool_timer_create"></a>PS_WEAK_PRE void* ps_tool_timer_create(const char *)</font></strong> PS_WEAK_POST;
+<a name="line85"> 85: </a><strong><font color="#4169E1"><a name="ps_tool_timer_start"></a>PS_WEAK_PRE void ps_tool_timer_start(const void *)</font></strong> PS_WEAK_POST;
+<a name="line86"> 86: </a><strong><font color="#4169E1"><a name="ps_tool_timer_stop"></a>PS_WEAK_PRE void ps_tool_timer_stop(const void *)</font></strong> PS_WEAK_POST;
+<a name="line87"> 87: </a><strong><font color="#4169E1"><a name="ps_tool_set_parameter"></a>PS_WEAK_PRE void ps_tool_set_parameter(const char *, int64_t)</font></strong> PS_WEAK_POST;
+<a name="line88"> 88: </a><strong><font color="#4169E1"><a name="ps_tool_dynamic_phase_start"></a>PS_WEAK_PRE void ps_tool_dynamic_phase_start(const char *, int)</font></strong> PS_WEAK_POST;
+<a name="line89"> 89: </a><strong><font color="#4169E1"><a name="ps_tool_dynamic_phase_stop"></a>PS_WEAK_PRE void ps_tool_dynamic_phase_stop(const char *, int)</font></strong> PS_WEAK_POST;
+<a name="line90"> 90: </a><strong><font color="#4169E1"><a name="ps_tool_create_counter"></a>PS_WEAK_PRE void* ps_tool_create_counter(const char *)</font></strong> PS_WEAK_POST;
+<a name="line91"> 91: </a><strong><font color="#4169E1"><a name="ps_tool_sample_counter"></a>PS_WEAK_PRE void ps_tool_sample_counter(const void *, double)</font></strong> PS_WEAK_POST;
+<a name="line92"> 92: </a><strong><font color="#4169E1"><a name="ps_tool_set_metadata"></a>PS_WEAK_PRE void ps_tool_set_metadata(const char *, const char *)</font></strong> PS_WEAK_POST;
+<a name="line93"> 93: </a><strong><font color="#4169E1"><a name="ps_tool_get_timer_data"></a>PS_WEAK_PRE void ps_tool_get_timer_data(ps_tool_timer_data_t *)</font></strong> PS_WEAK_POST;
+<a name="line94"> 94: </a><strong><font color="#4169E1"><a name="ps_tool_get_counter_data"></a>PS_WEAK_PRE void ps_tool_get_counter_data(ps_tool_counter_data_t *)</font></strong> PS_WEAK_POST;
+<a name="line95"> 95: </a><strong><font color="#4169E1"><a name="ps_tool_get_metadata"></a>PS_WEAK_PRE void ps_tool_get_metadata(ps_tool_metadata_t *)</font></strong> PS_WEAK_POST;
+<a name="line96"> 96: </a><strong><font color="#4169E1"><a name="ps_tool_free_timer_data"></a>PS_WEAK_PRE void ps_tool_free_timer_data(ps_tool_timer_data_t *)</font></strong> PS_WEAK_POST;
+<a name="line97"> 97: </a><strong><font color="#4169E1"><a name="ps_tool_free_counter_data"></a>PS_WEAK_PRE void ps_tool_free_counter_data(ps_tool_counter_data_t *)</font></strong> PS_WEAK_POST;
+<a name="line98"> 98: </a><strong><font color="#4169E1"><a name="ps_tool_free_metadata"></a>PS_WEAK_PRE void ps_tool_free_metadata(ps_tool_metadata_t *)</font></strong> PS_WEAK_POST;
+<a name="line99"> 99: </a><font color="#A020F0">#endif</font>
+
+
+<a name="line102">102: </a>// Disable pedantic, see https://stackoverflow.com/a/36385690
+<a name="line103">103: </a><font color="#A020F0">#pragma GCC diagnostic push  // Save actual diagnostics state</font>
+<a name="line104">104: </a><font color="#A020F0">#pragma GCC diagnostic ignored </font><font color="#666666">"-Wpedantic"</font><font color="#A020F0"> // Disable pedantic</font>
+
+<a name="line106">106: </a><font color="#A020F0">#endif //PERFSTUBS_OFF</font>
+
+<a name="line108">108: </a><strong><font color="#4169E1"><a name="initialize_library"></a>void initialize_library(void)</font></strong> {
+<a name="line109">109: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF</font>
+<a name="line110">110: </a><font color="#A020F0">#ifdef PERFSTUBS_USE_STATIC</font>
+<a name="line111">111: </a>    <font color="#B22222">/* The initialization function is the only required one */</font>
+<a name="line112">112: </a>    initialize_functions[0] = &amp;ps_tool_initialize;
+<a name="line113">113: </a>    <font color="#4169E1">if</font> (initialize_functions[0] == NULL) {
+<a name="line114">114: </a>        <font color="#4169E1">return</font>;
+<a name="line115">115: </a>    }
+<a name="line116">116: </a>    printf(<font color="#666666">"Found ps_tool_initialize(), registering tool\n"</font>);
+<a name="line117">117: </a>    register_thread_functions[0] = &amp;ps_tool_register_thread;
+<a name="line118">118: </a>    finalize_functions[0] = &amp;ps_tool_finalize;
+<a name="line119">119: </a>    dump_data_functions[0] = &amp;ps_tool_dump_data;
+<a name="line120">120: </a>    timer_create_functions[0] = &amp;ps_tool_timer_create;
+<a name="line121">121: </a>    timer_start_functions[0] = &amp;ps_tool_timer_start;
+<a name="line122">122: </a>    timer_stop_functions[0] = &amp;ps_tool_timer_stop;
+<a name="line123">123: </a>    set_parameter_functions[0] = &amp;ps_tool_set_parameter;
+<a name="line124">124: </a>    dynamic_phase_start_functions[0] = &amp;ps_tool_dynamic_phase_start;
+<a name="line125">125: </a>    dynamic_phase_stop_functions[0] = &amp;ps_tool_dynamic_phase_stop;
+<a name="line126">126: </a>    create_counter_functions[0] = &amp;ps_tool_create_counter;
+<a name="line127">127: </a>    sample_counter_functions[0] = &amp;ps_tool_sample_counter;
+<a name="line128">128: </a>    set_metadata_functions[0] = &amp;ps_tool_set_metadata;
+<a name="line129">129: </a>    get_timer_data_functions[0] = &amp;ps_tool_get_timer_data;
+<a name="line130">130: </a>    get_counter_data_functions[0] = &amp;ps_tool_get_counter_data;
+<a name="line131">131: </a>    get_metadata_functions[0] = &amp;ps_tool_get_metadata;
+<a name="line132">132: </a>    free_timer_data_functions[0] = &amp;ps_tool_free_timer_data;
+<a name="line133">133: </a>    free_counter_data_functions[0] = &amp;ps_tool_free_counter_data;
+<a name="line134">134: </a>    free_metadata_functions[0] = &amp;ps_tool_free_metadata;
+<a name="line135">135: </a><font color="#A020F0">#else</font>
+<a name="line136">136: </a>    initialize_functions[0] =
+<a name="line137">137: </a>        (ps_initialize_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_initialize"</font>);
+<a name="line138">138: </a>    <font color="#4169E1">if</font> (initialize_functions[0] == NULL) {
+<a name="line139">139: </a>        perfstubs_initialized = PERFSTUBS_FAILURE;
+<a name="line140">140: </a>        <font color="#4169E1">return</font>;
+<a name="line141">141: </a>    }
+<a name="line142">142: </a>    printf(<font color="#666666">"Found ps_tool_initialize(), registering tool\n"</font>);
+<a name="line143">143: </a>    finalize_functions[0] =
+<a name="line144">144: </a>        (ps_finalize_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_finalize"</font>);
+<a name="line145">145: </a>    register_thread_functions[0] =
+<a name="line146">146: </a>        (ps_register_thread_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_register_thread"</font>);
+<a name="line147">147: </a>    dump_data_functions[0] =
+<a name="line148">148: </a>        (ps_dump_data_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_dump_data"</font>);
+<a name="line149">149: </a>    timer_create_functions[0] =
+<a name="line150">150: </a>        (ps_timer_create_t)dlsym(RTLD_DEFAULT,
+<a name="line151">151: </a>        <font color="#666666">"ps_tool_timer_create"</font>);
+<a name="line152">152: </a>    timer_start_functions[0] =
+<a name="line153">153: </a>        (ps_timer_start_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_timer_start"</font>);
+<a name="line154">154: </a>    timer_stop_functions[0] =
+<a name="line155">155: </a>        (ps_timer_stop_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_timer_stop"</font>);
+<a name="line156">156: </a>    set_parameter_functions[0] =
+<a name="line157">157: </a>        (ps_set_parameter_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_set_parameter"</font>);
+<a name="line158">158: </a>    dynamic_phase_start_functions[0] = (ps_dynamic_phase_start_t)dlsym(
+<a name="line159">159: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_dynamic_phase_start"</font>);
+<a name="line160">160: </a>    dynamic_phase_stop_functions[0] = (ps_dynamic_phase_stop_t)dlsym(
+<a name="line161">161: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_dynamic_phase_stop"</font>);
+<a name="line162">162: </a>    create_counter_functions[0] = (ps_create_counter_t)dlsym(
+<a name="line163">163: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_create_counter"</font>);
+<a name="line164">164: </a>    sample_counter_functions[0] = (ps_sample_counter_t)dlsym(
+<a name="line165">165: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_sample_counter"</font>);
+<a name="line166">166: </a>    set_metadata_functions[0] =
+<a name="line167">167: </a>        (ps_set_metadata_t)dlsym(RTLD_DEFAULT, <font color="#666666">"ps_tool_set_metadata"</font>);
+<a name="line168">168: </a>    get_timer_data_functions[0] = (ps_get_timer_data_t)dlsym(
+<a name="line169">169: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_get_timer_data"</font>);
+<a name="line170">170: </a>    get_counter_data_functions[0] = (ps_get_counter_data_t)dlsym(
+<a name="line171">171: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_get_counter_data"</font>);
+<a name="line172">172: </a>    get_metadata_functions[0] = (ps_get_metadata_t)dlsym(
+<a name="line173">173: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_get_metadata"</font>);
+<a name="line174">174: </a>    free_timer_data_functions[0] = (ps_free_timer_data_t)dlsym(
+<a name="line175">175: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_free_timer_data"</font>);
+<a name="line176">176: </a>    free_counter_data_functions[0] = (ps_free_counter_data_t)dlsym(
+<a name="line177">177: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_free_counter_data"</font>);
+<a name="line178">178: </a>    free_metadata_functions[0] = (ps_free_metadata_t)dlsym(
+<a name="line179">179: </a>        RTLD_DEFAULT, <font color="#666666">"ps_tool_free_metadata"</font>);
+<a name="line180">180: </a><font color="#A020F0">#endif</font>
+<a name="line181">181: </a>    perfstubs_initialized = PERFSTUBS_SUCCESS;
+<a name="line182">182: </a>    <font color="#B22222">/* Increment the number of tools */</font>
+<a name="line183">183: </a>    num_tools_registered = 1;
+<a name="line184">184: </a><font color="#A020F0">#endif //PERFSTUBS_OFF</font>
+<a name="line185">185: </a>}
+<a name="line186">186: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF</font>
+<a name="line187">187: </a><font color="#A020F0">#pragma GCC diagnostic pop  // Restore diagnostics state</font>
+<a name="line188">188: </a><font color="#A020F0">#endif</font>
+
+<a name="line190">190: </a><strong><font color="#4169E1"><a name="ps_make_timer_name_"></a>char * ps_make_timer_name_(const char * file,</font></strong>
+<a name="line191">191: </a><strong><font color="#4169E1">    const char * func, int line)</font></strong> {
+<a name="line192">192: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line193">193: </a>    <font color="#B22222">/* The length of the line number as a string is floor(log10(abs(num))) */</font>
+<a name="line194">194: </a>    int string_length = (strlen(file) + strlen(func) + floor(log10(abs(line))) + 11);
+<a name="line195">195: </a>    char * name = (char*)calloc(string_length, <font color="#4169E1">sizeof</font>(char));
+<a name="line196">196: </a>    sprintf(name, <font color="#666666">"%s [{%s} {%d,0}]"</font>, func, file, line);
+<a name="line197">197: </a>    <font color="#4169E1">return</font> (name);
+<a name="line198">198: </a><font color="#A020F0">    #else</font>
+<a name="line199">199: </a>    <font color="#4169E1">return</font> NULL;
+<a name="line200">200: </a><font color="#A020F0">    #endif</font>
+<a name="line201">201: </a>}
+
+<a name="line203">203: </a>// used internally to the class
+<a name="line204">204: </a><strong><font color="#4169E1"><a name="ps_register_thread_internal"></a>void ps_register_thread_internal(void)</font></strong> {
+<a name="line205">205: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF</font>
+<a name="line206">206: </a>            int i;
+<a name="line207">207: </a>    <font color="#4169E1">for</font> (i = 0 ; i &lt; num_tools_registered ; i++) {
+<a name="line208">208: </a>        register_thread_functions[i]();
+<a name="line209">209: </a>    }
+<a name="line210">210: </a>    thread_seen = 1;
+<a name="line211">211: </a><font color="#A020F0">#endif</font>
+<a name="line212">212: </a>}
+
+<a name="line214">214: </a><font color="#B22222">/* Initialization */</font>
+<a name="line215">215: </a><strong><font color="#4169E1"><a name="ps_initialize_"></a>void ps_initialize_(void)</font></strong> {
+<a name="line216">216: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF</font>
+<a name="line217">217: </a>    int i;
+<a name="line218">218: </a>    initialize_library();
+<a name="line219">219: </a>    <font color="#4169E1">for</font> (i = 0 ; i &lt; num_tools_registered ; i++) {
+<a name="line220">220: </a>        initialize_functions[i]();
+<a name="line221">221: </a>    }
+<a name="line222">222: </a>    <font color="#B22222">/* No need to register the main thread */</font>
+<a name="line223">223: </a>    thread_seen = 1;
+<a name="line224">224: </a><font color="#A020F0">#endif</font>
+<a name="line225">225: </a>}
+
+<a name="line227">227: </a><strong><font color="#4169E1"><a name="ps_finalize_"></a>void ps_finalize_(void)</font></strong> {
+<a name="line228">228: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line229">229: </a>    int i;
+<a name="line230">230: </a>    <font color="#4169E1">for</font> (i = 0 ; i &lt; num_tools_registered ; i++) {
+<a name="line231">231: </a>        finalize_functions[i]();
+<a name="line232">232: </a>    }
+<a name="line233">233: </a><font color="#A020F0">    #endif</font>
+<a name="line234">234: </a>}
+
+<a name="line236">236: </a><strong><font color="#4169E1"><a name="ps_register_thread_"></a>void ps_register_thread_(void)</font></strong> {
+<a name="line237">237: </a><font color="#A020F0">#ifndef PERFSTUBS_OFF        </font>
+<a name="line238">238: </a>    <font color="#4169E1">if</font> (thread_seen == 0) {
+<a name="line239">239: </a>        ps_register_thread_internal();
+<a name="line240">240: </a>    }
+<a name="line241">241: </a><font color="#A020F0">#endif</font>
+<a name="line242">242: </a>}
+
+<a name="line244">244: </a><strong><font color="#4169E1"><a name="ps_timer_create_"></a>void* ps_timer_create_(const char *timer_name)</font></strong> {
+<a name="line245">245: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line246">246: </a>    void ** objects = (void**)calloc(num_tools_registered, <font color="#4169E1">sizeof</font>(void*));
+<a name="line247">247: </a>    int i;
+<a name="line248">248: </a>    <font color="#4169E1">for</font> (i = 0 ; i &lt; num_tools_registered ; i++) {
+<a name="line249">249: </a>        objects[i] = (void*)timer_create_functions[i](timer_name);
+<a name="line250">250: </a>    }
+<a name="line251">251: </a>    <font color="#4169E1">return</font> (void*)(objects);
+<a name="line252">252: </a><font color="#A020F0">    #else</font>
+<a name="line253">253: </a>    <font color="#4169E1">return</font> NULL;
+<a name="line254">254: </a><font color="#A020F0">    #endif</font>
+<a name="line255">255: </a>}
+
+<a name="line257">257: </a><strong><font color="#4169E1"><a name="ps_timer_create_fortran_"></a>void ps_timer_create_fortran_(void ** object, const char *timer_name)</font></strong> {
+<a name="line258">258: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line259">259: </a>    *object = ps_timer_create_(timer_name);
+<a name="line260">260: </a><font color="#A020F0">    #endif</font>
+<a name="line261">261: </a>}
+
+<a name="line263">263: </a><strong><font color="#4169E1"><a name="ps_timer_start_"></a>void ps_timer_start_(const void *timer)</font></strong> {
+<a name="line264">264: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line265">265: </a>    void ** objects = (void**)(timer);
+<a name="line266">266: </a>    int i;
+<a name="line267">267: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line268">268: </a>        timer_start_functions[i](objects[i]);
+<a name="line269">269: </a>    }
+<a name="line270">270: </a><font color="#A020F0">    #endif</font>
+<a name="line271">271: </a>}
+
+<a name="line273">273: </a><strong><font color="#4169E1"><a name="ps_timer_start_fortran_"></a>void ps_timer_start_fortran_(const void **timer)</font></strong> {
+<a name="line274">274: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line275">275: </a>    ps_timer_start_(*timer);
+<a name="line276">276: </a><font color="#A020F0">    #endif</font>
+<a name="line277">277: </a>}
+
+<a name="line279">279: </a><strong><font color="#4169E1"><a name="ps_timer_stop_"></a>void ps_timer_stop_(const void *timer)</font></strong> {
+<a name="line280">280: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line281">281: </a>    void ** objects = (void**)(timer);
+<a name="line282">282: </a>    int i;
+<a name="line283">283: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line284">284: </a>        timer_stop_functions[i](objects[i]);
+<a name="line285">285: </a>    }
+<a name="line286">286: </a><font color="#A020F0">    #endif</font>
+<a name="line287">287: </a>}
+
+<a name="line289">289: </a><strong><font color="#4169E1"><a name="ps_timer_stop_fortran_"></a>void ps_timer_stop_fortran_(const void **timer)</font></strong> {
+<a name="line290">290: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line291">291: </a>    ps_timer_stop_(*timer);
+<a name="line292">292: </a><font color="#A020F0">    #endif</font>
+<a name="line293">293: </a>}
+
+<a name="line295">295: </a><strong><font color="#4169E1"><a name="ps_set_parameter_"></a>void ps_set_parameter_(const char * parameter_name, int64_t parameter_value)</font></strong> {
+<a name="line296">296: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line297">297: </a>    int i;
+<a name="line298">298: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line299">299: </a>        set_parameter_functions[i](parameter_name, parameter_value);
+<a name="line300">300: </a>    }
+<a name="line301">301: </a><font color="#A020F0">    #endif</font>
+<a name="line302">302: </a>}
+
+<a name="line304">304: </a><strong><font color="#4169E1"><a name="ps_dynamic_phase_start_"></a>void ps_dynamic_phase_start_(const char *phase_prefix, int iteration_index)</font></strong> {
+<a name="line305">305: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line306">306: </a>    int i;
+<a name="line307">307: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line308">308: </a>        dynamic_phase_start_functions[i](phase_prefix, iteration_index);
+<a name="line309">309: </a>    }
+<a name="line310">310: </a><font color="#A020F0">    #endif</font>
+<a name="line311">311: </a>}
+
+<a name="line313">313: </a><strong><font color="#4169E1"><a name="ps_dynamic_phase_stop_"></a>void ps_dynamic_phase_stop_(const char *phase_prefix, int iteration_index)</font></strong> {
+<a name="line314">314: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line315">315: </a>    int i;
+<a name="line316">316: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line317">317: </a>        dynamic_phase_stop_functions[i](phase_prefix, iteration_index);
+<a name="line318">318: </a>    }
+<a name="line319">319: </a><font color="#A020F0">    #endif</font>
+<a name="line320">320: </a>}
+
+<a name="line322">322: </a><strong><font color="#4169E1"><a name="ps_create_counter_"></a>void* ps_create_counter_(const char *name)</font></strong> {
+<a name="line323">323: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line324">324: </a>    void ** objects = (void**)calloc(num_tools_registered, <font color="#4169E1">sizeof</font>(void*));
+<a name="line325">325: </a>    int i;
+<a name="line326">326: </a>    <font color="#4169E1">for</font> (i = 0 ; i &lt; num_tools_registered ; i++) {
+<a name="line327">327: </a>        objects[i] = (void*)create_counter_functions[i](name);
+<a name="line328">328: </a>    }
+<a name="line329">329: </a>    <font color="#4169E1">return</font> (void*)(objects);
+<a name="line330">330: </a><font color="#A020F0">    #else</font>
+<a name="line331">331: </a>    <font color="#4169E1">return</font> NULL;
+<a name="line332">332: </a><font color="#A020F0">    #endif</font>
+<a name="line333">333: </a>}
+
+<a name="line335">335: </a><strong><font color="#4169E1"><a name="ps_create_counter_fortran_"></a>void ps_create_counter_fortran_(void ** object, const char *name)</font></strong> {
+<a name="line336">336: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line337">337: </a>    *object = ps_create_counter_(name);
+<a name="line338">338: </a><font color="#A020F0">    #endif</font>
+<a name="line339">339: </a>}
+
+<a name="line341">341: </a><strong><font color="#4169E1"><a name="ps_sample_counter_"></a>void ps_sample_counter_(const void *counter, const double value)</font></strong> {
+<a name="line342">342: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line343">343: </a>    void ** objects = (void**)(counter);
+<a name="line344">344: </a>    int i;
+<a name="line345">345: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line346">346: </a>        sample_counter_functions[i](objects[i], value);
+<a name="line347">347: </a>    }
+<a name="line348">348: </a><font color="#A020F0">    #endif</font>
+<a name="line349">349: </a>}
+
+<a name="line351">351: </a><strong><font color="#4169E1"><a name="ps_sample_counter_fortran_"></a>void ps_sample_counter_fortran_(const void **counter, const double value)</font></strong> {
+<a name="line352">352: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line353">353: </a>    ps_sample_counter_(*counter, value);
+<a name="line354">354: </a><font color="#A020F0">    #endif</font>
+<a name="line355">355: </a>}
+
+<a name="line357">357: </a><strong><font color="#4169E1"><a name="ps_set_metadata_"></a>void ps_set_metadata_(const char *name, const char *value)</font></strong> {
+<a name="line358">358: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line359">359: </a>    int i;
+<a name="line360">360: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line361">361: </a>        set_metadata_functions[i](name, value);
+<a name="line362">362: </a>    }
+<a name="line363">363: </a><font color="#A020F0">    #endif</font>
+<a name="line364">364: </a>}
+
+<a name="line366">366: </a><strong><font color="#4169E1"><a name="ps_dump_data_"></a>void ps_dump_data_(void)</font></strong> {
+<a name="line367">367: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line368">368: </a>    int i;
+<a name="line369">369: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; num_tools_registered ; i++) {
+<a name="line370">370: </a>        dump_data_functions[i]();
+<a name="line371">371: </a>    }
+<a name="line372">372: </a><font color="#A020F0">    #endif</font>
+<a name="line373">373: </a>}
+
+<a name="line375">375: </a><strong><font color="#4169E1"><a name="ps_get_timer_data_"></a>void ps_get_timer_data_(ps_tool_timer_data_t *timer_data, int tool_id)</font></strong> {
+<a name="line376">376: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line377">377: </a>    <font color="#4169E1">if</font> (tool_id &lt; num_tools_registered) {
+<a name="line378">378: </a>        get_timer_data_functions[tool_id](timer_data);
+<a name="line379">379: </a>    }
+<a name="line380">380: </a><font color="#A020F0">    #endif</font>
+<a name="line381">381: </a>}
+
+<a name="line383">383: </a><strong><font color="#4169E1"><a name="ps_get_counter_data_"></a>void ps_get_counter_data_(ps_tool_counter_data_t *counter_data, int tool_id)</font></strong> {
+<a name="line384">384: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line385">385: </a>    <font color="#4169E1">if</font> (tool_id &lt; num_tools_registered) {
+<a name="line386">386: </a>        get_counter_data_functions[tool_id](counter_data);
+<a name="line387">387: </a>    }
+<a name="line388">388: </a><font color="#A020F0">    #endif</font>
+<a name="line389">389: </a>}
+
+<a name="line391">391: </a><strong><font color="#4169E1"><a name="ps_get_metadata_"></a>void ps_get_metadata_(ps_tool_metadata_t *metadata, int tool_id)</font></strong> {
+<a name="line392">392: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line393">393: </a>    <font color="#4169E1">if</font> (tool_id &lt; num_tools_registered) {
+<a name="line394">394: </a>        get_metadata_functions[tool_id](metadata);
+<a name="line395">395: </a>    }
+<a name="line396">396: </a><font color="#A020F0">    #endif</font>
+<a name="line397">397: </a>}
+
+<a name="line399">399: </a><strong><font color="#4169E1"><a name="ps_free_timer_data_"></a>void ps_free_timer_data_(ps_tool_timer_data_t *timer_data, int tool_id)</font></strong> {
+<a name="line400">400: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line401">401: </a>    <font color="#4169E1">if</font> (tool_id &lt; num_tools_registered) {
+<a name="line402">402: </a>        free_timer_data_functions[tool_id](timer_data);
+<a name="line403">403: </a>    }
+<a name="line404">404: </a><font color="#A020F0">    #endif</font>
+<a name="line405">405: </a>}
+
+<a name="line407">407: </a><strong><font color="#4169E1"><a name="ps_free_counter_data_"></a>void ps_free_counter_data_(ps_tool_counter_data_t *counter_data, int tool_id)</font></strong> {
+<a name="line408">408: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line409">409: </a>    <font color="#4169E1">if</font> (tool_id &lt; num_tools_registered) {
+<a name="line410">410: </a>        free_counter_data_functions[tool_id](counter_data);
+<a name="line411">411: </a>    }
+<a name="line412">412: </a><font color="#A020F0">    #endif</font>
+<a name="line413">413: </a>}
+
+<a name="line415">415: </a><strong><font color="#4169E1"><a name="ps_free_metadata_"></a>void ps_free_metadata_(ps_tool_metadata_t *metadata, int tool_id)</font></strong> {
+<a name="line416">416: </a><font color="#A020F0">    #ifndef PERFSTUBS_OFF</font>
+<a name="line417">417: </a>    <font color="#4169E1">if</font> (tool_id &lt; num_tools_registered) {
+<a name="line418">418: </a>        free_metadata_functions[tool_id](metadata);
+<a name="line419">419: </a>    }
+<a name="line420">420: </a><font color="#A020F0">    #endif</font>
+<a name="line421">421: </a>}
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,554 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ts/tutorials/ex22f_mf.F90">Actual source code: ex22f_mf.F90</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:34+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>!     Time-dependent advection-reaction PDE in 1d. Demonstrates IMEX methods
+<a name="line2">  2: </a>!
+<a name="line3">  3: </a>!     u_t + a1*u_x = -k1*u + k2*v + s1
+<a name="line4">  4: </a>!     v_t + a2*v_x = k1*u - k2*v + s2
+<a name="line5">  5: </a>!     0 &lt; x &lt; 1;
+<a name="line6">  6: </a>!     a1 = 1, k1 = 10^6, s1 = 0,
+<a name="line7">  7: </a>!     a2 = 0, k2 = 2*k1, s2 = 1
+<a name="line8">  8: </a>!
+<a name="line9">  9: </a>!     Initial conditions:
+<a name="line10"> 10: </a>!     u(x,0) = 1 + s2*x
+<a name="line11"> 11: </a>!     v(x,0) = k0/k1*u(x,0) + s1/k1
+<a name="line12"> 12: </a>!
+<a name="line13"> 13: </a>!     Upstream boundary conditions:
+<a name="line14"> 14: </a>!     u(0,t) = 1-sin(12*t)^4
+<a name="line15"> 15: </a>!
+
+<a name="line17"> 17: </a>  module ex22f_mfmodule
+<a name="line18"> 18: </a>#include <A href="../../../include/petsc/finclude/petscts.h.html">&lt;petsc/finclude/petscts.h&gt;</A>
+<a name="line19"> 19: </a>    use petscts
+<a name="line20"> 20: </a><strong><font color="#FF0000">    <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>:</font></strong>:PETSC_SHIFT
+<a name="line21"> 21: </a><strong><font color="#FF0000">    <a href="../../../manualpages/TS/TS.html">TS</a>:</font></strong>:tscontext
+<a name="line22"> 22: </a><strong><font color="#FF0000">    <a href="../../../manualpages/Mat/Mat.html">Mat</a>:</font></strong>:Jmat
+<a name="line23"> 23: </a><strong><font color="#FF0000">    <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>:</font></strong>:MFuser(6)
+<a name="line24"> 24: </a>  end module ex22f_mfmodule
+
+<a name="line26"> 26: </a>program main
+<a name="line27"> 27: </a>  use ex22f_mfmodule
+<a name="line28"> 28: </a>  use petscdmda
+<a name="line29"> 29: </a>  implicit none
+
+<a name="line31"> 31: </a>  !
+<a name="line32"> 32: </a>  !     Create an application context to contain data needed by the
+<a name="line33"> 33: </a>  !     application-provided call-back routines, FormJacobian() and
+<a name="line34"> 34: </a>  !     FormFunction(). We use a double precision array with six
+<a name="line35"> 35: </a>  !     entries, two <font color="#4169E1">for</font> each problem parameter a, k, s.
+<a name="line36"> 36: </a>  !
+<a name="line37"> 37: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+<a name="line38"> 38: </a>  integer user_a,user_k,user_s
+<a name="line39"> 39: </a>  parameter (user_a = 0,user_k = 2,user_s = 4)
+
+<a name="line41"> 41: </a>  external FormRHSFunction,FormIFunction
+<a name="line42"> 42: </a>  external FormInitialSolution
+<a name="line43"> 43: </a>  external FormIJacobian
+<a name="line44"> 44: </a>  external MyMult,FormIJacobianMF
+
+<a name="line46"> 46: </a>  <a href="../../../manualpages/TS/TS.html">TS</a>             ts
+<a name="line47"> 47: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>            X
+<a name="line48"> 48: </a>  <a href="../../../manualpages/Mat/Mat.html">Mat</a>            J
+<a name="line49"> 49: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       mx
+<a name="line50"> 50: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a>      OptionSaveToDisk
+<a name="line51"> 51: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line52"> 52: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line53"> 53: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>      ftime,dt
+<a name="line54"> 54: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>      one,pone
+<a name="line55"> 55: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       im11,i2
+<a name="line56"> 56: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a>      flg
+
+<a name="line58"> 58: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       xs,xe,gxs,gxe,dof,gdof
+<a name="line59"> 59: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>    shell_shift
+<a name="line60"> 60: </a>  <a href="../../../manualpages/Mat/Mat.html">Mat</a>            A
+
+<a name="line62"> 62: </a>  im11 = 11
+<a name="line63"> 63: </a>  i2   = 2
+<a name="line64"> 64: </a>  one = 1.0
+<a name="line65"> 65: </a>  pone = one / 10
+
+<a name="line67"> 67: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>(ierr))
+
+<a name="line69"> 69: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line70"> 70: </a>  !  Create distributed array (<a href="../../../manualpages/DMDA/DMDA.html">DMDA</a>) to manage parallel grid and vectors
+<a name="line71"> 71: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line72"> 72: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DMDA/DMDACreate1d.html">DMDACreate1d</a>(<a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>,<a href="../../../manualpages/DM/DMBoundaryType.html">DM_BOUNDARY_NONE</a>,im11,i2,i2,PETSC_NULL_INTEGER,da,ierr))
+<a name="line73"> 73: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DM/DMSetFromOptions.html">DMSetFromOptions</a>(da,ierr))
+<a name="line74"> 74: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DM/DMSetUp.html">DMSetUp</a>(da,ierr))
+
+<a name="line76"> 76: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line77"> 77: </a>  !    Extract global vectors from <a href="../../../manualpages/DMDA/DMDA.html">DMDA</a>;
+<a name="line78"> 78: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line79"> 79: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DM/DMCreateGlobalVector.html">DMCreateGlobalVector</a>(da,X,ierr))
+
+<a name="line81"> 81: </a>  ! Initialize user application context
+<a name="line82"> 82: </a>  ! Use zero-based indexing <font color="#4169E1">for</font> command line parameters to match ex22.c
+<a name="line83"> 83: </a>  user(user_a+1) = 1.0
+<a name="line84"> 84: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-a0',user(user_a+1),flg,ierr))
+<a name="line85"> 85: </a>  user(user_a+2) = 0.0
+<a name="line86"> 86: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-a1',user(user_a+2),flg,ierr))
+<a name="line87"> 87: </a>  user(user_k+1) = 1000000.0
+<a name="line88"> 88: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-k0', user(user_k+1),flg,ierr))
+<a name="line89"> 89: </a>  user(user_k+2) = 2*user(user_k+1)
+<a name="line90"> 90: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-k1', user(user_k+2),flg,ierr))
+<a name="line91"> 91: </a>  user(user_s+1) = 0.0
+<a name="line92"> 92: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-s0',user(user_s+1),flg,ierr))
+<a name="line93"> 93: </a>  user(user_s+2) = 1.0
+<a name="line94"> 94: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetReal.html">PetscOptionsGetReal</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-s1',user(user_s+2),flg,ierr))
+
+<a name="line96"> 96: </a>  OptionSaveToDisk=.FALSE.
+<a name="line97"> 97: </a>      <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(PETSC_NULL_OPTIONS,PETSC_NULL_CHARACTER,'-sdisk',OptionSaveToDisk,flg,ierr))
+<a name="line98"> 98: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line99"> 99: </a>  !    Create timestepping solver context
+<a name="line100">100: </a>  !     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line101">101: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSCreate.html">TSCreate</a>(<a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>,ts,ierr))
+<a name="line102">102: </a>  tscontext=ts
+<a name="line103">103: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetDM.html">TSSetDM</a>(ts,da,ierr))
+<a name="line104">104: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetType.html">TSSetType</a>(ts,<a href="../../../manualpages/TS/TSARKIMEX.html">TSARKIMEX</a>,ierr))
+<a name="line105">105: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetRHSFunction.html">TSSetRHSFunction</a>(ts,PETSC_NULL_VEC,FormRHSFunction,user,ierr))
+
+<a name="line107">107: </a>  ! - - - - - - - - -- - - - -
+<a name="line108">108: </a>  !   Matrix free setup
+<a name="line109">109: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+<a name="line110">110: </a>  dof=i2*(xe-xs+1)
+<a name="line111">111: </a>  gdof=i2*(gxe-gxs+1)
+<a name="line112">112: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Mat/MatCreateShell.html">MatCreateShell</a>(<a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>,dof,dof,gdof,gdof,shell_shift,A,ierr))
+
+<a name="line114">114: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Mat/MatShellSetOperation.html">MatShellSetOperation</a>(A,MATOP_MULT,MyMult,ierr))
+<a name="line115">115: </a>  ! - - - - - - - - - - - -
+
+<a name="line117">117: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetIFunction.html">TSSetIFunction</a>(ts,PETSC_NULL_VEC,FormIFunction,user,ierr))
+<a name="line118">118: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DM/DMSetMatType.html">DMSetMatType</a>(da,<a href="../../../manualpages/Mat/MATAIJ.html">MATAIJ</a>,ierr))
+<a name="line119">119: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DM/DMCreateMatrix.html">DMCreateMatrix</a>(da,J,ierr))
+
+<a name="line121">121: </a>  Jmat=J
+
+<a name="line123">123: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetIJacobian.html">TSSetIJacobian</a>(ts,J,J,FormIJacobian,user,ierr))
+<a name="line124">124: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetIJacobian.html">TSSetIJacobian</a>(ts,A,A,FormIJacobianMF,user,ierr))
+
+<a name="line126">126: </a>  ftime = 1.0
+<a name="line127">127: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetMaxTime.html">TSSetMaxTime</a>(ts,ftime,ierr))
+<a name="line128">128: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetExactFinalTime.html">TSSetExactFinalTime</a>(ts,<a href="../../../manualpages/TS/TSExactFinalTimeOption.html">TS_EXACTFINALTIME_STEPOVER</a>,ierr))
+
+<a name="line130">130: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line131">131: </a>  !  Set initial conditions
+<a name="line132">132: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line133">133: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(FormInitialSolution(ts,X,user,ierr))
+<a name="line134">134: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetSolution.html">TSSetSolution</a>(ts,X,ierr))
+<a name="line135">135: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(X,mx,ierr))
+<a name="line136">136: </a>  !  Advective CFL, I don't know why it needs so much safety factor.
+<a name="line137">137: </a>  dt = pone * max(user(user_a+1),user(user_a+2)) / mx;
+<a name="line138">138: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetTimeStep.html">TSSetTimeStep</a>(ts,dt,ierr))
+
+<a name="line140">140: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line141">141: </a>  !   Set runtime options
+<a name="line142">142: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line143">143: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSetFromOptions.html">TSSetFromOptions</a>(ts,ierr))
+
+<a name="line145">145: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line146">146: </a>  !  Solve nonlinear system
+<a name="line147">147: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line148">148: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSSolve.html">TSSolve</a>(ts,X,ierr))
+
+<a name="line150">150: </a>  <font color="#4169E1">if</font> (OptionSaveToDisk) then
+<a name="line151">151: </a>     <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+<a name="line152">152: </a>     dof=i2*(xe-xs+1)
+<a name="line153">153: </a>     gdof=i2*(gxe-gxs+1)
+<a name="line154">154: </a>     call SaveSolutionToDisk(da,X,gdof,xs,xe)
+<a name="line155">155: </a>  end <font color="#4169E1">if</font>
+
+<a name="line157">157: </a>  ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line158">158: </a>  !  Free work space.
+<a name="line159">159: </a>! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+<a name="line160">160: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(A,ierr))
+<a name="line161">161: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(J,ierr))
+<a name="line162">162: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(X,ierr))
+<a name="line163">163: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/TS/TSDestroy.html">TSDestroy</a>(ts,ierr))
+<a name="line164">164: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/DM/DMDestroy.html">DMDestroy</a>(da,ierr))
+<a name="line165">165: </a>  <a href="../../../manualpages/Sys/PetscCallA.html">PetscCallA</a>(<a href="../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a>(ierr))
+<a name="line166">166: </a>end program main
+
+<a name="line168">168: </a>! Small helper to extract the layout, result uses 1-based indexing.
+<a name="line169">169: </a>  subroutine GetLayout(da,mx,xs,xe,gxs,gxe,ierr)
+<a name="line170">170: </a>  use petscdmda
+<a name="line171">171: </a>  implicit none
+
+<a name="line173">173: </a>  <a href="../../../manualpages/DM/DM.html">DM</a> da
+<a name="line174">174: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> mx,xs,xe,gxs,gxe
+<a name="line175">175: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line176">176: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> xm,gxm
+<a name="line177">177: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(da,PETSC_NULL_INTEGER,mx,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,ierr))
+<a name="line178">178: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetCorners.html">DMDAGetCorners</a>(da,xs,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,xm,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,ierr))
+<a name="line179">179: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DMDA/DMDAGetGhostCorners.html">DMDAGetGhostCorners</a>(da,gxs,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,gxm,PETSC_NULL_INTEGER,PETSC_NULL_INTEGER,ierr))
+<a name="line180">180: </a>  xs = xs + 1
+<a name="line181">181: </a>  gxs = gxs + 1
+<a name="line182">182: </a>  xe = xs + xm - 1
+<a name="line183">183: </a>  gxe = gxs + gxm - 1
+<a name="line184">184: </a><strong><font color="#4169E1"><a name="FormIFunctionLocal"></a>end subroutine GetLayout</font></strong>
+
+<a name="line186">186: </a><strong><font color="#4169E1">subroutine FormIFunctionLocal(mx,xs,xe,gxs,gxe,x,xdot,f,a,k,s,ierr)</font></strong>
+<a name="line187">187: </a>  implicit none
+<a name="line188">188: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> mx,xs,xe,gxs,gxe
+<a name="line189">189: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> x(2,xs:xe)
+<a name="line190">190: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> xdot(2,xs:xe)
+<a name="line191">191: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> f(2,xs:xe)
+<a name="line192">192: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> a(2),k(2),s(2)
+<a name="line193">193: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line194">194: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> i
+<a name="line195">195: </a>  <font color="#4169E1">do</font>  i = xs,xe
+<a name="line196">196: </a>     f(1,i) = xdot(1,i) + k(1)*x(1,i) - k(2)*x(2,i) - s(1)
+<a name="line197">197: </a>     f(2,i) = xdot(2,i) - k(1)*x(1,i) + k(2)*x(2,i) - s(2)
+<a name="line198">198: </a>  end <font color="#4169E1">do</font>
+<a name="line199">199: </a><strong><font color="#4169E1"><a name="FormIFunction"></a>end subroutine FormIFunctionLocal</font></strong>
+
+<a name="line201">201: </a><strong><font color="#4169E1">subroutine FormIFunction(ts,t,X,Xdot,F,user,ierr)</font></strong>
+<a name="line202">202: </a>  use petscdmda
+<a name="line203">203: </a>  use petscts
+<a name="line204">204: </a>  implicit none
+
+<a name="line206">206: </a>  <a href="../../../manualpages/TS/TS.html">TS</a> ts
+<a name="line207">207: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> t
+<a name="line208">208: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a> X,Xdot,F
+<a name="line209">209: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+<a name="line210">210: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line211">211: </a>  integer user_a,user_k,user_s
+<a name="line212">212: </a>  parameter (user_a = 1,user_k = 3,user_s = 5)
+
+<a name="line214">214: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line215">215: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       mx,xs,xe,gxs,gxe
+<a name="line216">216: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>,pointer :: xx(:),xxdot(:),ff(:)
+
+<a name="line218">218: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(ts,da,ierr))
+<a name="line219">219: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+
+<a name="line221">221: </a>  ! Get access to vector data
+<a name="line222">222: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayReadF90.html">VecGetArrayReadF90</a>(X,xx,ierr))
+<a name="line223">223: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayReadF90.html">VecGetArrayReadF90</a>(Xdot,xxdot,ierr))
+<a name="line224">224: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayF90.html">VecGetArrayF90</a>(F,ff,ierr))
+
+<a name="line226">226: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(FormIFunctionLocal(mx,xs,xe,gxs,gxe,xx,xxdot,ff,user(user_a),user(user_k),user(user_s),ierr))
+
+<a name="line228">228: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayReadF90.html">VecRestoreArrayReadF90</a>(X,xx,ierr))
+<a name="line229">229: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayReadF90.html">VecRestoreArrayReadF90</a>(Xdot,xxdot,ierr))
+<a name="line230">230: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayF90.html">VecRestoreArrayF90</a>(F,ff,ierr))
+<a name="line231">231: </a><strong><font color="#4169E1"><a name="FormRHSFunctionLocal"></a>end subroutine FormIFunction</font></strong>
+
+<a name="line233">233: </a><strong><font color="#4169E1">subroutine FormRHSFunctionLocal(mx,xs,xe,gxs,gxe,t,x,f,a,k,s,ierr)</font></strong>
+<a name="line234">234: </a>  implicit none
+<a name="line235">235: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> mx,xs,xe,gxs,gxe
+<a name="line236">236: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> t
+<a name="line237">237: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> x(2,gxs:gxe),f(2,xs:xe)
+<a name="line238">238: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> a(2),k(2),s(2)
+<a name="line239">239: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line240">240: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> i,j
+<a name="line241">241: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> hx,u0t(2)
+<a name="line242">242: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> one,two,three,four,six,twelve
+<a name="line243">243: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> half,third,twothird,sixth
+<a name="line244">244: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> twelfth
+
+<a name="line246">246: </a>  one = 1.0
+<a name="line247">247: </a>  two = 2.0
+<a name="line248">248: </a>  three = 3.0
+<a name="line249">249: </a>  four = 4.0
+<a name="line250">250: </a>  six = 6.0
+<a name="line251">251: </a>  twelve = 12.0
+<a name="line252">252: </a>  hx = one / mx
+<a name="line253">253: </a>  u0t(1) = one - sin(twelve*t)**four
+<a name="line254">254: </a>  u0t(2) = 0.0
+<a name="line255">255: </a>  half = one/two
+<a name="line256">256: </a>  third = one / three
+<a name="line257">257: </a>  twothird = two / three
+<a name="line258">258: </a>  sixth = one / six
+<a name="line259">259: </a>  twelfth = one / twelve
+<a name="line260">260: </a>  <font color="#4169E1">do</font>  i = xs,xe
+<a name="line261">261: </a>     <font color="#4169E1">do</font>  j = 1,2
+<a name="line262">262: </a>        <font color="#4169E1">if</font> (i .eq. 1) then
+<a name="line263">263: </a>           f(j,i) = a(j)/hx*(third*u0t(j) + half*x(j,i) - x(j,i+1) + sixth*x(j,i+2))
+<a name="line264">264: </a>        <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i .eq. 2) then
+<a name="line265">265: </a>           f(j,i) = a(j)/hx*(-twelfth*u0t(j) + twothird*x(j,i-1) - twothird*x(j,i+1) + twelfth*x(j,i+2))
+<a name="line266">266: </a>        <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i .eq. mx-1) then
+<a name="line267">267: </a>           f(j,i) = a(j)/hx*(-sixth*x(j,i-2) + x(j,i-1) - half*x(j,i) -third*x(j,i+1))
+<a name="line268">268: </a>        <font color="#4169E1">else</font> <font color="#4169E1">if</font> (i .eq. mx) then
+<a name="line269">269: </a>           f(j,i) = a(j)/hx*(-x(j,i) + x(j,i-1))
+<a name="line270">270: </a>        <font color="#4169E1">else</font>
+<a name="line271">271: </a>           f(j,i) = a(j)/hx*(-twelfth*x(j,i-2) + twothird*x(j,i-1) - twothird*x(j,i+1) + twelfth*x(j,i+2))
+<a name="line272">272: </a>        end <font color="#4169E1">if</font>
+<a name="line273">273: </a>     end <font color="#4169E1">do</font>
+<a name="line274">274: </a>  end <font color="#4169E1">do</font>
+
+<a name="line276">276: </a><font color="#A020F0">#ifdef EXPLICIT_INTEGRATOR22</font>
+<a name="line277">277: </a>  <font color="#4169E1">do</font>  i = xs,xe
+<a name="line278">278: </a>     f(1,i) = f(1,i) -( k(1)*x(1,i) - k(2)*x(2,i) - s(1))
+<a name="line279">279: </a>     f(2,i) = f(2,i) -(- k(1)*x(1,i) + k(2)*x(2,i) - s(2))
+<a name="line280">280: </a>  end <font color="#4169E1">do</font>
+<a name="line281">281: </a><font color="#A020F0">#endif</font>
+
+<a name="line283">283: </a><strong><font color="#4169E1"><a name="FormRHSFunction"></a>end subroutine FormRHSFunctionLocal</font></strong>
+
+<a name="line285">285: </a><strong><font color="#4169E1">subroutine FormRHSFunction(ts,t,X,F,user,ierr)</font></strong>
+<a name="line286">286: </a>  use petscts
+<a name="line287">287: </a>  use petscdmda
+<a name="line288">288: </a>  implicit none
+
+<a name="line290">290: </a>  <a href="../../../manualpages/TS/TS.html">TS</a> ts
+<a name="line291">291: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> t
+<a name="line292">292: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a> X,F
+<a name="line293">293: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+<a name="line294">294: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line295">295: </a>  integer user_a,user_k,user_s
+<a name="line296">296: </a>  parameter (user_a = 1,user_k = 3,user_s = 5)
+<a name="line297">297: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line298">298: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>            Xloc
+<a name="line299">299: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       mx,xs,xe,gxs,gxe
+<a name="line300">300: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>,pointer :: xx(:), ff(:)
+
+<a name="line302">302: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(ts,da,ierr))
+<a name="line303">303: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+
+<a name="line305">305: </a>  !     Scatter ghost points to local vector,using the 2-step process
+<a name="line306">306: </a>  !        <a href="../../../manualpages/DM/DMGlobalToLocalBegin.html">DMGlobalToLocalBegin</a>(),<a href="../../../manualpages/DM/DMGlobalToLocalEnd.html">DMGlobalToLocalEnd</a>().
+<a name="line307">307: </a>  !     By placing code between these two statements, computations can be
+<a name="line308">308: </a>  !     done <font color="#4169E1">while</font> messages are in transition.
+<a name="line309">309: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGetLocalVector.html">DMGetLocalVector</a>(da,Xloc,ierr))
+<a name="line310">310: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalBegin.html">DMGlobalToLocalBegin</a>(da,X,<a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>,Xloc,ierr))
+<a name="line311">311: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMGlobalToLocalEnd.html">DMGlobalToLocalEnd</a>(da,X,<a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>,Xloc,ierr))
+
+<a name="line313">313: </a>  ! Get access to vector data
+<a name="line314">314: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayReadF90.html">VecGetArrayReadF90</a>(Xloc,xx,ierr))
+<a name="line315">315: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayF90.html">VecGetArrayF90</a>(F,ff,ierr))
+
+<a name="line317">317: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(FormRHSFunctionLocal(mx,xs,xe,gxs,gxe,t,xx,ff,user(user_a),user(user_k),user(user_s),ierr))
+
+<a name="line319">319: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayReadF90.html">VecRestoreArrayReadF90</a>(Xloc,xx,ierr))
+<a name="line320">320: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayF90.html">VecRestoreArrayF90</a>(F,ff,ierr))
+<a name="line321">321: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/DM/DMRestoreLocalVector.html">DMRestoreLocalVector</a>(da,Xloc,ierr))
+<a name="line322">322: </a>end subroutine FormRHSFunction
+
+<a name="line324">324: </a>! ---------------------------------------------------------------------
+<a name="line325">325: </a>!
+<a name="line326">326: </a>!  IJacobian - Compute IJacobian = dF/dU + shift*dF/dUdot
+<a name="line327">327: </a>!
+<a name="line328">328: </a><strong><font color="#4169E1"><a name="FormIJacobian"></a>subroutine FormIJacobian(ts,t,X,Xdot,shift,J,Jpre,user,ierr)</font></strong>
+<a name="line329">329: </a>  use petscts
+<a name="line330">330: </a>  use petscdmda
+<a name="line331">331: </a>  implicit none
+
+<a name="line333">333: </a>  <a href="../../../manualpages/TS/TS.html">TS</a> ts
+<a name="line334">334: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> t,shift
+<a name="line335">335: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a> X,Xdot
+<a name="line336">336: </a>  <a href="../../../manualpages/Mat/Mat.html">Mat</a> J,Jpre
+<a name="line337">337: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+<a name="line338">338: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line339">339: </a>  integer user_a,user_k,user_s
+<a name="line340">340: </a>  parameter (user_a = 0,user_k = 2,user_s = 4)
+
+<a name="line342">342: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line343">343: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       mx,xs,xe,gxs,gxe
+<a name="line344">344: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i,i1,row,col
+<a name="line345">345: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>      k1,k2;
+<a name="line346">346: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>    val(4)
+
+<a name="line348">348: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(ts,da,ierr))
+<a name="line349">349: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+
+<a name="line351">351: </a>  i1 = 1
+<a name="line352">352: </a>  k1 = user(user_k+1)
+<a name="line353">353: </a>  k2 = user(user_k+2)
+<a name="line354">354: </a>  <font color="#4169E1">do</font> i = xs,xe
+<a name="line355">355: </a>     row = i-gxs
+<a name="line356">356: </a>     col = i-gxs
+<a name="line357">357: </a>     val(1) = shift + k1
+<a name="line358">358: </a>     val(2) = -k2
+<a name="line359">359: </a>     val(3) = -k1
+<a name="line360">360: </a>     val(4) = shift + k2
+<a name="line361">361: </a>     <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatSetValuesBlockedLocal.html">MatSetValuesBlockedLocal</a>(Jpre,i1,row,i1,col,val,<a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>,ierr))
+<a name="line362">362: </a>  end <font color="#4169E1">do</font>
+<a name="line363">363: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(Jpre,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line364">364: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(Jpre,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line365">365: </a>  <font color="#4169E1">if</font> (J /= Jpre) then
+<a name="line366">366: </a>     <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(J,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line367">367: </a>     <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(J,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line368">368: </a>  end <font color="#4169E1">if</font>
+<a name="line369">369: </a><strong><font color="#4169E1"><a name="FormInitialSolutionLocal"></a>end subroutine FormIJacobian</font></strong>
+
+<a name="line371">371: </a><strong><font color="#4169E1">subroutine FormInitialSolutionLocal(mx,xs,xe,gxs,gxe,x,a,k,s,ierr)</font></strong>
+<a name="line372">372: </a>  implicit none
+<a name="line373">373: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> mx,xs,xe,gxs,gxe
+<a name="line374">374: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> x(2,xs:xe)
+<a name="line375">375: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> a(2),k(2),s(2)
+<a name="line376">376: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+
+<a name="line378">378: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> i
+<a name="line379">379: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> one,hx,r,ik
+<a name="line380">380: </a>  one = 1.0
+<a name="line381">381: </a>  hx = one / mx
+<a name="line382">382: </a>  <font color="#4169E1">do</font> i=xs,xe
+<a name="line383">383: </a>     r = i*hx
+<a name="line384">384: </a>     <font color="#4169E1">if</font> (k(2) .ne. 0.0) then
+<a name="line385">385: </a>        ik = one/k(2)
+<a name="line386">386: </a>     <font color="#4169E1">else</font>
+<a name="line387">387: </a>        ik = one
+<a name="line388">388: </a>     end <font color="#4169E1">if</font>
+<a name="line389">389: </a>     x(1,i) = one + s(2)*r
+<a name="line390">390: </a>     x(2,i) = k(1)*ik*x(1,i) + s(2)*ik
+<a name="line391">391: </a>  end <font color="#4169E1">do</font>
+<a name="line392">392: </a><strong><font color="#4169E1"><a name="FormInitialSolution"></a>end subroutine FormInitialSolutionLocal</font></strong>
+
+<a name="line394">394: </a><strong><font color="#4169E1">subroutine FormInitialSolution(ts,X,user,ierr)</font></strong>
+<a name="line395">395: </a>  use petscts
+<a name="line396">396: </a>  use petscdmda
+<a name="line397">397: </a>  implicit none
+
+<a name="line399">399: </a>  <a href="../../../manualpages/TS/TS.html">TS</a> ts
+<a name="line400">400: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a> X
+<a name="line401">401: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+<a name="line402">402: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line403">403: </a>  integer user_a,user_k,user_s
+<a name="line404">404: </a>  parameter (user_a = 1,user_k = 3,user_s = 5)
+
+<a name="line406">406: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line407">407: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       mx,xs,xe,gxs,gxe
+<a name="line408">408: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>,pointer :: xx(:)
+
+<a name="line410">410: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(ts,da,ierr))
+<a name="line411">411: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+
+<a name="line413">413: </a>  ! Get access to vector data
+<a name="line414">414: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayF90.html">VecGetArrayF90</a>(X,xx,ierr))
+
+<a name="line416">416: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(FormInitialSolutionLocal(mx,xs,xe,gxs,gxe,xx,user(user_a),user(user_k),user(user_s),ierr))
+
+<a name="line418">418: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayF90.html">VecRestoreArrayF90</a>(X,xx,ierr))
+<a name="line419">419: </a>end subroutine FormInitialSolution
+
+<a name="line421">421: </a>! ---------------------------------------------------------------------
+<a name="line422">422: </a>!
+<a name="line423">423: </a>!  IJacobian - Compute IJacobian = dF/dU + shift*dF/dUdot
+<a name="line424">424: </a>!
+<a name="line425">425: </a><strong><font color="#4169E1"><a name="FormIJacobianMF"></a>subroutine FormIJacobianMF(ts,t,X,Xdot,shift,J,Jpre,user,ierr)</font></strong>
+<a name="line426">426: </a>  use ex22f_mfmodule
+<a name="line427">427: </a>  implicit none
+<a name="line428">428: </a>  <a href="../../../manualpages/TS/TS.html">TS</a> ts
+<a name="line429">429: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> t,shift
+<a name="line430">430: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a> X,Xdot
+<a name="line431">431: </a>  <a href="../../../manualpages/Mat/Mat.html">Mat</a> J,Jpre
+<a name="line432">432: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+<a name="line433">433: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+
+<a name="line435">435: </a>  PETSC_SHIFT=shift
+<a name="line436">436: </a>  MFuser=user
+
+<a name="line438">438: </a>end subroutine FormIJacobianMF
+
+<a name="line440">440: </a>! -------------------------------------------------------------------
+<a name="line441">441: </a>!
+<a name="line442">442: </a>!   MyMult - user provided matrix multiply
+<a name="line443">443: </a>!
+<a name="line444">444: </a>!   Input Parameters:
+<a name="line445">445: </a>!.  X - input vector
+<a name="line446">446: </a>!
+<a name="line447">447: </a>!   Output Parameter:
+<a name="line448">448: </a>!.  F - function vector
+<a name="line449">449: </a>!
+<a name="line450">450: </a><strong><font color="#4169E1"><a name="MyMult"></a>subroutine  MyMult(A,X,F,ierr)</font></strong>
+<a name="line451">451: </a>  use ex22f_mfmodule
+<a name="line452">452: </a>  implicit none
+
+<a name="line454">454: </a>  <a href="../../../manualpages/Mat/Mat.html">Mat</a>     A
+<a name="line455">455: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a>     X,F
+
+<a name="line457">457: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line458">458: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> shift
+
+<a name="line460">460: </a>!  <a href="../../../manualpages/Mat/Mat.html">Mat</a> J,Jpre
+
+<a name="line462">462: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a> user(6)
+
+<a name="line464">464: </a>  integer user_a,user_k,user_s
+<a name="line465">465: </a>  parameter (user_a = 0,user_k = 2,user_s = 4)
+
+<a name="line467">467: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line468">468: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       mx,xs,xe,gxs,gxe
+<a name="line469">469: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i,i1,row,col
+<a name="line470">470: </a>  <a href="../../../manualpages/Sys/PetscReal.html">PetscReal</a>      k1,k2;
+<a name="line471">471: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>    val(4)
+
+<a name="line473">473: </a>  shift=PETSC_SHIFT
+<a name="line474">474: </a>  user=MFuser
+
+<a name="line476">476: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/TS/TSGetDM.html">TSGetDM</a>(tscontext,da,ierr))
+<a name="line477">477: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(GetLayout(da,mx,xs,xe,gxs,gxe,ierr))
+
+<a name="line479">479: </a>  i1 = 1
+<a name="line480">480: </a>  k1 = user(user_k+1)
+<a name="line481">481: </a>  k2 = user(user_k+2)
+
+<a name="line483">483: </a>  <font color="#4169E1">do</font> i = xs,xe
+<a name="line484">484: </a>     row = i-gxs
+<a name="line485">485: </a>     col = i-gxs
+<a name="line486">486: </a>     val(1) = shift + k1
+<a name="line487">487: </a>     val(2) = -k2
+<a name="line488">488: </a>     val(3) = -k1
+<a name="line489">489: </a>     val(4) = shift + k2
+<a name="line490">490: </a>     <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatSetValuesBlockedLocal.html">MatSetValuesBlockedLocal</a>(Jmat,i1,row,i1,col,val,<a href="../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>,ierr))
+<a name="line491">491: </a>  end <font color="#4169E1">do</font>
+
+<a name="line493">493: </a>!  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(Jpre,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line494">494: </a>!  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(Jpre,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line495">495: </a>!  <font color="#4169E1">if</font> (J /= Jpre) then
+<a name="line496">496: </a>     <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(Jmat,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line497">497: </a>     <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(Jmat,<a href="../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>,ierr))
+<a name="line498">498: </a>!  end <font color="#4169E1">if</font>
+
+<a name="line500">500: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Mat/MatMult.html">MatMult</a>(Jmat,X,F,ierr))
+
+<a name="line502">502: </a>  <font color="#4169E1">return</font>
+<a name="line503">503: </a>end subroutine MyMult
+
+<a name="line505">505: </a>!
+<a name="line506">506: </a><strong><font color="#4169E1"><a name="SaveSolutionToDisk"></a>subroutine SaveSolutionToDisk(da,X,gdof,xs,xe)</font></strong>
+<a name="line507">507: </a>  use petscdmda
+<a name="line508">508: </a>  implicit none
+
+<a name="line510">510: </a>  <a href="../../../manualpages/Vec/Vec.html">Vec</a> X
+<a name="line511">511: </a>  <a href="../../../manualpages/DM/DM.html">DM</a>             da
+<a name="line512">512: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> xs,xe,two
+<a name="line513">513: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> gdof,i
+<a name="line514">514: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr
+<a name="line515">515: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> data2(2,xs:xe),data(gdof)
+<a name="line516">516: </a>  <a href="../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>,pointer :: xx(:)
+
+<a name="line518">518: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecGetArrayReadF90.html">VecGetArrayReadF90</a>(X,xx,ierr))
+
+<a name="line520">520: </a>  two = 2
+<a name="line521">521: </a>  data2=reshape(xx(gdof:gdof),(/two,xe-xs+1/))
+<a name="line522">522: </a>  data=reshape(data2,(/gdof/))
+<a name="line523">523: </a>  open(1020,file='solution_out_ex22f_mf.txt')
+<a name="line524">524: </a>  <font color="#4169E1">do</font> i=1,gdof
+<a name="line525">525: </a>     write(1020,'(e24.16,1x)') data(i)
+<a name="line526">526: </a>  end <font color="#4169E1">do</font>
+<a name="line527">527: </a>  close(1020)
+
+<a name="line529">529: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Vec/VecRestoreArrayReadF90.html">VecRestoreArrayReadF90</a>(X,xx,ierr))
+<a name="line530">530: </a>end subroutine SaveSolutionToDisk
+
+<a name="line532">532: </a>!<font color="#B22222">/*TEST</font>
+<a name="line533">533: </a><font color="#B22222">!</font>
+<a name="line534">534: </a><font color="#B22222">!    test:</font>
+<a name="line535">535: </a><font color="#B22222">!      args: -da_grid_x 200 -ts_arkimex_type 4</font>
+<a name="line536">536: </a><font color="#B22222">!      requires: !single</font>
+<a name="line537">537: </a><font color="#B22222">!      output_file: output/ex22f_mf_1.out</font>
+<a name="line538">538: </a><font color="#B22222">!</font>
+<a name="line539">539: </a><font color="#B22222">!TEST*/</font>
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,726 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/vec/vec/utils/comb.c">Actual source code: comb.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:51+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">      Split phase global vector reductions with support for combining the</font>
+<a name="line4">  4: </a><font color="#B22222">   communication portion of several operations. Using MPI-1.1 support only</font>
+
+<a name="line6">  6: </a><font color="#B22222">      The idea for this and much of the initial code is contributed by</font>
+<a name="line7">  7: </a><font color="#B22222">   Victor Eijkhout.</font>
+
+<a name="line9">  9: </a><font color="#B22222">       Usage:</font>
+<a name="line10"> 10: </a><font color="#B22222">             <a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a>,<a href="../../../../manualpages/Vec/Vec.html">Vec</a>,<a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *);</font>
+<a name="line11"> 11: </a><font color="#B22222">             <a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a>,<a href="../../../../manualpages/Vec/NormType.html">NormType</a>,<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *);</font>
+<a name="line12"> 12: </a><font color="#B22222">             ....</font>
+<a name="line13"> 13: </a><font color="#B22222">             <a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a>,<a href="../../../../manualpages/Vec/Vec.html">Vec</a>,<a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *);</font>
+<a name="line14"> 14: </a><font color="#B22222">             <a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a>,<a href="../../../../manualpages/Vec/NormType.html">NormType</a>,<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *);</font>
+
+<a name="line16"> 16: </a><font color="#B22222">       Limitations:</font>
+<a name="line17"> 17: </a><font color="#B22222">         - The order of the xxxEnd() functions MUST be in the same order</font>
+<a name="line18"> 18: </a><font color="#B22222">           as the xxxBegin(). There is extensive error checking to try to</font>
+<a name="line19"> 19: </a><font color="#B22222">           insure that the user calls the routines in the correct order</font>
+<a name="line20"> 20: </a><font color="#B22222">*/</font>
+
+<a name="line22"> 22: </a>#include <A href="../../../../include/petsc/private/vecimpl.h.html">&lt;petsc/private/vecimpl.h&gt;</A>
+
+<a name="line24"> 24: </a><strong><font color="#4169E1"><a name="MPIPetsc_Iallreduce"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MPIPetsc_Iallreduce(void *sendbuf, void *recvbuf, <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> count, MPI_Datatype datatype, MPI_Op op, <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, MPI_Request *request)</font></strong>
+<a name="line25"> 25: </a>{
+<a name="line26"> 26: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line27"> 27: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_NONBLOCKING_COLLECTIVES)</font>
+<a name="line28"> 28: </a>  <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Iallreduce.html#MPI_Iallreduce">MPI_Iallreduce</a>(sendbuf, recvbuf, count, datatype, op, comm, request));
+<a name="line29"> 29: </a><font color="#A020F0">#else</font>
+<a name="line30"> 30: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(sendbuf, recvbuf, count, datatype, op, comm));
+<a name="line31"> 31: </a>  *request = MPI_REQUEST_NULL;
+<a name="line32"> 32: </a><font color="#A020F0">#endif</font>
+<a name="line33"> 33: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line34"> 34: </a>}
+
+<a name="line36"> 36: </a><strong><font color="#4169E1">static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionApply(PetscSplitReduction *)</font></strong>;
+
+<a name="line38"> 38: </a><font color="#B22222">/*</font>
+<a name="line39"> 39: </a><font color="#B22222">   PetscSplitReductionCreate - Creates a data structure to contain the queued information.</font>
+<a name="line40"> 40: </a><font color="#B22222">*/</font>
+<a name="line41"> 41: </a><strong><font color="#4169E1"><a name="PetscSplitReductionCreate"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionCreate(<a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, PetscSplitReduction **sr)</font></strong>
+<a name="line42"> 42: </a>{
+<a name="line43"> 43: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line44"> 44: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(sr));
+<a name="line45"> 45: </a>  (*sr)-&gt;numopsbegin = 0;
+<a name="line46"> 46: </a>  (*sr)-&gt;numopsend   = 0;
+<a name="line47"> 47: </a>  (*sr)-&gt;state       = STATE_BEGIN;
+<a name="line48"> 48: </a><strong><font color="#228B22">#define MAXOPS 32</font></strong>
+<a name="line49"> 49: </a>  (*sr)-&gt;maxops = MAXOPS;
+<a name="line50"> 50: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscMalloc6.html">PetscMalloc6</a>(MAXOPS, &amp;(*sr)-&gt;lvalues, MAXOPS, &amp;(*sr)-&gt;gvalues, MAXOPS, &amp;(*sr)-&gt;invecs, MAXOPS, &amp;(*sr)-&gt;reducetype, MAXOPS, &amp;(*sr)-&gt;lvalues_mix, MAXOPS, &amp;(*sr)-&gt;gvalues_mix));
+<a name="line51"> 51: </a><strong><font color="#228B22">#undef MAXOPS</font></strong>
+<a name="line52"> 52: </a>  (*sr)-&gt;comm    = comm;
+<a name="line53"> 53: </a>  (*sr)-&gt;request = MPI_REQUEST_NULL;
+<a name="line54"> 54: </a>  (*sr)-&gt;mix     = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line55"> 55: </a>  (*sr)-&gt;async   = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line56"> 56: </a><font color="#A020F0">#if defined(PETSC_HAVE_MPI_NONBLOCKING_COLLECTIVES)</font>
+<a name="line57"> 57: </a>  (*sr)-&gt;async = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>; <font color="#B22222">/* Enable by default */</font>
+<a name="line58"> 58: </a><font color="#A020F0">#endif</font>
+<a name="line59"> 59: </a>  <font color="#B22222">/* always check for option; so that tests that run on systems without support don't warn about unhandled options */</font>
+<a name="line60"> 60: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-splitreduction_async"</font>, &amp;(*sr)-&gt;async, NULL));
+<a name="line61"> 61: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line62"> 62: </a>}
+
+<a name="line64"> 64: </a><font color="#B22222">/*</font>
+<a name="line65"> 65: </a><font color="#B22222">       This function is the MPI reduction operation used when there is</font>
+<a name="line66"> 66: </a><font color="#B22222">   a combination of sums and max in the reduction. The call below to</font>
+<a name="line67"> 67: </a><font color="#B22222">   <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Op_create.html#MPI_Op_create">MPI_Op_create</a>() converts the function PetscSplitReduction_Local() to the</font>
+<a name="line68"> 68: </a><font color="#B22222">   MPI operator PetscSplitReduction_Op.</font>
+<a name="line69"> 69: </a><font color="#B22222">*/</font>
+<a name="line70"> 70: </a>MPI_Op PetscSplitReduction_Op = 0;
+
+<a name="line72"> 72: </a><strong><font color="#4169E1"><a name="PetscSplitReduction_Local"></a>PETSC_EXTERN void MPIAPI PetscSplitReduction_Local(void *in, void *out, <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *cnt, MPI_Datatype *datatype)</font></strong>
+<a name="line73"> 73: </a>{
+<a name="line74"> 74: </a>  <font color="#4169E1">struct PetscScalarInt</font> {
+<a name="line75"> 75: </a>    <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> v;
+<a name="line76"> 76: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    i;
+<a name="line77"> 77: </a>  };
+<a name="line78"> 78: </a>  <font color="#4169E1">struct PetscScalarInt</font> *xin  = (<font color="#4169E1">struct PetscScalarInt</font> *)in;
+<a name="line79"> 79: </a>  <font color="#4169E1">struct PetscScalarInt</font> *xout = (<font color="#4169E1">struct PetscScalarInt</font> *)out;
+<a name="line80"> 80: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>               i, count = (<a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>)*cnt;
+
+<a name="line82"> 82: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line83"> 83: </a>  <font color="#4169E1">if</font> (*datatype != MPIU_SCALAR_INT) {
+<a name="line84"> 84: </a>    <a href="../../../../manualpages/Sys/PetscCallAbort.html">PetscCallAbort</a>(MPI_COMM_SELF, (*<a href="../../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can only handle MPIU_SCALAR_INT data types"</font>));
+<a name="line85"> 85: </a>    <a href="../../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_SELF, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>);
+<a name="line86"> 86: </a>  }
+<a name="line87"> 87: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; count; i++) {
+<a name="line88"> 88: </a>    <font color="#4169E1">if</font> (xin[i].i == PETSC_SR_REDUCE_SUM) xout[i].v += xin[i].v;
+<a name="line89"> 89: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (xin[i].i == PETSC_SR_REDUCE_MAX) xout[i].v = <a href="../../../../manualpages/Sys/PetscMax.html">PetscMax</a>(<a href="../../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(xout[i].v), <a href="../../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(xin[i].v));
+<a name="line90"> 90: </a>    <font color="#4169E1">else</font> <font color="#4169E1">if</font> (xin[i].i == PETSC_SR_REDUCE_MIN) xout[i].v = <a href="../../../../manualpages/Sys/PetscMin.html">PetscMin</a>(<a href="../../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(xout[i].v), <a href="../../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(xin[i].v));
+<a name="line91"> 91: </a>    <font color="#4169E1">else</font> {
+<a name="line92"> 92: </a>      <a href="../../../../manualpages/Sys/PetscCallAbort.html">PetscCallAbort</a>(MPI_COMM_SELF, (*<a href="../../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Reduction type input is not PETSC_SR_REDUCE_SUM, PETSC_SR_REDUCE_MAX, or PETSC_SR_REDUCE_MIN"</font>));
+<a name="line93"> 93: </a>      <a href="../../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_SELF, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>);
+<a name="line94"> 94: </a>    }
+<a name="line95"> 95: </a>  }
+<a name="line96"> 96: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturnVoid.html">PetscFunctionReturnVoid</a>();
+<a name="line97"> 97: </a>}
+
+<a name="line99"> 99: </a><font color="#B22222">/*@</font>
+<a name="line100">100: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a> - Begin an asynchronous split-mode reduction</font>
+
+<a name="line102">102: </a><font color="#B22222">   Collective but not synchronizing</font>
+
+<a name="line104">104: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line105">105: </a><font color="#B22222">   comm - communicator on which split reduction has been queued</font>
+
+<a name="line107">107: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line109">109: </a><font color="#B22222">   Note:</font>
+<a name="line110">110: </a><font color="#B22222">   Calling this function is optional when using split-mode reduction. On supporting hardware, calling this after all</font>
+<a name="line111">111: </a><font color="#B22222">   VecXxxBegin() allows the reduction to make asynchronous progress before the result is needed (in VecXxxEnd()).</font>
+
+<a name="line113">113: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a>()`</font>
+<a name="line114">114: </a><font color="#B22222">@*/</font>
+<a name="line115">115: </a><strong><font color="#4169E1"><a name="PetscCommSplitReductionBegin"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>(<a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm)</font></strong>
+<a name="line116">116: </a>{
+<a name="line117">117: </a>  PetscSplitReduction *sr;
+
+<a name="line119">119: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line120">120: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line121">121: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;numopsend &lt;= 0, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Cannot call this after VecxxxEnd() has been called"</font>);
+<a name="line122">122: </a>  <font color="#4169E1">if</font> (sr-&gt;async) { <font color="#B22222">/* Bad reuse, setup code copied from PetscSplitReductionApply(). */</font>
+<a name="line123">123: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     i, numops = sr-&gt;numopsbegin, *reducetype = sr-&gt;reducetype;
+<a name="line124">124: </a>    <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *lvalues = sr-&gt;lvalues, *gvalues = sr-&gt;gvalues;
+<a name="line125">125: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     sum_flg = 0, max_flg = 0, min_flg = 0;
+<a name="line126">126: </a>    <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>     comm = sr-&gt;comm;
+<a name="line127">127: </a>    <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  size, cmul = <font color="#4169E1">sizeof</font>(<a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>) / <font color="#4169E1">sizeof</font>(<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>);
+
+<a name="line129">129: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceBegin, 0, 0, 0, 0));
+<a name="line130">130: </a>    <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(sr-&gt;comm, &amp;size));
+<a name="line131">131: </a>    <font color="#4169E1">if</font> (size == 1) {
+<a name="line132">132: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(gvalues, lvalues, numops));
+<a name="line133">133: </a>    } <font color="#4169E1">else</font> {
+<a name="line134">134: </a>      <font color="#B22222">/* determine if all reductions are sum, max, or min */</font>
+<a name="line135">135: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; numops; i++) {
+<a name="line136">136: </a>        <font color="#4169E1">if</font> (reducetype[i] == PETSC_SR_REDUCE_MAX) max_flg = 1;
+<a name="line137">137: </a>        <font color="#4169E1">else</font> <font color="#4169E1">if</font> (reducetype[i] == PETSC_SR_REDUCE_SUM) sum_flg = 1;
+<a name="line138">138: </a>        <font color="#4169E1">else</font> <font color="#4169E1">if</font> (reducetype[i] == PETSC_SR_REDUCE_MIN) min_flg = 1;
+<a name="line139">139: </a>        <font color="#4169E1">else</font> <a href="../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Error in PetscSplitReduction() data structure, probably memory corruption"</font>);
+<a name="line140">140: </a>      }
+<a name="line141">141: </a>      <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sum_flg + max_flg + min_flg &lt;= 1 || !sr-&gt;mix, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Error in PetscSplitReduction() data structure, probably memory corruption"</font>);
+<a name="line142">142: </a>      <font color="#4169E1">if</font> (sum_flg + max_flg + min_flg &gt; 1) {
+<a name="line143">143: </a>        sr-&gt;mix = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line144">144: </a>        <font color="#4169E1">for</font> (i = 0; i &lt; numops; i++) {
+<a name="line145">145: </a>          sr-&gt;lvalues_mix[i].v = lvalues[i];
+<a name="line146">146: </a>          sr-&gt;lvalues_mix[i].i = reducetype[i];
+<a name="line147">147: </a>        }
+<a name="line148">148: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Iallreduce(sr-&gt;lvalues_mix, sr-&gt;gvalues_mix, numops, MPIU_SCALAR_INT, PetscSplitReduction_Op, comm, &amp;sr-&gt;request));
+<a name="line149">149: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (max_flg) { <font color="#B22222">/* Compute max of real and imag parts separately, presumably only the real part is used */</font>
+<a name="line150">150: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Iallreduce((<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)lvalues, (<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)gvalues, cmul * numops, <a href="../../../../manualpages/Sys/MPIU_REAL.html">MPIU_REAL</a>, MPIU_MAX, comm, &amp;sr-&gt;request));
+<a name="line151">151: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (min_flg) {
+<a name="line152">152: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Iallreduce((<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)lvalues, (<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)gvalues, cmul * numops, <a href="../../../../manualpages/Sys/MPIU_REAL.html">MPIU_REAL</a>, MPIU_MIN, comm, &amp;sr-&gt;request));
+<a name="line153">153: </a>      } <font color="#4169E1">else</font> {
+<a name="line154">154: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MPIPetsc_Iallreduce(lvalues, gvalues, numops, <a href="../../../../manualpages/Sys/MPIU_SCALAR.html">MPIU_SCALAR</a>, MPIU_SUM, comm, &amp;sr-&gt;request));
+<a name="line155">155: </a>      }
+<a name="line156">156: </a>    }
+<a name="line157">157: </a>    sr-&gt;state     = STATE_PENDING;
+<a name="line158">158: </a>    sr-&gt;numopsend = 0;
+<a name="line159">159: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceBegin, 0, 0, 0, 0));
+<a name="line160">160: </a>  } <font color="#4169E1">else</font> {
+<a name="line161">161: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionApply(sr));
+<a name="line162">162: </a>  }
+<a name="line163">163: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line164">164: </a>}
+
+<a name="line166">166: </a><strong><font color="#4169E1"><a name="PetscSplitReductionEnd"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionEnd(PetscSplitReduction *sr)</font></strong>
+<a name="line167">167: </a>{
+<a name="line168">168: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line169">169: </a>  <font color="#4169E1">switch</font> (sr-&gt;state) {
+<a name="line170">170: </a>  <font color="#4169E1">case</font> STATE_BEGIN: <font color="#B22222">/* We are doing synchronous communication and this is the first call to VecXxxEnd() so do the communication */</font>
+<a name="line171">171: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionApply(sr));
+<a name="line172">172: </a>    <font color="#4169E1">break</font>;
+<a name="line173">173: </a>  <font color="#4169E1">case</font> STATE_PENDING:
+<a name="line174">174: </a>    <font color="#B22222">/* We are doing asynchronous-mode communication and this is the first VecXxxEnd() so wait for comm to complete */</font>
+<a name="line175">175: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceEnd, 0, 0, 0, 0));
+<a name="line176">176: </a>    <font color="#4169E1">if</font> (sr-&gt;request != MPI_REQUEST_NULL) <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Wait.html#MPI_Wait">MPI_Wait</a>(&amp;sr-&gt;request, MPI_STATUS_IGNORE));
+<a name="line177">177: </a>    sr-&gt;state = STATE_END;
+<a name="line178">178: </a>    <font color="#4169E1">if</font> (sr-&gt;mix) {
+<a name="line179">179: </a>      <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> i;
+<a name="line180">180: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; sr-&gt;numopsbegin; i++) sr-&gt;gvalues[i] = sr-&gt;gvalues_mix[i].v;
+<a name="line181">181: </a>      sr-&gt;mix = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line182">182: </a>    }
+<a name="line183">183: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceEnd, 0, 0, 0, 0));
+<a name="line184">184: </a>    <font color="#4169E1">break</font>;
+<a name="line185">185: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line186">186: </a>    <font color="#4169E1">break</font>; <font color="#B22222">/* everything is already done */</font>
+<a name="line187">187: </a>  }
+<a name="line188">188: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line189">189: </a>}
+
+<a name="line191">191: </a><font color="#B22222">/*</font>
+<a name="line192">192: </a><font color="#B22222">   PetscSplitReductionApply - Actually do the communication required for a split phase reduction</font>
+<a name="line193">193: </a><font color="#B22222">*/</font>
+<a name="line194">194: </a><strong><font color="#4169E1"><a name="PetscSplitReductionApply"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionApply(PetscSplitReduction *sr)</font></strong>
+<a name="line195">195: </a>{
+<a name="line196">196: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     i, numops = sr-&gt;numopsbegin, *reducetype = sr-&gt;reducetype;
+<a name="line197">197: </a>  <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *lvalues = sr-&gt;lvalues, *gvalues = sr-&gt;gvalues;
+<a name="line198">198: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     sum_flg = 0, max_flg = 0, min_flg = 0;
+<a name="line199">199: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>     comm = sr-&gt;comm;
+<a name="line200">200: </a>  <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  size, cmul = <font color="#4169E1">sizeof</font>(<a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>) / <font color="#4169E1">sizeof</font>(<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>);
+
+<a name="line202">202: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line203">203: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;numopsend &lt;= 0, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Cannot call this after VecxxxEnd() has been called"</font>);
+<a name="line204">204: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceCommunication, 0, 0, 0, 0));
+<a name="line205">205: </a>  <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(sr-&gt;comm, &amp;size));
+<a name="line206">206: </a>  <font color="#4169E1">if</font> (size == 1) {
+<a name="line207">207: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(gvalues, lvalues, numops));
+<a name="line208">208: </a>  } <font color="#4169E1">else</font> {
+<a name="line209">209: </a>    <font color="#B22222">/* determine if all reductions are sum, max, or min */</font>
+<a name="line210">210: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; numops; i++) {
+<a name="line211">211: </a>      <font color="#4169E1">if</font> (reducetype[i] == PETSC_SR_REDUCE_MAX) max_flg = 1;
+<a name="line212">212: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (reducetype[i] == PETSC_SR_REDUCE_SUM) sum_flg = 1;
+<a name="line213">213: </a>      <font color="#4169E1">else</font> <font color="#4169E1">if</font> (reducetype[i] == PETSC_SR_REDUCE_MIN) min_flg = 1;
+<a name="line214">214: </a>      <font color="#4169E1">else</font> <a href="../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Error in PetscSplitReduction() data structure, probably memory corruption"</font>);
+<a name="line215">215: </a>    }
+<a name="line216">216: </a>    <font color="#4169E1">if</font> (sum_flg + max_flg + min_flg &gt; 1) {
+<a name="line217">217: </a>      <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!sr-&gt;mix, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Error in PetscSplitReduction() data structure, probably memory corruption"</font>);
+<a name="line218">218: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; numops; i++) {
+<a name="line219">219: </a>        sr-&gt;lvalues_mix[i].v = lvalues[i];
+<a name="line220">220: </a>        sr-&gt;lvalues_mix[i].i = reducetype[i];
+<a name="line221">221: </a>      }
+<a name="line222">222: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(sr-&gt;lvalues_mix, sr-&gt;gvalues_mix, numops, MPIU_SCALAR_INT, PetscSplitReduction_Op, comm));
+<a name="line223">223: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; numops; i++) sr-&gt;gvalues[i] = sr-&gt;gvalues_mix[i].v;
+<a name="line224">224: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (max_flg) { <font color="#B22222">/* Compute max of real and imag parts separately, presumably only the real part is used */</font>
+<a name="line225">225: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>((<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)lvalues, (<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)gvalues, cmul * numops, <a href="../../../../manualpages/Sys/MPIU_REAL.html">MPIU_REAL</a>, MPIU_MAX, comm));
+<a name="line226">226: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (min_flg) {
+<a name="line227">227: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>((<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)lvalues, (<a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *)gvalues, cmul * numops, <a href="../../../../manualpages/Sys/MPIU_REAL.html">MPIU_REAL</a>, MPIU_MIN, comm));
+<a name="line228">228: </a>    } <font color="#4169E1">else</font> {
+<a name="line229">229: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(lvalues, gvalues, numops, <a href="../../../../manualpages/Sys/MPIU_SCALAR.html">MPIU_SCALAR</a>, MPIU_SUM, comm));
+<a name="line230">230: </a>    }
+<a name="line231">231: </a>  }
+<a name="line232">232: </a>  sr-&gt;state     = STATE_END;
+<a name="line233">233: </a>  sr-&gt;numopsend = 0;
+<a name="line234">234: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceCommunication, 0, 0, 0, 0));
+<a name="line235">235: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line236">236: </a>}
+
+<a name="line238">238: </a><font color="#B22222">/*</font>
+<a name="line239">239: </a><font color="#B22222">   PetscSplitReductionExtend - Double the amount of space (slots) allocated for a split reduction object.</font>
+<a name="line240">240: </a><font color="#B22222">*/</font>
+<a name="line241">241: </a><strong><font color="#4169E1"><a name="PetscSplitReductionExtend"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionExtend(PetscSplitReduction *sr)</font></strong>
+<a name="line242">242: </a>{
+<a name="line243">243: </a>  <font color="#4169E1">struct PetscScalarInt</font> {
+<a name="line244">244: </a>    <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> v;
+<a name="line245">245: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    i;
+<a name="line246">246: </a>  };
+<a name="line247">247: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>               maxops = sr-&gt;maxops, *reducetype = sr-&gt;reducetype;
+<a name="line248">248: </a>  <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>           *lvalues = sr-&gt;lvalues, *gvalues = sr-&gt;gvalues;
+<a name="line249">249: </a>  <font color="#4169E1">struct PetscScalarInt</font> *lvalues_mix = (<font color="#4169E1">struct PetscScalarInt</font> *)sr-&gt;lvalues_mix;
+<a name="line250">250: </a>  <font color="#4169E1">struct PetscScalarInt</font> *gvalues_mix = (<font color="#4169E1">struct PetscScalarInt</font> *)sr-&gt;gvalues_mix;
+<a name="line251">251: </a>  void                 **invecs      = sr-&gt;invecs;
+
+<a name="line253">253: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line254">254: </a>  sr-&gt;maxops = 2 * maxops;
+<a name="line255">255: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscMalloc6.html">PetscMalloc6</a>(2 * maxops, &amp;sr-&gt;lvalues, 2 * maxops, &amp;sr-&gt;gvalues, 2 * maxops, &amp;sr-&gt;reducetype, 2 * maxops, &amp;sr-&gt;invecs, 2 * maxops, &amp;sr-&gt;lvalues_mix, 2 * maxops, &amp;sr-&gt;gvalues_mix));
+<a name="line256">256: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(sr-&gt;lvalues, lvalues, maxops));
+<a name="line257">257: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(sr-&gt;gvalues, gvalues, maxops));
+<a name="line258">258: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(sr-&gt;reducetype, reducetype, maxops));
+<a name="line259">259: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(sr-&gt;invecs, invecs, maxops));
+<a name="line260">260: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(sr-&gt;lvalues_mix, lvalues_mix, maxops));
+<a name="line261">261: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscArraycpy.html">PetscArraycpy</a>(sr-&gt;gvalues_mix, gvalues_mix, maxops));
+<a name="line262">262: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFree6.html">PetscFree6</a>(lvalues, gvalues, reducetype, invecs, lvalues_mix, gvalues_mix));
+<a name="line263">263: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line264">264: </a>}
+
+<a name="line266">266: </a><strong><font color="#4169E1"><a name="PetscSplitReductionDestroy"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionDestroy(PetscSplitReduction *sr)</font></strong>
+<a name="line267">267: </a>{
+<a name="line268">268: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line269">269: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFree6.html">PetscFree6</a>(sr-&gt;lvalues, sr-&gt;gvalues, sr-&gt;reducetype, sr-&gt;invecs, sr-&gt;lvalues_mix, sr-&gt;gvalues_mix));
+<a name="line270">270: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(sr));
+<a name="line271">271: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line272">272: </a>}
+
+<a name="line274">274: </a><a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> Petsc_Reduction_keyval = MPI_KEYVAL_INVALID;
+
+<a name="line276">276: </a><font color="#B22222">/*</font>
+<a name="line277">277: </a><font color="#B22222">   Private routine to delete internal storage when a communicator is freed.</font>
+<a name="line278">278: </a><font color="#B22222">  This is called by MPI, not by users.</font>
+
+<a name="line280">280: </a><font color="#B22222">  The binding for the first argument changed from MPI 1.0 to 1.1; in 1.0</font>
+<a name="line281">281: </a><font color="#B22222">  it was <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm.</font>
+<a name="line282">282: </a><font color="#B22222">*/</font>
+<a name="line283">283: </a><strong><font color="#4169E1"><a name="Petsc_DelReduction"></a>PETSC_EXTERN <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> MPIAPI Petsc_DelReduction(<a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> keyval, void *attr_val, void *extra_state)</font></strong>
+<a name="line284">284: </a>{
+<a name="line285">285: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line286">286: </a>  <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(0, <font color="#666666">"Deleting reduction data in an <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> %ld\n"</font>, (long)comm));
+<a name="line287">287: </a>  <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(PetscSplitReductionDestroy((PetscSplitReduction *)attr_val));
+<a name="line288">288: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line289">289: </a>}
+
+<a name="line291">291: </a><font color="#B22222">/*</font>
+<a name="line292">292: </a><font color="#B22222">     PetscSplitReductionGet - Gets the split reduction object from a</font>
+<a name="line293">293: </a><font color="#B22222">        PETSc vector, creates if it does not exit.</font>
+
+<a name="line295">295: </a><font color="#B22222">*/</font>
+<a name="line296">296: </a><strong><font color="#4169E1"><a name="PetscSplitReductionGet"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscSplitReductionGet(<a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, PetscSplitReduction **sr)</font></strong>
+<a name="line297">297: </a>{
+<a name="line298">298: </a>  <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> flag;
+
+<a name="line300">300: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line301">301: </a>  <font color="#4169E1">if</font> (Petsc_Reduction_keyval == MPI_KEYVAL_INVALID) {
+<a name="line302">302: </a>    <font color="#B22222">/*</font>
+<a name="line303">303: </a><font color="#B22222">       The calling sequence of the 2nd argument to this function changed</font>
+<a name="line304">304: </a><font color="#B22222">       between MPI Standard 1.0 and the revisions 1.1 Here we match the</font>
+<a name="line305">305: </a><font color="#B22222">       new standard, if you are using an MPI implementation that uses</font>
+<a name="line306">306: </a><font color="#B22222">       the older version you will get a warning message about the next line;</font>
+<a name="line307">307: </a><font color="#B22222">       it is only a warning message and should do no harm.</font>
+<a name="line308">308: </a><font color="#B22222">    */</font>
+<a name="line309">309: </a>    <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_create_keyval.html#MPI_Comm_create_keyval">MPI_Comm_create_keyval</a>(MPI_COMM_NULL_COPY_FN, Petsc_DelReduction, &amp;Petsc_Reduction_keyval, NULL));
+<a name="line310">310: </a>  }
+<a name="line311">311: </a>  <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_get_attr.html#MPI_Comm_get_attr">MPI_Comm_get_attr</a>(comm, Petsc_Reduction_keyval, (void **)sr, &amp;flag));
+<a name="line312">312: </a>  <font color="#4169E1">if</font> (!flag) { <font color="#B22222">/* doesn't exist yet so create it and put it in */</font>
+<a name="line313">313: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionCreate(comm, sr));
+<a name="line314">314: </a>    <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_set_attr.html#MPI_Comm_set_attr">MPI_Comm_set_attr</a>(comm, Petsc_Reduction_keyval, *sr));
+<a name="line315">315: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(0, <font color="#666666">"Putting reduction data in an <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> %ld\n"</font>, (long)comm));
+<a name="line316">316: </a>  }
+<a name="line317">317: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line318">318: </a>}
+
+<a name="line320">320: </a><font color="#B22222">/* ----------------------------------------------------------------------------------------------------*/</font>
+
+<a name="line322">322: </a><font color="#B22222">/*@</font>
+<a name="line323">323: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a> - Starts a split phase dot product computation.</font>
+
+<a name="line325">325: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line326">326: </a><font color="#B22222">+   x - the first vector</font>
+<a name="line327">327: </a><font color="#B22222">.   y - the second vector</font>
+<a name="line328">328: </a><font color="#B22222">-   result - where the result will go (can be NULL)</font>
+
+<a name="line330">330: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line332">332: </a><font color="#B22222">   Notes:</font>
+<a name="line333">333: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`.</font>
+
+<a name="line335">335: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line336">336: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line337">337: </a><font color="#B22222">@*/</font>
+<a name="line338">338: </a><strong><font color="#4169E1"><a name="VecDotBegin"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y, <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *result)</font></strong>
+<a name="line339">339: </a>{
+<a name="line340">340: </a>  PetscSplitReduction *sr;
+<a name="line341">341: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+
+<a name="line343">343: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line346">346: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line347">347: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line348">348: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;state == STATE_BEGIN, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line349">349: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsbegin &gt;= sr-&gt;maxops) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionExtend(sr));
+<a name="line350">350: </a>  sr-&gt;reducetype[sr-&gt;numopsbegin] = PETSC_SR_REDUCE_SUM;
+<a name="line351">351: </a>  sr-&gt;invecs[sr-&gt;numopsbegin]     = (void *)x;
+<a name="line352">352: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line353">353: </a>  <a href="../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(x, dot_local, y, sr-&gt;lvalues + sr-&gt;numopsbegin++);
+<a name="line354">354: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line355">355: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line356">356: </a>}
+
+<a name="line358">358: </a><font color="#B22222">/*@</font>
+<a name="line359">359: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a> - Ends a split phase dot product computation.</font>
+
+<a name="line361">361: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line362">362: </a><font color="#B22222">+  x - the first vector (can be `NULL`)</font>
+<a name="line363">363: </a><font color="#B22222">.  y - the second vector (can be `NULL`)</font>
+<a name="line364">364: </a><font color="#B22222">-  result - where the result will go</font>
+
+<a name="line366">366: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line368">368: </a><font color="#B22222">   Notes:</font>
+<a name="line369">369: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`.</font>
+
+<a name="line371">371: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line372">372: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line373">373: </a><font color="#B22222">@*/</font>
+<a name="line374">374: </a><strong><font color="#4169E1"><a name="VecDotEnd"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y, <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *result)</font></strong>
+<a name="line375">375: </a>{
+<a name="line376">376: </a>  PetscSplitReduction *sr;
+<a name="line377">377: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+
+<a name="line379">379: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line380">380: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line381">381: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line382">382: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionEnd(sr));
+
+<a name="line384">384: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;numopsend &lt; sr-&gt;numopsbegin, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called VecxxxEnd() more times then VecxxxBegin()"</font>);
+<a name="line385">385: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!x || (void *)x == sr-&gt;invecs[sr-&gt;numopsend], <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called VecxxxEnd() in a different order or with a different vector than VecxxxBegin()"</font>);
+<a name="line386">386: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;reducetype[sr-&gt;numopsend] == PETSC_SR_REDUCE_SUM, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called <a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>() on a reduction started with <a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()"</font>);
+<a name="line387">387: </a>  *result = sr-&gt;gvalues[sr-&gt;numopsend++];
+
+<a name="line389">389: </a>  <font color="#B22222">/*</font>
+<a name="line390">390: </a><font color="#B22222">     We are finished getting all the results so reset to no outstanding requests</font>
+<a name="line391">391: </a><font color="#B22222">  */</font>
+<a name="line392">392: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend == sr-&gt;numopsbegin) {
+<a name="line393">393: </a>    sr-&gt;state       = STATE_BEGIN;
+<a name="line394">394: </a>    sr-&gt;numopsend   = 0;
+<a name="line395">395: </a>    sr-&gt;numopsbegin = 0;
+<a name="line396">396: </a>    sr-&gt;mix         = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line397">397: </a>  }
+<a name="line398">398: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line399">399: </a>}
+
+<a name="line401">401: </a><font color="#B22222">/*@</font>
+<a name="line402">402: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a> - Starts a split phase transpose dot product computation.</font>
+
+<a name="line404">404: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line405">405: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line406">406: </a><font color="#B22222">.  y - the second vector</font>
+<a name="line407">407: </a><font color="#B22222">-  result - where the result will go (can be `NULL`)</font>
+
+<a name="line409">409: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line411">411: </a><font color="#B22222">   Notes:</font>
+<a name="line412">412: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`.</font>
+
+<a name="line414">414: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line415">415: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line416">416: </a><font color="#B22222">@*/</font>
+<a name="line417">417: </a><strong><font color="#4169E1"><a name="VecTDotBegin"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y, <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *result)</font></strong>
+<a name="line418">418: </a>{
+<a name="line419">419: </a>  PetscSplitReduction *sr;
+<a name="line420">420: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+
+<a name="line422">422: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line423">423: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line424">424: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line425">425: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;state == STATE_BEGIN, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line426">426: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsbegin &gt;= sr-&gt;maxops) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionExtend(sr));
+<a name="line427">427: </a>  sr-&gt;reducetype[sr-&gt;numopsbegin] = PETSC_SR_REDUCE_SUM;
+<a name="line428">428: </a>  sr-&gt;invecs[sr-&gt;numopsbegin]     = (void *)x;
+<a name="line429">429: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line430">430: </a>  <a href="../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(x, tdot_local, y, sr-&gt;lvalues + sr-&gt;numopsbegin++);
+<a name="line431">431: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line432">432: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line433">433: </a>}
+
+<a name="line435">435: </a><font color="#B22222">/*@</font>
+<a name="line436">436: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a> - Ends a split phase transpose dot product computation.</font>
+
+<a name="line438">438: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line439">439: </a><font color="#B22222">+  x - the first vector (can be `NULL`)</font>
+<a name="line440">440: </a><font color="#B22222">.  y - the second vector (can be `NULL`)</font>
+<a name="line441">441: </a><font color="#B22222">-  result - where the result will go</font>
+
+<a name="line443">443: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line445">445: </a><font color="#B22222">   Notes:</font>
+<a name="line446">446: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`.</font>
+
+<a name="line448">448: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line449">449: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`</font>
+<a name="line450">450: </a><font color="#B22222">@*/</font>
+<a name="line451">451: </a><strong><font color="#4169E1"><a name="VecTDotEnd"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y, <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *result)</font></strong>
+<a name="line452">452: </a>{
+<a name="line453">453: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line454">454: </a>  <font color="#B22222">/*</font>
+<a name="line455">455: </a><font color="#B22222">      TDotEnd() is the same as DotEnd() so reuse the code</font>
+<a name="line456">456: </a><font color="#B22222">  */</font>
+<a name="line457">457: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>(x, y, result));
+<a name="line458">458: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line459">459: </a>}
+
+<a name="line461">461: </a><font color="#B22222">/* -------------------------------------------------------------------------*/</font>
+
+<a name="line463">463: </a><font color="#B22222">/*@</font>
+<a name="line464">464: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a> - Starts a split phase norm computation.</font>
+
+<a name="line466">466: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line467">467: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line468">468: </a><font color="#B22222">.  ntype - norm type, one of `<a href="../../../../manualpages/Vec/NORM_1.html">NORM_1</a>`, `<a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>`, `<a href="../../../../manualpages/Vec/NORM_MAX.html">NORM_MAX</a>`, `<a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>`</font>
+<a name="line469">469: </a><font color="#B22222">-  result - where the result will go (can be `NULL`)</font>
+
+<a name="line471">471: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line473">473: </a><font color="#B22222">   Notes:</font>
+<a name="line474">474: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`.</font>
+
+<a name="line476">476: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`, `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line477">477: </a><font color="#B22222">@*/</font>
+<a name="line478">478: </a><strong><font color="#4169E1"><a name="VecNormBegin"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Vec/NormType.html">NormType</a> ntype, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *result)</font></strong>
+<a name="line479">479: </a>{
+<a name="line480">480: </a>  PetscSplitReduction *sr;
+<a name="line481">481: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>            lresult[2];
+<a name="line482">482: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+
+<a name="line484">484: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line486">486: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line487">487: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line488">488: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;state == STATE_BEGIN, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line489">489: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsbegin &gt;= sr-&gt;maxops || (sr-&gt;numopsbegin == sr-&gt;maxops - 1 &amp;&amp; ntype == <a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>)) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionExtend(sr));
+
+<a name="line491">491: </a>  sr-&gt;invecs[sr-&gt;numopsbegin] = (void *)x;
+<a name="line492">492: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line493">493: </a>  <a href="../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(x, norm_local, ntype, lresult);
+<a name="line494">494: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line495">495: </a>  <font color="#4169E1">if</font> (ntype == <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>) lresult[0] = lresult[0] * lresult[0];
+<a name="line496">496: </a>  <font color="#4169E1">if</font> (ntype == <a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>) lresult[1] = lresult[1] * lresult[1];
+<a name="line497">497: </a>  <font color="#4169E1">if</font> (ntype == <a href="../../../../manualpages/Vec/NORM_MAX.html">NORM_MAX</a>) sr-&gt;reducetype[sr-&gt;numopsbegin] = PETSC_SR_REDUCE_MAX;
+<a name="line498">498: </a>  <font color="#4169E1">else</font> sr-&gt;reducetype[sr-&gt;numopsbegin] = PETSC_SR_REDUCE_SUM;
+<a name="line499">499: </a>  sr-&gt;lvalues[sr-&gt;numopsbegin++] = lresult[0];
+<a name="line500">500: </a>  <font color="#4169E1">if</font> (ntype == <a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>) {
+<a name="line501">501: </a>    sr-&gt;reducetype[sr-&gt;numopsbegin] = PETSC_SR_REDUCE_SUM;
+<a name="line502">502: </a>    sr-&gt;lvalues[sr-&gt;numopsbegin++]  = lresult[1];
+<a name="line503">503: </a>  }
+<a name="line504">504: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line505">505: </a>}
+
+<a name="line507">507: </a><font color="#B22222">/*@</font>
+<a name="line508">508: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a> - Ends a split phase norm computation.</font>
+
+<a name="line510">510: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line511">511: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line512">512: </a><font color="#B22222">.  ntype - norm type, one of `<a href="../../../../manualpages/Vec/NORM_1.html">NORM_1</a>`, `<a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>`, `<a href="../../../../manualpages/Vec/NORM_MAX.html">NORM_MAX</a>`, `<a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>`</font>
+<a name="line513">513: </a><font color="#B22222">-  result - where the result will go</font>
+
+<a name="line515">515: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line517">517: </a><font color="#B22222">   Notes:</font>
+<a name="line518">518: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`.</font>
+
+<a name="line520">520: </a><font color="#B22222">   The `x` vector is not allowed to be `NULL`, otherwise the vector would not have its correctly cached norm value</font>
+
+<a name="line522">522: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`, `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line523">523: </a><font color="#B22222">@*/</font>
+<a name="line524">524: </a><strong><font color="#4169E1"><a name="VecNormEnd"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Vec/NormType.html">NormType</a> ntype, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *result)</font></strong>
+<a name="line525">525: </a>{
+<a name="line526">526: </a>  PetscSplitReduction *sr;
+<a name="line527">527: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+
+<a name="line529">529: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line531">531: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line532">532: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line533">533: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionEnd(sr));
+
+<a name="line535">535: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;numopsend &lt; sr-&gt;numopsbegin, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called VecxxxEnd() more times then VecxxxBegin()"</font>);
+<a name="line536">536: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>((void *)x == sr-&gt;invecs[sr-&gt;numopsend], <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called VecxxxEnd() in a different order or with a different vector than VecxxxBegin()"</font>);
+<a name="line537">537: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;reducetype[sr-&gt;numopsend] == PETSC_SR_REDUCE_MAX || ntype != <a href="../../../../manualpages/Vec/NORM_MAX.html">NORM_MAX</a>, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called <a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>(,<a href="../../../../manualpages/Vec/NORM_MAX.html">NORM_MAX</a>,) on a reduction started with <a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>() or <a href="../../../../manualpages/Vec/NORM_1.html">NORM_1</a> or <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>"</font>);
+<a name="line538">538: </a>  result[0] = <a href="../../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(sr-&gt;gvalues[sr-&gt;numopsend++]);
+
+<a name="line540">540: </a>  <font color="#4169E1">if</font> (ntype == <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>) result[0] = PetscSqrtReal(result[0]);
+<a name="line541">541: </a>  <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ntype == <a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>) {
+<a name="line542">542: </a>    result[1] = <a href="../../../../manualpages/Sys/PetscRealPart.html">PetscRealPart</a>(sr-&gt;gvalues[sr-&gt;numopsend++]);
+<a name="line543">543: </a>    result[1] = PetscSqrtReal(result[1]);
+<a name="line544">544: </a>  }
+<a name="line545">545: </a>  <font color="#4169E1">if</font> (ntype != <a href="../../../../manualpages/Vec/NORM_1_AND_2.html">NORM_1_AND_2</a>) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectComposedDataSetReal.html">PetscObjectComposedDataSetReal</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, NormIds[ntype], result[0]));
+
+<a name="line547">547: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend == sr-&gt;numopsbegin) {
+<a name="line548">548: </a>    sr-&gt;state       = STATE_BEGIN;
+<a name="line549">549: </a>    sr-&gt;numopsend   = 0;
+<a name="line550">550: </a>    sr-&gt;numopsbegin = 0;
+<a name="line551">551: </a>  }
+<a name="line552">552: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line553">553: </a>}
+
+<a name="line555">555: </a><font color="#B22222">/*</font>
+<a name="line556">556: </a><font color="#B22222">   Possibly add</font>
+
+<a name="line558">558: </a><font color="#B22222">     PetscReductionSumBegin/End()</font>
+<a name="line559">559: </a><font color="#B22222">     PetscReductionMaxBegin/End()</font>
+<a name="line560">560: </a><font color="#B22222">     PetscReductionMinBegin/End()</font>
+<a name="line561">561: </a><font color="#B22222">   or have more like MPI with a single function with flag for Op? Like first better</font>
+<a name="line562">562: </a><font color="#B22222">*/</font>
+
+<a name="line564">564: </a><font color="#B22222">/*@</font>
+<a name="line565">565: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a> - Starts a split phase multiple dot product computation.</font>
+
+<a name="line567">567: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line568">568: </a><font color="#B22222">+   x - the first vector</font>
+<a name="line569">569: </a><font color="#B22222">.   nv - number of vectors</font>
+<a name="line570">570: </a><font color="#B22222">.   y - array of vectors</font>
+<a name="line571">571: </a><font color="#B22222">-   result - where the result will go (can be `NULL`)</font>
+
+<a name="line573">573: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line575">575: </a><font color="#B22222">   Notes:</font>
+<a name="line576">576: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>()`.</font>
+
+<a name="line578">578: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line579">579: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line580">580: </a><font color="#B22222">@*/</font>
+<a name="line581">581: </a><strong><font color="#4169E1"><a name="VecMDotBegin"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nv, const <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y[], <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> result[])</font></strong>
+<a name="line582">582: </a>{
+<a name="line583">583: </a>  PetscSplitReduction *sr;
+<a name="line584">584: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+<a name="line585">585: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>             i;
+
+<a name="line587">587: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line588">588: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line589">589: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line590">590: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;state == STATE_BEGIN, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line591">591: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nv; i++) {
+<a name="line592">592: </a>    <font color="#4169E1">if</font> (sr-&gt;numopsbegin + i &gt;= sr-&gt;maxops) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionExtend(sr));
+<a name="line593">593: </a>    sr-&gt;reducetype[sr-&gt;numopsbegin + i] = PETSC_SR_REDUCE_SUM;
+<a name="line594">594: </a>    sr-&gt;invecs[sr-&gt;numopsbegin + i]     = (void *)x;
+<a name="line595">595: </a>  }
+<a name="line596">596: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line597">597: </a>  <a href="../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(x, mdot_local, nv, y, sr-&gt;lvalues + sr-&gt;numopsbegin);
+<a name="line598">598: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line599">599: </a>  sr-&gt;numopsbegin += nv;
+<a name="line600">600: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line601">601: </a>}
+
+<a name="line603">603: </a><font color="#B22222">/*@</font>
+<a name="line604">604: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a> - Ends a split phase multiple dot product computation.</font>
+
+<a name="line606">606: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line607">607: </a><font color="#B22222">+   x - the first vector (can be `NULL`)</font>
+<a name="line608">608: </a><font color="#B22222">.   nv - number of vectors</font>
+<a name="line609">609: </a><font color="#B22222">-   y - array of vectors (can be `NULL`)</font>
+
+<a name="line611">611: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line612">612: </a><font color="#B22222">.   result - where the result will go</font>
+
+<a name="line614">614: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line616">616: </a><font color="#B22222">   Notes:</font>
+<a name="line617">617: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>()`.</font>
+
+<a name="line619">619: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line620">620: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line621">621: </a><font color="#B22222">@*/</font>
+<a name="line622">622: </a><strong><font color="#4169E1"><a name="VecMDotEnd"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nv, const <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y[], <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> result[])</font></strong>
+<a name="line623">623: </a>{
+<a name="line624">624: </a>  PetscSplitReduction *sr;
+<a name="line625">625: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+<a name="line626">626: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>             i;
+
+<a name="line628">628: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line629">629: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line630">630: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line631">631: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionEnd(sr));
+
+<a name="line633">633: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;numopsend &lt; sr-&gt;numopsbegin, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called VecxxxEnd() more times then VecxxxBegin()"</font>);
+<a name="line634">634: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!x || (void *)x == sr-&gt;invecs[sr-&gt;numopsend], <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called VecxxxEnd() in a different order or with a different vector than VecxxxBegin()"</font>);
+<a name="line635">635: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;reducetype[sr-&gt;numopsend] == PETSC_SR_REDUCE_SUM, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONGSTATE</a>, <font color="#666666">"Called <a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>() on a reduction started with <a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()"</font>);
+<a name="line636">636: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nv; i++) result[i] = sr-&gt;gvalues[sr-&gt;numopsend++];
+
+<a name="line638">638: </a>  <font color="#B22222">/*</font>
+<a name="line639">639: </a><font color="#B22222">     We are finished getting all the results so reset to no outstanding requests</font>
+<a name="line640">640: </a><font color="#B22222">  */</font>
+<a name="line641">641: </a>  <font color="#4169E1">if</font> (sr-&gt;numopsend == sr-&gt;numopsbegin) {
+<a name="line642">642: </a>    sr-&gt;state       = STATE_BEGIN;
+<a name="line643">643: </a>    sr-&gt;numopsend   = 0;
+<a name="line644">644: </a>    sr-&gt;numopsbegin = 0;
+<a name="line645">645: </a>  }
+<a name="line646">646: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line647">647: </a>}
+
+<a name="line649">649: </a><font color="#B22222">/*@</font>
+<a name="line650">650: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a> - Starts a split phase transpose multiple dot product computation.</font>
+
+<a name="line652">652: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line653">653: </a><font color="#B22222">+  x - the first vector</font>
+<a name="line654">654: </a><font color="#B22222">.  nv - number of vectors</font>
+<a name="line655">655: </a><font color="#B22222">.  y - array of  vectors</font>
+<a name="line656">656: </a><font color="#B22222">-  result - where the result will go (can be `NULL`)</font>
+
+<a name="line658">658: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line660">660: </a><font color="#B22222">   Notes:</font>
+<a name="line661">661: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a>()`.</font>
+
+<a name="line663">663: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line664">664: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line665">665: </a><font color="#B22222">@*/</font>
+<a name="line666">666: </a><strong><font color="#4169E1"><a name="VecMTDotBegin"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nv, const <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y[], <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> result[])</font></strong>
+<a name="line667">667: </a>{
+<a name="line668">668: </a>  PetscSplitReduction *sr;
+<a name="line669">669: </a>  <a href="../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>             comm;
+<a name="line670">670: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>             i;
+
+<a name="line672">672: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line673">673: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectGetComm.html">PetscObjectGetComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;comm));
+<a name="line674">674: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionGet(comm, &amp;sr));
+<a name="line675">675: </a>  <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(sr-&gt;state == STATE_BEGIN, <a href="../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Called before all VecxxxEnd() called"</font>);
+<a name="line676">676: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; nv; i++) {
+<a name="line677">677: </a>    <font color="#4169E1">if</font> (sr-&gt;numopsbegin + i &gt;= sr-&gt;maxops) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscSplitReductionExtend(sr));
+<a name="line678">678: </a>    sr-&gt;reducetype[sr-&gt;numopsbegin + i] = PETSC_SR_REDUCE_SUM;
+<a name="line679">679: </a>    sr-&gt;invecs[sr-&gt;numopsbegin + i]     = (void *)x;
+<a name="line680">680: </a>  }
+<a name="line681">681: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventBegin.html">PetscLogEventBegin</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line682">682: </a>  <a href="../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(x, mtdot_local, nv, y, sr-&gt;lvalues + sr-&gt;numopsbegin);
+<a name="line683">683: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscLogEventEnd.html">PetscLogEventEnd</a>(VEC_ReduceArithmetic, 0, 0, 0, 0));
+<a name="line684">684: </a>  sr-&gt;numopsbegin += nv;
+<a name="line685">685: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line686">686: </a>}
+
+<a name="line688">688: </a><font color="#B22222">/*@</font>
+<a name="line689">689: </a><font color="#B22222">   <a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a> - Ends a split phase transpose multiple dot product computation.</font>
+
+<a name="line691">691: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line692">692: </a><font color="#B22222">+  x - the first vector (can be `NULL`)</font>
+<a name="line693">693: </a><font color="#B22222">.  nv - number of vectors</font>
+<a name="line694">694: </a><font color="#B22222">-  y - array of  vectors (can be `NULL`)</font>
+
+<a name="line696">696: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line697">697: </a><font color="#B22222">.  result - where the result will go</font>
+
+<a name="line699">699: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line701">701: </a><font color="#B22222">   Notes:</font>
+<a name="line702">702: </a><font color="#B22222">   Each call to `<a href="../../../../manualpages/Vec/VecTDotBegin.html">VecTDotBegin</a>()` should be paired with a call to `<a href="../../../../manualpages/Vec/VecTDotEnd.html">VecTDotEnd</a>()`.</font>
+
+<a name="line704">704: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/Vec/VecMTDotBegin.html">VecMTDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormBegin.html">VecNormBegin</a>()`, `<a href="../../../../manualpages/Vec/VecNormEnd.html">VecNormEnd</a>()`, `<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>()`, `<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>()`, `<a href="../../../../manualpages/Vec/VecMDot.html">VecMDot</a>()`,</font>
+<a name="line705">705: </a><font color="#B22222">          `<a href="../../../../manualpages/Vec/VecDotBegin.html">VecDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecDotEnd.html">VecDotEnd</a>()`, `<a href="../../../../manualpages/Vec/VecMDotBegin.html">VecMDotBegin</a>()`, `<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>()`, `<a href="../../../../manualpages/Vec/PetscCommSplitReductionBegin.html">PetscCommSplitReductionBegin</a>()`</font>
+<a name="line706">706: </a><font color="#B22222">@*/</font>
+<a name="line707">707: </a><strong><font color="#4169E1"><a name="VecMTDotEnd"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../manualpages/Vec/VecMTDotEnd.html">VecMTDotEnd</a>(<a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nv, const <a href="../../../../manualpages/Vec/Vec.html">Vec</a> y[], <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> result[])</font></strong>
+<a name="line708">708: </a>{
+<a name="line709">709: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line710">710: </a>  <font color="#B22222">/*</font>
+<a name="line711">711: </a><font color="#B22222">      MTDotEnd() is the same as MDotEnd() so reuse the code</font>
+<a name="line712">712: </a><font color="#B22222">  */</font>
+<a name="line713">713: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecMDotEnd.html">VecMDotEnd</a>(x, nv, y, result));
+<a name="line714">714: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line715">715: </a>}
+</pre>
+</body>
+
+</html>

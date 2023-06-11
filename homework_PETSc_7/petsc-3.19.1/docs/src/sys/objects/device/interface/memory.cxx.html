@@ -1,0 +1,560 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/sys/objects/device/interface/memory.cxx">Actual source code: memory.cxx</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:44+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsc/private/deviceimpl.h.html">&lt;petsc/private/deviceimpl.h&gt;</A>
+
+<a name="line3">  3: </a>#include <A href="../../../../../include/petsc/private/cpp/register_finalize.hpp.html">&lt;petsc/private/cpp/register_finalize.hpp&gt;</A>
+<a name="line4">  4: </a>#include <A href="../../../../../include/petsc/private/cpp/type_traits.hpp.html">&lt;petsc/private/cpp/type_traits.hpp&gt;</A>
+<a name="line5">  5: </a>#include <A href="../../../../../include/petsc/private/cpp/unordered_map.hpp.html">&lt;petsc/private/cpp/unordered_map.hpp&gt;</A>
+
+<a name="line7">  7: </a><font color="#A020F0">#include &lt;algorithm&gt; // std::find_if</font>
+<a name="line8">  8: </a><font color="#A020F0">#include &lt;cstring&gt;   // std::memset</font>
+
+<a name="line10"> 10: </a>const char *const PetscDeviceCopyModes[] = {<font color="#666666">"host_to_host"</font>, <font color="#666666">"device_to_host"</font>, <font color="#666666">"host_to_device"</font>, <font color="#666666">"device_to_device"</font>, <font color="#666666">"auto"</font>, <font color="#666666">"<a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PetscDeviceCopyMode</a>"</font>, <font color="#666666">"PETSC_DEVICE_COPY_"</font>, nullptr};
+<a name="line11"> 11: </a>static_assert(Petsc::util::to_underlying(<a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_HTOH</a>) == 0, <font color="#666666">""</font>);
+<a name="line12"> 12: </a>static_assert(Petsc::util::to_underlying(<a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_DTOH</a>) == 1, <font color="#666666">""</font>);
+<a name="line13"> 13: </a>static_assert(Petsc::util::to_underlying(<a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_HTOD</a>) == 2, <font color="#666666">""</font>);
+<a name="line14"> 14: </a>static_assert(Petsc::util::to_underlying(<a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_DTOD</a>) == 3, <font color="#666666">""</font>);
+<a name="line15"> 15: </a>static_assert(Petsc::util::to_underlying(<a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_AUTO</a>) == 4, <font color="#666666">""</font>);
+
+<a name="line17"> 17: </a>// GCC implementation <font color="#4169E1">for</font> std::hash&lt;T*&gt;. LLVM's libc++ is almost 2x slower because they <font color="#4169E1">do</font> all
+<a name="line18"> 18: </a>// kinds of complicated murmur hashing, so we make sure to enforce GCC's version.
+<a name="line19"> 19: </a><font color="#4169E1"><a name="PointerHash"></a>struct PointerHash </font>{
+<a name="line20"> 20: </a>  template &lt;typename T&gt;
+<a name="line21"> 21: </a>  <a href="../../../../../manualpages/Sys/PETSC_NODISCARD.html">PETSC_NODISCARD</a> std::size_t operator()(const T *ptr) const noexcept
+<a name="line22"> 22: </a>  {
+<a name="line23"> 23: </a>    <font color="#4169E1">return</font> reinterpret_cast&lt;std::size_t&gt;(ptr);
+<a name="line24"> 24: </a>  }
+<a name="line25"> 25: </a>};
+
+<a name="line27"> 27: </a>// ==========================================================================================
+<a name="line28"> 28: </a>// PointerAttributes
+<a name="line29"> 29: </a>//
+<a name="line30"> 30: </a>// A set of attributes <font color="#4169E1">for</font> a pointer
+<a name="line31"> 31: </a>// ==========================================================================================
+
+<a name="line33"> 33: </a><font color="#4169E1"><a name="PointerAttributes"></a>struct PointerAttributes </font>{
+<a name="line34"> 34: </a>  <a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a>  mtype = <a href="../../../../../manualpages/Sys/PetscMemType.html">PETSC_MEMTYPE_HOST</a>; // memtype of allocation
+<a name="line35"> 35: </a>  <a href="../../../../../manualpages/Sys/PetscObjectId.html">PetscObjectId</a> id    = 0;                  // id of allocation
+<a name="line36"> 36: </a><strong><font color="#FF0000">  std:</font></strong>:size_t   size  = 0;                  // size of allocation (bytes)
+
+<a name="line38"> 38: </a>  // even though this is a POD and can be aggregate initialized, the STL uses () constructors
+<a name="line39"> 39: </a>  // in unordered_map and so we need to provide a trivial constructor...
+<a name="line40"> 40: </a>  constexpr PointerAttributes() = <font color="#4169E1">default</font>;
+<a name="line41"> 41: </a>  constexpr PointerAttributes(<a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a>, <a href="../../../../../manualpages/Sys/PetscObjectId.html">PetscObjectId</a>, std::size_t) noexcept;
+
+<a name="line43"> 43: </a>  bool operator==(const PointerAttributes &amp;) const noexcept;
+
+<a name="line45"> 45: </a>  <a href="../../../../../manualpages/Sys/PETSC_NODISCARD.html">PETSC_NODISCARD</a> bool contains(const void *, const void *) const noexcept;
+<a name="line46"> 46: </a>};
+
+<a name="line48"> 48: </a>// ==========================================================================================
+<a name="line49"> 49: </a>// PointerAttributes - Public API
+<a name="line50"> 50: </a>// ==========================================================================================
+
+<a name="line52"> 52: </a>inline constexpr PointerAttributes::PointerAttributes(<a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> mtype_, <a href="../../../../../manualpages/Sys/PetscObjectId.html">PetscObjectId</a> id_, std::size_t size_) noexcept : mtype(mtype_), id(id_), size(size_) { }
+
+<a name="line54"> 54: </a>inline bool PointerAttributes::operator==(const PointerAttributes &amp;other) const noexcept
+<a name="line55"> 55: </a>{
+<a name="line56"> 56: </a>  <font color="#4169E1">return</font> (mtype == other.mtype) &amp;&amp; (id == other.id) &amp;&amp; (size == other.size);
+<a name="line57"> 57: </a>}
+
+<a name="line59"> 59: </a><font color="#B22222">/*</font>
+<a name="line60"> 60: </a><font color="#B22222">  PointerAttributes::contains - asks and answers the question, does ptr_begin contain ptr</font>
+
+<a name="line62"> 62: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line63"> 63: </a><font color="#B22222">+ ptr_begin - pointer to the start of the range to check</font>
+<a name="line64"> 64: </a><font color="#B22222">- ptr       - the pointer to query</font>
+
+<a name="line66"> 66: </a><font color="#B22222">  Notes:</font>
+<a name="line67"> 67: </a><font color="#B22222">  Returns true if ptr falls within ptr_begins range, false otherwise.</font>
+<a name="line68"> 68: </a><font color="#B22222">*/</font>
+<a name="line69"> 69: </a>inline bool PointerAttributes::contains(const void *ptr_begin, const void *ptr) const noexcept
+<a name="line70"> 70: </a>{
+<a name="line71"> 71: </a>  <font color="#4169E1">return</font> (ptr &gt;= ptr_begin) &amp;&amp; (ptr &lt; (static_cast&lt;const char *&gt;(ptr_begin) + size));
+<a name="line72"> 72: </a>}
+
+<a name="line74"> 74: </a>// ==========================================================================================
+<a name="line75"> 75: </a>// MemoryMap
+<a name="line76"> 76: </a>//
+<a name="line77"> 77: </a>// Since the pointers allocated via PetscDeviceAllocate_Private() may be device pointers we
+<a name="line78"> 78: </a>// cannot just store meta-data within the pointer itself (as we can't dereference them). So
+<a name="line79"> 79: </a>// instead we need to keep an extra map to keep track of them
+<a name="line80"> 80: </a>//
+<a name="line81"> 81: </a>// Each entry maps pointer -&gt; {
+<a name="line82"> 82: </a>//   <a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a>  - The memtype of the pointer
+<a name="line83"> 83: </a>//   <a href="../../../../../manualpages/Sys/PetscObjectId.html">PetscObjectId</a> - A unique ID assigned at allocation or registration so auto-dep can
+<a name="line84"> 84: </a>//                   identify the pointer
+<a name="line85"> 85: </a>//   size          - The size (in bytes) of the allocation
+<a name="line86"> 86: </a>// }
+<a name="line87"> 87: </a>// ==========================================================================================
+
+<a name="line89"> 89: </a>class MemoryMap : public Petsc::RegisterFinalizeable&lt;MemoryMap&gt; {
+<a name="line90"> 90: </a><strong><font color="#FF0000">public:</font></strong>
+<a name="line91"> 91: </a>  using map_type = Petsc::UnorderedMap&lt;void *, PointerAttributes, PointerHash&gt;;
+
+<a name="line93"> 93: </a>  map_type map{};
+
+<a name="line95"> 95: </a>  <a href="../../../../../manualpages/Sys/PETSC_NODISCARD.html">PETSC_NODISCARD</a> map_type::const_iterator search_for(const void *, bool = false) const noexcept;
+
+<a name="line97"> 97: </a><strong><font color="#FF0000">private:</font></strong>
+<a name="line98"> 98: </a>  friend class Petsc::RegisterFinalizeable&lt;MemoryMap&gt;;
+<a name="line99"> 99: </a>  <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> register_finalize_() noexcept;
+<a name="line100">100: </a>  <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> finalize_() noexcept;
+<a name="line101">101: </a>};
+
+<a name="line103">103: </a>// ==========================================================================================
+<a name="line104">104: </a>// MemoryMap - Private API
+<a name="line105">105: </a>// ==========================================================================================
+
+<a name="line107">107: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MemoryMap::register_finalize_() noexcept
+<a name="line108">108: </a>{
+<a name="line109">109: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line110">110: </a>  // Preallocate, this does give a modest performance bump since unordered_map is so __dog__
+<a name="line111">111: </a>  // slow <font color="#4169E1">if</font> it needs to rehash. Experiments show that users tend not to have more than 5 or
+<a name="line112">112: </a>  // so concurrently live pointers lying around. 10 at most.
+<a name="line113">113: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(map.reserve(16));
+<a name="line114">114: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line115">115: </a>}
+
+<a name="line117">117: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MemoryMap::finalize_() noexcept
+<a name="line118">118: </a>{
+<a name="line119">119: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line120">120: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(nullptr, <font color="#666666">"Finalizing memory map\n"</font>));
+<a name="line121">121: </a>  <a href="../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(map = map_type{});
+<a name="line122">122: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line123">123: </a>}
+
+<a name="line125">125: </a>// ==========================================================================================
+<a name="line126">126: </a>// MemoryMap - Public API
+<a name="line127">127: </a>// ==========================================================================================
+
+<a name="line129">129: </a><font color="#B22222">/*</font>
+<a name="line130">130: </a><font color="#B22222">  MemoryMap::search_for - retrieve an iterator to the key-value pair for a pointer in the map</font>
+
+<a name="line132">132: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line133">133: </a><font color="#B22222">+ ptr       - pointer to search for</font>
+<a name="line134">134: </a><font color="#B22222">- must_find - true if an error is raised if the pointer is not found (default: false)</font>
+
+<a name="line136">136: </a><font color="#B22222">  Notes:</font>
+<a name="line137">137: </a><font color="#B22222">  Accounts for sub-regions, i.e. if ptr is contained within another pointers region, it returns</font>
+<a name="line138">138: </a><font color="#B22222">  the iterator to the super-pointers key-value pair.</font>
+
+<a name="line140">140: </a><font color="#B22222">  If ptr is not found and must_find is false returns map.end(), otherwise raises an error</font>
+<a name="line141">141: </a><font color="#B22222">*/</font>
+<a name="line142">142: </a><strong><font color="#FF0000">MemoryMap:</font></strong>:map_type::const_iterator MemoryMap::search_for(const void *ptr, bool must_find) const noexcept
+<a name="line143">143: </a>{
+<a name="line144">144: </a>  const auto end_it = map.end();
+<a name="line145">145: </a>  auto       it     = map.find(const_cast&lt;map_type::key_type&gt;(ptr));
+
+<a name="line147">147: </a>  // ptr was found, and points to an entire block
+<a name="line148">148: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line149">149: </a>  <font color="#4169E1">if</font> (it != end_it) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(it);
+<a name="line150">150: </a>  // wasn't found, but maybe its part of a block. have to search every block <font color="#4169E1">for</font> it
+<a name="line151">151: </a>  // clang-format off
+<a name="line152">152: </a>  it = std::find_if(map.begin(), end_it, [ptr](map_type::const_iterator::reference map_it) {
+<a name="line153">153: </a>    <font color="#4169E1">return</font> map_it.second.contains(map_it.first, ptr);
+<a name="line154">154: </a>  });
+<a name="line155">155: </a>  // clang-format on
+<a name="line156">156: </a>  <a href="../../../../../manualpages/Sys/PetscCheckAbort.html">PetscCheckAbort</a>(!must_find || it != end_it, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_POINTER</a>, <font color="#666666">"Pointer %p was not registered with the memory tracker, call <a href="../../../../../manualpages/Sys/PetscDeviceRegisterMemory.html">PetscDeviceRegisterMemory</a>() on it"</font>, ptr);
+<a name="line157">157: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(it);
+<a name="line158">158: </a>}
+
+<a name="line160">160: </a>static MemoryMap memory_map;
+
+<a name="line162">162: </a>// ==========================================================================================
+<a name="line163">163: </a>// Utility functions
+<a name="line164">164: </a>// ==========================================================================================
+
+<a name="line166">166: </a><strong><font color="#4169E1"><a name="PetscDeviceCheckCapable_Private"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscDeviceCheckCapable_Private(<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a> dctx, bool cond, const char descr[])</font></strong>
+<a name="line167">167: </a>{
+<a name="line168">168: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line169">169: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(cond, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Device context (id: %"</font> PetscInt64_FMT <font color="#666666">", name: %s, type: %s) can only handle %s host memory"</font>, PetscObjectCast(dctx)-&gt;id, PetscObjectCast(dctx)-&gt;name, dctx-&gt;device ? PetscDeviceTypes[dctx-&gt;device-&gt;type] : <font color="#666666">"unknown"</font>, descr);
+<a name="line170">170: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line171">171: </a>}
+
+<a name="line173">173: </a>// A helper utility, since register is called from <a href="../../../../../manualpages/Sys/PetscDeviceRegisterMemory.html">PetscDeviceRegisterMemory</a>() and
+<a name="line174">174: </a>// PetscDevicAllocate(). The latter also needs the generated id, so instead of making it search
+<a name="line175">175: </a>// the map again we just <font color="#4169E1">return</font> it here
+<a name="line176">176: </a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscDeviceRegisterMemory_Private(const void *PETSC_RESTRICT ptr, <a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> mtype, std::size_t size, <a href="../../../../../manualpages/Sys/PetscObjectId.html">PetscObjectId</a> *PETSC_RESTRICT id = nullptr)
+<a name="line177">177: </a>{
+<a name="line178">178: </a>  auto      &amp;map = memory_map.map;
+<a name="line179">179: </a>  const auto it  = memory_map.search_for(ptr);
+
+<a name="line181">181: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line182">182: </a>  <font color="#4169E1">if</font> (it == map.cend()) {
+<a name="line183">183: </a>    // pointer was never registered with the map, insert it and bail
+<a name="line184">184: </a>    const auto newid = PetscObjectNewId_Internal();
+
+<a name="line186">186: </a>    <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)) {
+<a name="line187">187: </a>      const auto tmp = PointerAttributes(mtype, newid, size);
+
+<a name="line189">189: </a>      <font color="#4169E1">for</font> (const auto &amp;entry : map) {
+<a name="line190">190: </a>        auto &amp;&amp;attr = entry.second;
+
+<a name="line192">192: </a>        // REVIEW ME: maybe this should just be handled...
+<a name="line193">193: </a>        <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!tmp.contains(ptr, entry.first), <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ORDER</a>, <font color="#666666">"Trying to register pointer %p (memtype %s, size %zu) but it appears you have already registered a sub-region of it (pointer %p, memtype %s, size %zu). Must register the larger region first"</font>, ptr, PetscMemTypeToString(mtype), size,
+<a name="line194">194: </a>                   entry.first, PetscMemTypeToString(attr.mtype), attr.size);
+<a name="line195">195: </a>      }
+<a name="line196">196: </a>    }
+<a name="line197">197: </a>    // clang-format off
+<a name="line198">198: </a>    <font color="#4169E1">if</font> (id) *id = newid;
+<a name="line199">199: </a>    <a href="../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(map.emplace(
+<a name="line200">200: </a><strong><font color="#FF0000">      std:</font></strong>:piecewise_construct,
+<a name="line201">201: </a><strong><font color="#FF0000">      std:</font></strong>:forward_as_tuple(const_cast&lt;MemoryMap::map_type::key_type&gt;(ptr)),
+<a name="line202">202: </a><strong><font color="#FF0000">      std:</font></strong>:forward_as_tuple(mtype, newid, size)
+<a name="line203">203: </a>    ));
+<a name="line204">204: </a>    // clang-format on
+<a name="line205">205: </a>    <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line206">206: </a>  }
+<a name="line207">207: </a>  <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)) {
+<a name="line208">208: </a>    const auto &amp;old = it-&gt;second;
+
+<a name="line210">210: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(PointerAttributes(mtype, old.id, size) == old, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Pointer %p appears to have been previously allocated with memtype %s, size %zu and assigned id %"</font> PetscInt64_FMT <font color="#666666">", which does not match new values: (mtype %s, size %zu, id %"</font> PetscInt64_FMT <font color="#666666">")"</font>, it-&gt;first,
+<a name="line211">211: </a>               PetscMemTypeToString(old.mtype), old.size, old.id, PetscMemTypeToString(mtype), size, old.id);
+<a name="line212">212: </a>  }
+<a name="line213">213: </a>  <font color="#4169E1">if</font> (id) *id = it-&gt;second.id;
+<a name="line214">214: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line215">215: </a>}
+
+<a name="line217">217: </a><font color="#B22222">/*@C</font>
+<a name="line218">218: </a><font color="#B22222">  <a href="../../../../../manualpages/Sys/PetscDeviceRegisterMemory.html">PetscDeviceRegisterMemory</a> - Register a pointer for use with device-aware memory system</font>
+
+<a name="line220">220: </a><font color="#B22222">  Not Collective</font>
+
+<a name="line222">222: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line223">223: </a><font color="#B22222">+ ptr   - The pointer to register</font>
+<a name="line224">224: </a><font color="#B22222">. mtype - The `<a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a>` of the pointer</font>
+<a name="line225">225: </a><font color="#B22222">- size  - The size (in bytes) of the memory region</font>
+
+<a name="line227">227: </a><font color="#B22222">  Notes:</font>
+<a name="line228">228: </a><font color="#B22222">  `ptr` need not point to the beginning of the memory range, however the user should register</font>
+<a name="line229">229: </a><font color="#B22222">  the</font>
+
+<a name="line231">231: </a><font color="#B22222">  It's OK to re-register the same `ptr` repeatedly (subsequent registrations do nothing)</font>
+<a name="line232">232: </a><font color="#B22222">  however the given `mtype` and `size` must match the original registration.</font>
+
+<a name="line234">234: </a><font color="#B22222">  `size` may be 0 (in which case this routine does nothing).</font>
+
+<a name="line236">236: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line238">238: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceArrayCopy.html">PetscDeviceArrayCopy</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()`,</font>
+<a name="line239">239: </a><font color="#B22222">`<a href="../../../../../manualpages/Sys/PetscDeviceArrayZero.html">PetscDeviceArrayZero</a>()`</font>
+<a name="line240">240: </a><font color="#B22222">@*/</font>
+<a name="line241">241: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Sys/PetscDeviceRegisterMemory.html">PetscDeviceRegisterMemory</a>(const void *PETSC_RESTRICT ptr, <a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> mtype, std::size_t size)
+<a name="line242">242: </a>{
+<a name="line243">243: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line245">245: </a>  <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscUnlikely.html">PetscUnlikely</a>(!size)) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>); // there is no point registering empty range
+<a name="line246">246: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceRegisterMemory_Private(ptr, mtype, size));
+<a name="line247">247: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line248">248: </a>}
+
+<a name="line250">250: </a><font color="#B22222">/*</font>
+<a name="line251">251: </a><font color="#B22222">  PetscDeviceAllocate_Private - Allocate device-aware memory</font>
+
+<a name="line253">253: </a><font color="#B22222">  Not Collective, Asynchronous, Auto-dependency aware</font>
+
+<a name="line255">255: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line256">256: </a><font color="#B22222">+ dctx      - The `<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a>` used to allocate the memory</font>
+<a name="line257">257: </a><font color="#B22222">. clear     - Whether or not the memory should be zeroed</font>
+<a name="line258">258: </a><font color="#B22222">. mtype     - The type of memory to allocate</font>
+<a name="line259">259: </a><font color="#B22222">. n         - The amount (in bytes) to allocate</font>
+<a name="line260">260: </a><font color="#B22222">- alignment - The alignment requirement (in bytes) of the allocated pointer</font>
+
+<a name="line262">262: </a><font color="#B22222">  Output Parameter:</font>
+<a name="line263">263: </a><font color="#B22222">. ptr - The pointer to store the result in</font>
+
+<a name="line265">265: </a><font color="#B22222">  Notes:</font>
+<a name="line266">266: </a><font color="#B22222">  The user should prefer `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()` over this routine as it automatically computes</font>
+<a name="line267">267: </a><font color="#B22222">  the size of the allocation and alignment based on the size of the datatype.</font>
+
+<a name="line269">269: </a><font color="#B22222">  If the user is unsure about `alignment` -- or unable to compute it -- passing</font>
+<a name="line270">270: </a><font color="#B22222">  `PETSC_MEMALIGN` will always work, though the user should beware that this may be quite</font>
+<a name="line271">271: </a><font color="#B22222">  wasteful for very small allocations.</font>
+
+<a name="line273">273: </a><font color="#B22222">  Memory allocated with this function must be freed with `<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()` (or</font>
+<a name="line274">274: </a><font color="#B22222">  `PetscDeviceDeallocate_Private()`).</font>
+
+<a name="line276">276: </a><font color="#B22222">  If `n` is zero, then `ptr` is set to `<a href="../../../../../manualpages/Sys/PETSC_NULLPTR.html">PETSC_NULLPTR</a>`.</font>
+
+<a name="line278">278: </a><font color="#B22222">  This routine falls back to using `<a href="../../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>()` or `<a href="../../../../../manualpages/Sys/PetscCalloc1.html">PetscCalloc1</a>()` (depending on the value</font>
+<a name="line279">279: </a><font color="#B22222">  of `clear`) if PETSc was not configured with device support. The user should note that</font>
+<a name="line280">280: </a><font color="#B22222">  `mtype` and `alignment` are ignored in this case, as these routines allocate only host memory</font>
+<a name="line281">281: </a><font color="#B22222">  aligned to `PETSC_MEMALIGN`.</font>
+
+<a name="line283">283: </a><font color="#B22222">  Note result stored `ptr` is immediately valid and the user may freely inspect or manipulate</font>
+<a name="line284">284: </a><font color="#B22222">  its value on function return, i.e.\:</font>
+
+<a name="line286">286: </a><font color="#B22222">.vb</font>
+<a name="line287">287: </a><font color="#B22222">  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *ptr;</font>
+
+<a name="line289">289: </a><font color="#B22222">  PetscDeviceAllocate_Private(dctx, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, <a href="../../../../../manualpages/Sys/PetscMemType.html">PETSC_MEMTYPE_DEVICE</a>, 20, alignof(<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>), (void**)&amp;ptr);</font>
+
+<a name="line291">291: </a><font color="#B22222">  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *sub_ptr = ptr + 10; // OK, no need to synchronize</font>
+
+<a name="line293">293: </a><font color="#B22222">  ptr[0] = 10; // ERROR, directly accessing contents of ptr is undefined until synchronization</font>
+<a name="line294">294: </a><font color="#B22222">.ve</font>
+
+<a name="line296">296: </a><font color="#B22222">  DAG representation:</font>
+<a name="line297">297: </a><font color="#B22222">.vb</font>
+<a name="line298">298: </a><font color="#B22222">  time -&gt;</font>
+
+<a name="line300">300: </a><font color="#B22222">  -&gt; dctx - |= CALL =| -\- dctx --&gt;</font>
+<a name="line301">301: </a><font color="#B22222">                         \- ptr -&gt;</font>
+<a name="line302">302: </a><font color="#B22222">.ve</font>
+
+<a name="line304">304: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line306">306: </a><font color="#B22222">.N ASYNC_API</font>
+
+<a name="line308">308: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()`, `PetscDeviceDeallocate_Private()`,</font>
+<a name="line309">309: </a><font color="#B22222">`<a href="../../../../../manualpages/Sys/PetscDeviceArrayCopy.html">PetscDeviceArrayCopy</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceArrayZero.html">PetscDeviceArrayZero</a>()`, `<a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a>`</font>
+<a name="line310">310: </a><font color="#B22222">*/</font>
+<a name="line311">311: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscDeviceAllocate_Private(<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a> dctx, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> clear, <a href="../../../../../manualpages/Sys/PetscMemType.html">PetscMemType</a> mtype, std::size_t n, std::size_t alignment, void **PETSC_RESTRICT ptr)
+<a name="line312">312: </a>{
+<a name="line313">313: </a>  <a href="../../../../../manualpages/Sys/PetscObjectId.html">PetscObjectId</a> id = 0;
+
+<a name="line315">315: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line316">316: </a>  <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)) {
+<a name="line317">317: </a>    const auto is_power_of_2 = [](std::size_t num) { <font color="#4169E1">return</font> (num &amp; (num - 1)) == 0; };
+
+<a name="line319">319: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(alignment != 0, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Requested alignment %zu cannot be 0"</font>, alignment);
+<a name="line320">320: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(is_power_of_2(alignment), <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"Requested alignment %zu must be a power of 2"</font>, alignment);
+<a name="line321">321: </a>  }
+<a name="line323">323: </a>  *ptr = nullptr;
+<a name="line324">324: </a>  <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscUnlikely.html">PetscUnlikely</a>(!n)) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line325">325: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(memory_map.register_finalize());
+<a name="line326">326: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceContextGetOptionalNullContext_Internal(&amp;dctx));
+
+<a name="line328">328: </a>  // get our pointer here
+<a name="line329">329: </a>  <font color="#4169E1">if</font> (dctx-&gt;ops-&gt;memalloc) {
+<a name="line330">330: </a>    <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(dctx, memalloc, clear, mtype, n, alignment, ptr);
+<a name="line331">331: </a>  } <font color="#4169E1">else</font> {
+<a name="line332">332: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceCheckCapable_Private(dctx, PetscMemTypeHost(mtype), <font color="#666666">"allocating"</font>));
+<a name="line333">333: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMallocA.html">PetscMallocA</a>(1, clear, __LINE__, PETSC_FUNCTION_NAME, __FILE__, n, ptr));
+<a name="line334">334: </a>  }
+<a name="line335">335: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceRegisterMemory_Private(*ptr, mtype, n, &amp;id));
+<a name="line336">336: </a>  // Note this is a <font color="#666666">"write"</font> so that the next dctx to try and read from the pointer has to wait
+<a name="line337">337: </a>  // <font color="#4169E1">for</font> the allocation to be ready
+<a name="line338">338: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContextMarkIntentFromID.html">PetscDeviceContextMarkIntentFromID</a>(dctx, id, <a href="../../../../../manualpages/Sys/PetscMemoryAccessMode.html">PETSC_MEMORY_ACCESS_WRITE</a>, <font color="#666666">"memory allocation"</font>));
+<a name="line339">339: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line340">340: </a>}
+
+<a name="line342">342: </a><font color="#B22222">/*</font>
+<a name="line343">343: </a><font color="#B22222">  PetscDeviceDeallocate_Private - Free device-aware memory</font>
+
+<a name="line345">345: </a><font color="#B22222">  Not Collective, Asynchronous, Auto-dependency aware</font>
+
+<a name="line347">347: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line348">348: </a><font color="#B22222">+ dctx  - The `<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a>` used to free the memory</font>
+<a name="line349">349: </a><font color="#B22222">- ptr   - The pointer to free</font>
+
+<a name="line351">351: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line353">353: </a><font color="#B22222">  Notes:</font>
+<a name="line354">354: </a><font color="#B22222">  `ptr` must have been allocated using any of `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceCalloc.html">PetscDeviceCalloc</a>()` or</font>
+<a name="line355">355: </a><font color="#B22222">  `PetscDeviceAllocate_Private()`, or registered with the system via `<a href="../../../../../manualpages/Sys/PetscDeviceRegisterMemory.html">PetscDeviceRegisterMemory</a>()`.</font>
+
+<a name="line357">357: </a><font color="#B22222">  The user should prefer `<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()` over this routine as it automatically sets `ptr`</font>
+<a name="line358">358: </a><font color="#B22222">  to `<a href="../../../../../manualpages/Sys/PETSC_NULLPTR.html">PETSC_NULLPTR</a>` on successful deallocation.</font>
+
+<a name="line360">360: </a><font color="#B22222">  `ptr` may be `NULL`.</font>
+
+<a name="line362">362: </a><font color="#B22222">  This routine falls back to using `<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>()` if PETSc was not configured with device</font>
+<a name="line363">363: </a><font color="#B22222">  support. The user should note that `<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>()` frees only host memory.</font>
+
+<a name="line365">365: </a><font color="#B22222">  DAG representation:</font>
+<a name="line366">366: </a><font color="#B22222">.vb</font>
+<a name="line367">367: </a><font color="#B22222">  time -&gt;</font>
+
+<a name="line369">369: </a><font color="#B22222">  -&gt; dctx -/- |= CALL =| - dctx -&gt;</font>
+<a name="line370">370: </a><font color="#B22222">  -&gt; ptr -/</font>
+<a name="line371">371: </a><font color="#B22222">.ve</font>
+
+<a name="line373">373: </a><font color="#B22222">.N ASYNC_API</font>
+
+<a name="line375">375: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()`, `PetscDeviceAllocate_Private()`</font>
+<a name="line376">376: </a><font color="#B22222">*/</font>
+<a name="line377">377: </a><strong><font color="#4169E1"><a name="PetscDeviceDeallocate_Private"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscDeviceDeallocate_Private(<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a> dctx, void *PETSC_RESTRICT ptr)</font></strong>
+<a name="line378">378: </a>{
+<a name="line379">379: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line380">380: </a>  <font color="#4169E1">if</font> (ptr) {
+<a name="line381">381: </a>    auto      &amp;map      = memory_map.map;
+<a name="line382">382: </a>    const auto found_it = map.find(const_cast&lt;MemoryMap::map_type::key_type&gt;(ptr));
+
+<a name="line384">384: </a>    <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscUnlikelyDebug.html">PetscUnlikelyDebug</a>(found_it == map.end())) {
+<a name="line385">385: </a>      // OK this is a bad pointer, now determine why
+<a name="line386">386: </a>      const auto it = memory_map.search_for(ptr);
+
+<a name="line388">388: </a>      // <font color="#4169E1">if</font> it is map.cend() then no allocation owns it, meaning it was not allocated by us!
+<a name="line389">389: </a>      <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(it != map.cend(), <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Pointer %p was not allocated via PetscDeviceAllocate_Private()"</font>, ptr);
+<a name="line390">390: </a>      // <font color="#4169E1">if</font> we are here then we did allocate it but the user has tried to <font color="#4169E1">do</font> something along
+<a name="line391">391: </a>      // the lines of:
+<a name="line392">392: </a>      //
+<a name="line393">393: </a>      // allocate(&amp;ptr, size);
+<a name="line394">394: </a>      // deallocate(ptr+5);
+<a name="line395">395: </a>      //
+<a name="line396">396: </a>      auto &amp;&amp;attr = it-&gt;second;
+<a name="line397">397: </a>      <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(<a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_WRONG</a>, <font color="#666666">"Attempting to deallocate pointer %p which is a suballocation of %p (memtype %s, id %"</font> PetscInt64_FMT <font color="#666666">", size %zu bytes)"</font>, ptr, it-&gt;first, PetscMemTypeToString(attr.mtype), attr.id, attr.size);
+<a name="line398">398: </a>    }
+<a name="line399">399: </a>    auto &amp;&amp;attr = found_it-&gt;second;
+<a name="line400">400: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceContextGetOptionalNullContext_Internal(&amp;dctx));
+<a name="line401">401: </a>    // mark intent BEFORE we free, note we mark as write so that we are made to wait on any
+<a name="line402">402: </a>    // outstanding reads (don't want to kill the pointer before they are done)
+<a name="line403">403: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContextMarkIntentFromID.html">PetscDeviceContextMarkIntentFromID</a>(dctx, attr.id, <a href="../../../../../manualpages/Sys/PetscMemoryAccessMode.html">PETSC_MEMORY_ACCESS_WRITE</a>, <font color="#666666">"memory deallocation"</font>));
+<a name="line404">404: </a>    // <font color="#4169E1">do</font> free
+<a name="line405">405: </a>    <font color="#4169E1">if</font> (dctx-&gt;ops-&gt;memfree) {
+<a name="line406">406: </a>      <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(dctx, memfree, attr.mtype, (void **)&amp;ptr);
+<a name="line407">407: </a>    } <font color="#4169E1">else</font> {
+<a name="line408">408: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceCheckCapable_Private(dctx, PetscMemTypeHost(attr.mtype), <font color="#666666">"freeing"</font>));
+<a name="line409">409: </a>    }
+<a name="line410">410: </a>    // <font color="#4169E1">if</font> ptr still exists, then the device context could not handle it
+<a name="line411">411: </a>    <font color="#4169E1">if</font> (ptr) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(ptr));
+<a name="line412">412: </a>    <a href="../../../../../manualpages/Sys/PetscCallCXX.html">PetscCallCXX</a>(map.erase(found_it));
+<a name="line413">413: </a>  }
+<a name="line414">414: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line415">415: </a>}
+
+<a name="line417">417: </a><font color="#B22222">/*@C</font>
+<a name="line418">418: </a><font color="#B22222">  <a href="../../../../../manualpages/Sys/PetscDeviceMemcpy.html">PetscDeviceMemcpy</a> - Copy memory in a device-aware manner</font>
+
+<a name="line420">420: </a><font color="#B22222">  Not Collective, Asynchronous, Auto-dependency aware</font>
+
+<a name="line422">422: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line423">423: </a><font color="#B22222">+ dctx - The `<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a>` used to copy the memory</font>
+<a name="line424">424: </a><font color="#B22222">. dest - The pointer to copy to</font>
+<a name="line425">425: </a><font color="#B22222">. src  - The pointer to copy from</font>
+<a name="line426">426: </a><font color="#B22222">- n    - The amount (in bytes) to copy</font>
+
+<a name="line428">428: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line430">430: </a><font color="#B22222">  Notes:</font>
+<a name="line431">431: </a><font color="#B22222">  Both `dest` and `src` must have been allocated by `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()` or</font>
+<a name="line432">432: </a><font color="#B22222">  `<a href="../../../../../manualpages/Sys/PetscDeviceCalloc.html">PetscDeviceCalloc</a>()`.</font>
+
+<a name="line434">434: </a><font color="#B22222">  `src` and `dest` cannot overlap.</font>
+
+<a name="line436">436: </a><font color="#B22222">  If both `src` and `dest` are on the host this routine is fully synchronous.</font>
+
+<a name="line438">438: </a><font color="#B22222">  The user should prefer `<a href="../../../../../manualpages/Sys/PetscDeviceArrayCopy.html">PetscDeviceArrayCopy</a>()` over this routine as it automatically</font>
+<a name="line439">439: </a><font color="#B22222">  computes the number of bytes to copy from the size of the pointer types.</font>
+
+<a name="line441">441: </a><font color="#B22222">  DAG representation:</font>
+<a name="line442">442: </a><font color="#B22222">.vb</font>
+<a name="line443">443: </a><font color="#B22222">  time -&gt;</font>
+
+<a name="line445">445: </a><font color="#B22222">  -&gt; dctx - |= CALL =| - dctx -&gt;</font>
+<a name="line446">446: </a><font color="#B22222">  -&gt; dest ---------------------&gt;</font>
+<a name="line447">447: </a><font color="#B22222">  -&gt; src ----------------------&gt;</font>
+<a name="line448">448: </a><font color="#B22222">.ve</font>
+
+<a name="line450">450: </a><font color="#B22222">.N ASYNC_API</font>
+
+<a name="line452">452: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Sys/PetscDeviceArrayCopy.html">PetscDeviceArrayCopy</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceCalloc.html">PetscDeviceCalloc</a>()`,</font>
+<a name="line453">453: </a><font color="#B22222">`<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()`</font>
+<a name="line454">454: </a><font color="#B22222">@*/</font>
+<a name="line455">455: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Sys/PetscDeviceMemcpy.html">PetscDeviceMemcpy</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a> dctx, void *PETSC_RESTRICT dest, const void *PETSC_RESTRICT src, std::size_t n)
+<a name="line456">456: </a>{
+<a name="line457">457: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line458">458: </a>  <font color="#4169E1">if</font> (!n) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line459">459: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dest, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_POINTER</a>, <font color="#666666">"Trying to copy to a NULL pointer"</font>);
+<a name="line460">460: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(src, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_POINTER</a>, <font color="#666666">"Trying to copy from a NULL pointer"</font>);
+<a name="line461">461: </a>  <font color="#4169E1">if</font> (dest == src) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line462">462: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceContextGetOptionalNullContext_Internal(&amp;dctx));
+<a name="line463">463: </a>  {
+<a name="line464">464: </a>    const auto &amp;dest_attr = memory_map.search_for(dest, true)-&gt;second;
+<a name="line465">465: </a>    const auto &amp;src_attr  = memory_map.search_for(src, true)-&gt;second;
+<a name="line466">466: </a>    const auto  mode      = PetscMemTypeToDeviceCopyMode(dest_attr.mtype, src_attr.mtype);
+
+<a name="line468">468: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContextMarkIntentFromID.html">PetscDeviceContextMarkIntentFromID</a>(dctx, src_attr.id, <a href="../../../../../manualpages/Sys/PetscMemoryAccessMode.html">PETSC_MEMORY_ACCESS_READ</a>, <font color="#666666">"memory copy (src)"</font>));
+<a name="line469">469: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContextMarkIntentFromID.html">PetscDeviceContextMarkIntentFromID</a>(dctx, dest_attr.id, <a href="../../../../../manualpages/Sys/PetscMemoryAccessMode.html">PETSC_MEMORY_ACCESS_WRITE</a>, <font color="#666666">"memory copy (dest)"</font>));
+<a name="line470">470: </a>    // perform the copy
+<a name="line471">471: </a>    <font color="#4169E1">if</font> (dctx-&gt;ops-&gt;memcopy) {
+<a name="line472">472: </a>      <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(dctx, memcopy, dest, src, n, mode);
+<a name="line473">473: </a>      <font color="#4169E1">if</font> (mode == <a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_HTOD</a>) {
+<a name="line474">474: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscLogCpuToGpu(n));
+<a name="line475">475: </a>      } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (mode == <a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_DTOH</a>) {
+<a name="line476">476: </a>        <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscLogGpuToCpu(n));
+<a name="line477">477: </a>      }
+<a name="line478">478: </a>    } <font color="#4169E1">else</font> {
+<a name="line479">479: </a>      // REVIEW ME: we might potentially need to sync here <font color="#4169E1">if</font> the memory is device-allocated
+<a name="line480">480: </a>      // (pinned) but being copied by a host dctx
+<a name="line481">481: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceCheckCapable_Private(dctx, mode == <a href="../../../../../manualpages/Sys/PetscDeviceCopyMode.html">PETSC_DEVICE_COPY_HTOH</a>, <font color="#666666">"copying"</font>));
+<a name="line482">482: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscMemcpy.html">PetscMemcpy</a>(dest, src, n));
+<a name="line483">483: </a>    }
+<a name="line484">484: </a>  }
+<a name="line485">485: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line486">486: </a>}
+
+<a name="line488">488: </a><font color="#B22222">/*@C</font>
+<a name="line489">489: </a><font color="#B22222">  <a href="../../../../../manualpages/Sys/PetscDeviceMemset.html">PetscDeviceMemset</a> - Memset device-aware memory</font>
+
+<a name="line491">491: </a><font color="#B22222">  Not Collective, Asynchronous, Auto-dependency aware</font>
+
+<a name="line493">493: </a><font color="#B22222">  Input Parameters:</font>
+<a name="line494">494: </a><font color="#B22222">+ dctx  - The `<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a>` used to memset the memory</font>
+<a name="line495">495: </a><font color="#B22222">. ptr   - The pointer to the memory</font>
+<a name="line496">496: </a><font color="#B22222">. v     - The value to set</font>
+<a name="line497">497: </a><font color="#B22222">- n     - The amount (in bytes) to set</font>
+
+<a name="line499">499: </a><font color="#B22222">  Level: intermediate</font>
+
+<a name="line501">501: </a><font color="#B22222">  Notes:</font>
+<a name="line502">502: </a><font color="#B22222">  `ptr` must have been allocated by `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()` or `<a href="../../../../../manualpages/Sys/PetscDeviceCalloc.html">PetscDeviceCalloc</a>()`.</font>
+
+<a name="line504">504: </a><font color="#B22222">  The user should prefer `<a href="../../../../../manualpages/Sys/PetscDeviceArrayZero.html">PetscDeviceArrayZero</a>()` over this routine as it automatically</font>
+<a name="line505">505: </a><font color="#B22222">  computes the number of bytes to copy from the size of the pointer types, though they should</font>
+<a name="line506">506: </a><font color="#B22222">  note that it only zeros memory.</font>
+
+<a name="line508">508: </a><font color="#B22222">  This routine is analogous to `memset()`. That is, this routine copies the value</font>
+<a name="line509">509: </a><font color="#B22222">  `static_cast&lt;unsigned char&gt;(v)` into each of the first count characters of the object pointed</font>
+<a name="line510">510: </a><font color="#B22222">  to by `dest`.</font>
+
+<a name="line512">512: </a><font color="#B22222">  If `dest` is on device, this routine is asynchronous.</font>
+
+<a name="line514">514: </a><font color="#B22222">  DAG representation:</font>
+<a name="line515">515: </a><font color="#B22222">.vb</font>
+<a name="line516">516: </a><font color="#B22222">  time -&gt;</font>
+
+<a name="line518">518: </a><font color="#B22222">  -&gt; dctx - |= CALL =| - dctx -&gt;</font>
+<a name="line519">519: </a><font color="#B22222">  -&gt; dest ---------------------&gt;</font>
+<a name="line520">520: </a><font color="#B22222">.ve</font>
+
+<a name="line522">522: </a><font color="#B22222">.N ASYNC_API</font>
+
+<a name="line524">524: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/Sys/PetscDeviceArrayZero.html">PetscDeviceArrayZero</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceMalloc.html">PetscDeviceMalloc</a>()`, `<a href="../../../../../manualpages/Sys/PetscDeviceCalloc.html">PetscDeviceCalloc</a>()`,</font>
+<a name="line525">525: </a><font color="#B22222">`<a href="../../../../../manualpages/Sys/PetscDeviceFree.html">PetscDeviceFree</a>()`</font>
+<a name="line526">526: </a><font color="#B22222">@*/</font>
+<a name="line527">527: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/Sys/PetscDeviceMemset.html">PetscDeviceMemset</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContext.html">PetscDeviceContext</a> dctx, void *ptr, <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> v, std::size_t n)
+<a name="line528">528: </a>{
+<a name="line529">529: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line530">530: </a>  <font color="#4169E1">if</font> (<a href="../../../../../manualpages/Sys/PetscUnlikely.html">PetscUnlikely</a>(!n)) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line531">531: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(ptr, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_POINTER</a>, <font color="#666666">"Trying to memset a NULL pointer"</font>);
+<a name="line532">532: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceContextGetOptionalNullContext_Internal(&amp;dctx));
+<a name="line533">533: </a>  {
+<a name="line534">534: </a>    const auto &amp;attr = memory_map.search_for(ptr, true)-&gt;second;
+
+<a name="line536">536: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscDeviceContextMarkIntentFromID.html">PetscDeviceContextMarkIntentFromID</a>(dctx, attr.id, <a href="../../../../../manualpages/Sys/PetscMemoryAccessMode.html">PETSC_MEMORY_ACCESS_WRITE</a>, <font color="#666666">"memory set"</font>));
+<a name="line537">537: </a>    <font color="#4169E1">if</font> (dctx-&gt;ops-&gt;memset) {
+<a name="line538">538: </a>      <a href="../../../../../manualpages/Sys/PetscUseTypeMethod.html">PetscUseTypeMethod</a>(dctx, memset, attr.mtype, ptr, v, n);
+<a name="line539">539: </a>    } <font color="#4169E1">else</font> {
+<a name="line540">540: </a>      // REVIEW ME: we might potentially need to sync here <font color="#4169E1">if</font> the memory is device-allocated
+<a name="line541">541: </a>      // (pinned) but being memset by a host dctx
+<a name="line542">542: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscDeviceCheckCapable_Private(dctx, PetscMemTypeHost(attr.mtype), <font color="#666666">"memsetting"</font>));
+<a name="line543">543: </a><strong><font color="#FF0000">      std:</font></strong>:memset(ptr, static_cast&lt;int&gt;(v), n);
+<a name="line544">544: </a>    }
+<a name="line545">545: </a>  }
+<a name="line546">546: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line547">547: </a>}
+</pre>
+</body>
+
+</html>

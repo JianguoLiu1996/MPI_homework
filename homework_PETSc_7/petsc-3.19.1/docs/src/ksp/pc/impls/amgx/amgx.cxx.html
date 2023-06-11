@@ -1,0 +1,679 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/pc/impls/amgx/amgx.cxx">Actual source code: amgx.cxx</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:50+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222">     This file implements an AmgX preconditioner in PETSc as part of <a href="../../../../../manualpages/PC/PC.html">PC</a>.</font>
+<a name="line3">  3: </a><font color="#B22222"> */</font>
+
+<a name="line5">  5: </a><font color="#B22222">/*</font>
+<a name="line6">  6: </a><font color="#B22222">   Include files needed for the AmgX preconditioner:</font>
+<a name="line7">  7: </a><font color="#B22222">     pcimpl.h - private include file intended for use by all preconditioners</font>
+<a name="line8">  8: </a><font color="#B22222">*/</font>
+
+<a name="line10"> 10: </a>#include <A href="../../../../../include/petsc/private/pcimpl.h.html">&lt;petsc/private/pcimpl.h&gt;</A>
+<a name="line11"> 11: </a>#include <A href="../../../../../include/petscdevice_cuda.h.html">&lt;petscdevice_cuda.h&gt;</A>
+<a name="line12"> 12: </a><font color="#A020F0">#include &lt;amgx_c.h&gt;</font>
+<a name="line13"> 13: </a><font color="#A020F0">#include &lt;limits&gt;</font>
+<a name="line14"> 14: </a><font color="#A020F0">#include &lt;vector&gt;</font>
+<a name="line15"> 15: </a><font color="#A020F0">#include &lt;algorithm&gt;</font>
+<a name="line16"> 16: </a><font color="#A020F0">#include &lt;map&gt;</font>
+<a name="line17"> 17: </a><font color="#A020F0">#include &lt;numeric&gt;</font>
+<a name="line18"> 18: </a><font color="#A020F0">#include </font><font color="#666666">"cuda_runtime.h"</font><font color="#A020F0"></font>
+
+<a name="line20"> 20: </a><font color="#4169E1">enum</font> class AmgXSmoother {
+<a name="line21"> 21: </a>  PCG,
+<a name="line22"> 22: </a>  PCGF,
+<a name="line23"> 23: </a>  PBiCGStab,
+<a name="line24"> 24: </a>  GMRES,
+<a name="line25"> 25: </a>  FGMRES,
+<a name="line26"> 26: </a>  JacobiL1,
+<a name="line27"> 27: </a>  BlockJacobi,
+<a name="line28"> 28: </a>  GS,
+<a name="line29"> 29: </a>  MulticolorGS,
+<a name="line30"> 30: </a>  MulticolorILU,
+<a name="line31"> 31: </a>  MulticolorDILU,
+<a name="line32"> 32: </a>  ChebyshevPoly,
+<a name="line33"> 33: </a>  NoSolver
+<a name="line34"> 34: </a>};
+<a name="line35"> 35: </a><font color="#4169E1">enum</font> class AmgXAMGMethod {
+<a name="line36"> 36: </a>  Classical,
+<a name="line37"> 37: </a>  Aggregation
+<a name="line38"> 38: </a>};
+<a name="line39"> 39: </a><font color="#4169E1">enum</font> class AmgXSelector {
+<a name="line40"> 40: </a>  Size2,
+<a name="line41"> 41: </a>  Size4,
+<a name="line42"> 42: </a>  Size8,
+<a name="line43"> 43: </a>  MultiPairwise,
+<a name="line44"> 44: </a>  PMIS,
+<a name="line45"> 45: </a>  HMIS
+<a name="line46"> 46: </a>};
+<a name="line47"> 47: </a><font color="#4169E1">enum</font> class AmgXCoarseSolver {
+<a name="line48"> 48: </a>  DenseLU,
+<a name="line49"> 49: </a>  NoSolver
+<a name="line50"> 50: </a>};
+<a name="line51"> 51: </a><font color="#4169E1">enum</font> class AmgXAMGCycle {
+<a name="line52"> 52: </a>  V,
+<a name="line53"> 53: </a>  W,
+<a name="line54"> 54: </a>  F,
+<a name="line55"> 55: </a>  CG,
+<a name="line56"> 56: </a>  CGF
+<a name="line57"> 57: </a>};
+
+<a name="line59"> 59: </a><font color="#4169E1"><a name="AmgXControlMap"></a>struct AmgXControlMap </font>{
+<a name="line60"> 60: </a>  static const std::map&lt;std::string, AmgXAMGMethod&gt;    AMGMethods;
+<a name="line61"> 61: </a>  static const std::map&lt;std::string, AmgXSmoother&gt;     Smoothers;
+<a name="line62"> 62: </a>  static const std::map&lt;std::string, AmgXSelector&gt;     Selectors;
+<a name="line63"> 63: </a>  static const std::map&lt;std::string, AmgXCoarseSolver&gt; CoarseSolvers;
+<a name="line64"> 64: </a>  static const std::map&lt;std::string, AmgXAMGCycle&gt;     AMGCycles;
+<a name="line65"> 65: </a>};
+
+<a name="line67"> 67: </a>const std::map&lt;std::string, AmgXAMGMethod&gt; AmgXControlMap::AMGMethods = {
+<a name="line68"> 68: </a>  {<font color="#666666">"CLASSICAL"</font>,   AmgXAMGMethod::Classical  },
+<a name="line69"> 69: </a>  {<font color="#666666">"AGGREGATION"</font>, AmgXAMGMethod::Aggregation}
+<a name="line70"> 70: </a>};
+
+<a name="line72"> 72: </a>const std::map&lt;std::string, AmgXSmoother&gt; AmgXControlMap::Smoothers = {
+<a name="line73"> 73: </a>  {<font color="#666666">"PCG"</font>,             AmgXSmoother::PCG           },
+<a name="line74"> 74: </a>  {<font color="#666666">"PCGF"</font>,            AmgXSmoother::PCGF          },
+<a name="line75"> 75: </a>  {<font color="#666666">"PBICGSTAB"</font>,       AmgXSmoother::PBiCGStab     },
+<a name="line76"> 76: </a>  {<font color="#666666">"GMRES"</font>,           AmgXSmoother::GMRES         },
+<a name="line77"> 77: </a>  {<font color="#666666">"FGMRES"</font>,          AmgXSmoother::FGMRES        },
+<a name="line78"> 78: </a>  {<font color="#666666">"JACOBI_L1"</font>,       AmgXSmoother::JacobiL1      },
+<a name="line79"> 79: </a>  {<font color="#666666">"BLOCK_JACOBI"</font>,    AmgXSmoother::BlockJacobi   },
+<a name="line80"> 80: </a>  {<font color="#666666">"GS"</font>,              AmgXSmoother::GS            },
+<a name="line81"> 81: </a>  {<font color="#666666">"MULTICOLOR_GS"</font>,   AmgXSmoother::MulticolorGS  },
+<a name="line82"> 82: </a>  {<font color="#666666">"MULTICOLOR_ILU"</font>,  AmgXSmoother::MulticolorILU },
+<a name="line83"> 83: </a>  {<font color="#666666">"MULTICOLOR_DILU"</font>, AmgXSmoother::MulticolorDILU},
+<a name="line84"> 84: </a>  {<font color="#666666">"CHEBYSHEV_POLY"</font>,  AmgXSmoother::ChebyshevPoly },
+<a name="line85"> 85: </a>  {<font color="#666666">"NOSOLVER"</font>,        AmgXSmoother::NoSolver      }
+<a name="line86"> 86: </a>};
+
+<a name="line88"> 88: </a>const std::map&lt;std::string, AmgXSelector&gt; AmgXControlMap::Selectors = {
+<a name="line89"> 89: </a>  {<font color="#666666">"SIZE_2"</font>,         AmgXSelector::Size2        },
+<a name="line90"> 90: </a>  {<font color="#666666">"SIZE_4"</font>,         AmgXSelector::Size4        },
+<a name="line91"> 91: </a>  {<font color="#666666">"SIZE_8"</font>,         AmgXSelector::Size8        },
+<a name="line92"> 92: </a>  {<font color="#666666">"MULTI_PAIRWISE"</font>, AmgXSelector::MultiPairwise},
+<a name="line93"> 93: </a>  {<font color="#666666">"PMIS"</font>,           AmgXSelector::PMIS         },
+<a name="line94"> 94: </a>  {<font color="#666666">"HMIS"</font>,           AmgXSelector::HMIS         }
+<a name="line95"> 95: </a>};
+
+<a name="line97"> 97: </a>const std::map&lt;std::string, AmgXCoarseSolver&gt; AmgXControlMap::CoarseSolvers = {
+<a name="line98"> 98: </a>  {<font color="#666666">"DENSE_LU_SOLVER"</font>, AmgXCoarseSolver::DenseLU },
+<a name="line99"> 99: </a>  {<font color="#666666">"NOSOLVER"</font>,        AmgXCoarseSolver::NoSolver}
+<a name="line100">100: </a>};
+
+<a name="line102">102: </a>const std::map&lt;std::string, AmgXAMGCycle&gt; AmgXControlMap::AMGCycles = {
+<a name="line103">103: </a>  {<font color="#666666">"V"</font>,   AmgXAMGCycle::V  },
+<a name="line104">104: </a>  {<font color="#666666">"W"</font>,   AmgXAMGCycle::W  },
+<a name="line105">105: </a>  {<font color="#666666">"F"</font>,   AmgXAMGCycle::F  },
+<a name="line106">106: </a>  {<font color="#666666">"CG"</font>,  AmgXAMGCycle::CG },
+<a name="line107">107: </a>  {<font color="#666666">"CGF"</font>, AmgXAMGCycle::CGF}
+<a name="line108">108: </a>};
+
+<a name="line110">110: </a><font color="#B22222">/*</font>
+<a name="line111">111: </a><font color="#B22222">   Private context (data structure) for the AMGX preconditioner.</font>
+<a name="line112">112: </a><font color="#B22222">*/</font>
+<a name="line113">113: </a><font color="#4169E1"><a name="PC_AMGX"></a>struct PC_AMGX </font>{
+<a name="line114">114: </a>  AMGX_solver_handle    solver;
+<a name="line115">115: </a>  AMGX_config_handle    cfg;
+<a name="line116">116: </a>  AMGX_resources_handle rsrc;
+<a name="line117">117: </a>  bool                  solve_state_init;
+<a name="line118">118: </a>  bool                  rsrc_init;
+<a name="line119">119: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>             verbose;
+
+<a name="line121">121: </a>  AMGX_matrix_handle A;
+<a name="line122">122: </a>  AMGX_vector_handle sol;
+<a name="line123">123: </a>  AMGX_vector_handle rhs;
+
+<a name="line125">125: </a>  <a href="../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>    comm;
+<a name="line126">126: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> rank   = 0;
+<a name="line127">127: </a>  <a href="../../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> nranks = 0;
+<a name="line128">128: </a>  int         devID  = 0;
+
+<a name="line130">130: </a>  void       *lib_handle = 0;
+<a name="line131">131: </a><strong><font color="#FF0000">  std:</font></strong>:string cfg_contents;
+
+<a name="line133">133: </a>  // Cached state <font color="#4169E1">for</font> re-setup
+<a name="line134">134: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           nnz;
+<a name="line135">135: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           nLocalRows;
+<a name="line136">136: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           nGlobalRows;
+<a name="line137">137: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           bSize;
+<a name="line138">138: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>                localA;
+<a name="line139">139: </a>  const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *values;
+
+<a name="line141">141: </a>  // AMG Control parameters
+<a name="line142">142: </a>  AmgXSmoother     smoother;
+<a name="line143">143: </a>  AmgXAMGMethod    amg_method;
+<a name="line144">144: </a>  AmgXSelector     selector;
+<a name="line145">145: </a>  AmgXCoarseSolver coarse_solver;
+<a name="line146">146: </a>  AmgXAMGCycle     amg_cycle;
+<a name="line147">147: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         presweeps;
+<a name="line148">148: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         postsweeps;
+<a name="line149">149: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         max_levels;
+<a name="line150">150: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         aggressive_levels;
+<a name="line151">151: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>         dense_lu_num_rows;
+<a name="line152">152: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>      strength_threshold;
+<a name="line153">153: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        print_grid_stats;
+<a name="line154">154: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>        exact_coarse_solve;
+
+<a name="line156">156: </a>  // Smoother control parameters
+<a name="line157">157: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> jacobi_relaxation_factor;
+<a name="line158">158: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> gs_symmetric;
+<a name="line159">159: </a>};
+
+<a name="line161">161: </a>static <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> s_count = 0;
+
+<a name="line163">163: </a>// Buffer of messages from AmgX
+<a name="line164">164: </a>// Currently necessary hack before we adapt AmgX to print from single rank only
+<a name="line165">165: </a>static std::string amgx_output{};
+
+<a name="line167">167: </a>// A print callback that allows AmgX to <font color="#4169E1">return</font> status messages
+<a name="line168">168: </a><strong><font color="#4169E1"><a name="print_callback"></a>static void print_callback(const char *msg, int length)</font></strong>
+<a name="line169">169: </a>{
+<a name="line170">170: </a>  amgx_output.append(msg);
+<a name="line171">171: </a>}
+
+<a name="line173">173: </a>// Outputs messages from the AmgX message buffer and clears it
+<a name="line174">174: </a><strong><font color="#4169E1"><a name="amgx_output_messages"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> amgx_output_messages(PC_AMGX *amgx)</font></strong>
+<a name="line175">175: </a>{
+<a name="line176">176: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+
+<a name="line178">178: </a>  // If AmgX output is enabled and we have a message, output it
+<a name="line179">179: </a>  <font color="#4169E1">if</font> (amgx-&gt;verbose &amp;&amp; !amgx_output.empty()) {
+<a name="line180">180: </a>    // Only a single rank to output the AmgX messages
+<a name="line181">181: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(amgx-&gt;comm, <font color="#666666">"AMGX: %s"</font>, amgx_output.c_str()));
+
+<a name="line183">183: </a>    // Note that all ranks clear their received output
+<a name="line184">184: </a>    amgx_output.clear();
+<a name="line185">185: </a>  }
+
+<a name="line187">187: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line188">188: </a>}
+
+<a name="line190">190: </a>// XXX Need to add call in AmgX API that gracefully destroys everything
+<a name="line191">191: </a>// without abort etc.
+<a name="line192">192: </a><strong><font color="#228B22">#define PetscCallAmgX(rc) \</font></strong>
+<a name="line193">193: </a><strong><font color="#228B22">  do { \</font></strong>
+<a name="line194">194: </a><strong><font color="#228B22">    AMGX_RC err = (rc); \</font></strong>
+<a name="line195">195: </a><strong><font color="#228B22">    char    msg[4096]; \</font></strong>
+<a name="line196">196: </a><strong><font color="#228B22">    switch (err) { \</font></strong>
+<a name="line197">197: </a><strong><font color="#228B22">    case AMGX_RC_OK: \</font></strong>
+<a name="line198">198: </a><strong><font color="#228B22">      break; \</font></strong>
+<a name="line199">199: </a><strong><font color="#228B22">    default: \</font></strong>
+<a name="line200">200: </a><strong><font color="#228B22">      AMGX_get_error_string(err, msg, 4096); \</font></strong>
+<a name="line201">201: </a><strong><font color="#228B22">      <a href="../../../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(amgx-&gt;comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, </font><font color="#666666">"%s"</font><font color="#228B22">, msg); \</font></strong>
+<a name="line202">202: </a><strong><font color="#228B22">    } \</font></strong>
+<a name="line203">203: </a><strong><font color="#228B22">  } while (0)</font></strong>
+
+<a name="line205">205: </a><font color="#B22222">/*</font>
+<a name="line206">206: </a><font color="#B22222">   PCSetUp_AMGX - Prepares for the use of the AmgX preconditioner</font>
+<a name="line207">207: </a><font color="#B22222">                    by setting data structures and options.</font>
+
+<a name="line209">209: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line210">210: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line212">212: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCSetUp.html">PCSetUp</a>()</font>
+
+<a name="line214">214: </a><font color="#B22222">   Note:</font>
+<a name="line215">215: </a><font color="#B22222">   The interface routine <a href="../../../../../manualpages/PC/PCSetUp.html">PCSetUp</a>() is not usually called directly by</font>
+<a name="line216">216: </a><font color="#B22222">   the user, but instead is called by <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>() if necessary.</font>
+<a name="line217">217: </a><font color="#B22222">*/</font>
+<a name="line218">218: </a><strong><font color="#4169E1"><a name="PCSetUp_AMGX"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line219">219: </a>{
+<a name="line220">220: </a>  PC_AMGX  *amgx = (PC_AMGX *)pc-&gt;data;
+<a name="line221">221: </a>  <a href="../../../../../manualpages/Mat/Mat.html">Mat</a>       Pmat = pc-&gt;pmat;
+<a name="line222">222: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> is_dev_ptrs;
+
+<a name="line224">224: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line225">225: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompareAny.html">PetscObjectTypeCompareAny</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)Pmat, &amp;is_dev_ptrs, <a href="../../../../../manualpages/Mat/MATAIJCUSPARSE.html">MATAIJCUSPARSE</a>, <a href="../../../../../manualpages/Mat/MATSEQAIJCUSPARSE.html">MATSEQAIJCUSPARSE</a>, <a href="../../../../../manualpages/Mat/MATMPIAIJCUSPARSE.html">MATMPIAIJCUSPARSE</a>, <font color="#666666">""</font>));
+
+<a name="line227">227: </a>  // At the present time, an AmgX matrix is a sequential matrix
+<a name="line228">228: </a>  // Non-sequential/MPI matrices must be adapted to extract the local matrix
+<a name="line229">229: </a>  bool partial_setup_allowed = (pc-&gt;setupcalled &amp;&amp; pc-&gt;flag != <a href="../../../../../manualpages/Mat/MatStructure.html">DIFFERENT_NONZERO_PATTERN</a>);
+<a name="line230">230: </a>  <font color="#4169E1">if</font> (amgx-&gt;nranks &gt; 1) {
+<a name="line231">231: </a>    <font color="#4169E1">if</font> (partial_setup_allowed) {
+<a name="line232">232: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMPIAIJGetLocalMat.html">MatMPIAIJGetLocalMat</a>(Pmat, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_REUSE_MATRIX</a>, &amp;amgx-&gt;localA));
+<a name="line233">233: </a>    } <font color="#4169E1">else</font> {
+<a name="line234">234: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatMPIAIJGetLocalMat.html">MatMPIAIJGetLocalMat</a>(Pmat, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, &amp;amgx-&gt;localA));
+<a name="line235">235: </a>    }
+
+<a name="line237">237: </a>    <font color="#4169E1">if</font> (is_dev_ptrs) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatConvert.html">MatConvert</a>(amgx-&gt;localA, <a href="../../../../../manualpages/Mat/MATSEQAIJCUSPARSE.html">MATSEQAIJCUSPARSE</a>, <a href="../../../../../manualpages/Mat/MatReuse.html">MAT_INPLACE_MATRIX</a>, &amp;amgx-&gt;localA));
+<a name="line238">238: </a>  } <font color="#4169E1">else</font> {
+<a name="line239">239: </a>    amgx-&gt;localA = Pmat;
+<a name="line240">240: </a>  }
+
+<a name="line242">242: </a>  <font color="#4169E1">if</font> (is_dev_ptrs) {
+<a name="line243">243: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSeqAIJCUSPARSEGetArrayRead.html">MatSeqAIJCUSPARSEGetArrayRead</a>(amgx-&gt;localA, &amp;amgx-&gt;values));
+<a name="line244">244: </a>  } <font color="#4169E1">else</font> {
+<a name="line245">245: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSeqAIJGetArrayRead.html">MatSeqAIJGetArrayRead</a>(amgx-&gt;localA, &amp;amgx-&gt;values));
+<a name="line246">246: </a>  }
+
+<a name="line248">248: </a>  <font color="#4169E1">if</font> (!partial_setup_allowed) {
+<a name="line249">249: </a>    // Initialise resources and matrices
+<a name="line250">250: </a>    <font color="#4169E1">if</font> (!amgx-&gt;rsrc_init) {
+<a name="line251">251: </a>      // Read configuration file
+<a name="line252">252: </a>      PetscCallAmgX(AMGX_config_create(&amp;amgx-&gt;cfg, amgx-&gt;cfg_contents.c_str()));
+<a name="line253">253: </a>      PetscCallAmgX(AMGX_resources_create(&amp;amgx-&gt;rsrc, amgx-&gt;cfg, &amp;amgx-&gt;comm, 1, &amp;amgx-&gt;devID));
+<a name="line254">254: </a>      amgx-&gt;rsrc_init = true;
+<a name="line255">255: </a>    }
+
+<a name="line257">257: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!amgx-&gt;solve_state_init, amgx-&gt;comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"AmgX solve state initialisation already called."</font>);
+<a name="line258">258: </a>    PetscCallAmgX(AMGX_matrix_create(&amp;amgx-&gt;A, amgx-&gt;rsrc, AMGX_mode_dDDI));
+<a name="line259">259: </a>    PetscCallAmgX(AMGX_vector_create(&amp;amgx-&gt;sol, amgx-&gt;rsrc, AMGX_mode_dDDI));
+<a name="line260">260: </a>    PetscCallAmgX(AMGX_vector_create(&amp;amgx-&gt;rhs, amgx-&gt;rsrc, AMGX_mode_dDDI));
+<a name="line261">261: </a>    PetscCallAmgX(AMGX_solver_create(&amp;amgx-&gt;solver, amgx-&gt;rsrc, AMGX_mode_dDDI, amgx-&gt;cfg));
+<a name="line262">262: </a>    amgx-&gt;solve_state_init = true;
+
+<a name="line264">264: </a>    // Extract the CSR data
+<a name="line265">265: </a>    <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>       done;
+<a name="line266">266: </a>    const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *colIndices;
+<a name="line267">267: </a>    const <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *rowOffsets;
+<a name="line268">268: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRowIJ.html">MatGetRowIJ</a>(amgx-&gt;localA, 0, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, &amp;amgx-&gt;nLocalRows, &amp;rowOffsets, &amp;colIndices, &amp;done));
+<a name="line269">269: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(done, amgx-&gt;comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"<a href="../../../../../manualpages/Mat/MatGetRowIJ.html">MatGetRowIJ</a> was not successful"</font>);
+<a name="line270">270: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(amgx-&gt;nLocalRows &lt; std::numeric_limits&lt;int&gt;::max(), <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"AmgX restricted to int local rows but nLocalRows = %"</font> PetscInt_FMT <font color="#666666">" &gt; max&lt;int&gt;"</font>, amgx-&gt;nLocalRows);
+
+<a name="line272">272: </a>    <font color="#4169E1">if</font> (is_dev_ptrs) {
+<a name="line273">273: </a>      PetscCallCUDA(cudaMemcpy(&amp;amgx-&gt;nnz, &amp;rowOffsets[amgx-&gt;nLocalRows], <font color="#4169E1">sizeof</font>(int), cudaMemcpyDefault));
+<a name="line274">274: </a>    } <font color="#4169E1">else</font> {
+<a name="line275">275: </a>      amgx-&gt;nnz = rowOffsets[amgx-&gt;nLocalRows];
+<a name="line276">276: </a>    }
+
+<a name="line278">278: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(amgx-&gt;nnz &lt; std::numeric_limits&lt;int&gt;::max(), <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Support for 64-bit integer nnz not yet implemented, nnz = %"</font> PetscInt_FMT <font color="#666666">"."</font>, amgx-&gt;nnz);
+
+<a name="line280">280: </a>    // Allocate space <font color="#4169E1">for</font> some partition offsets
+<a name="line281">281: </a><strong><font color="#FF0000">    std:</font></strong>:vector&lt;<a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>&gt; partitionOffsets(amgx-&gt;nranks + 1);
+
+<a name="line283">283: </a>    // Fetch the number of local rows per rank
+<a name="line284">284: </a>    partitionOffsets[0] = 0; <font color="#B22222">/* could use <a href="../../../../../manualpages/IS/PetscLayoutGetRanges.html">PetscLayoutGetRanges</a> */</font>
+<a name="line285">285: </a>    <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allgather.html#MPI_Allgather">MPI_Allgather</a>(&amp;amgx-&gt;nLocalRows, 1, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, partitionOffsets.data() + 1, 1, <a href="../../../../../manualpages/Sys/MPIU_INT.html">MPIU_INT</a>, amgx-&gt;comm));
+<a name="line286">286: </a><strong><font color="#FF0000">    std:</font></strong>:partial_sum(partitionOffsets.begin(), partitionOffsets.end(), partitionOffsets.begin());
+
+<a name="line288">288: </a>    // Fetch the number of global rows
+<a name="line289">289: </a>    amgx-&gt;nGlobalRows = partitionOffsets[amgx-&gt;nranks];
+
+<a name="line291">291: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetBlockSize.html">MatGetBlockSize</a>(Pmat, &amp;amgx-&gt;bSize));
+
+<a name="line293">293: </a>    // XXX Currently constrained to 32-bit indices, to be changed in the future
+<a name="line294">294: </a>    // Create the distribution and upload the matrix data
+<a name="line295">295: </a>    AMGX_distribution_handle dist;
+<a name="line296">296: </a>    PetscCallAmgX(AMGX_distribution_create(&amp;dist, amgx-&gt;cfg));
+<a name="line297">297: </a>    PetscCallAmgX(AMGX_distribution_set_32bit_colindices(dist, true));
+<a name="line298">298: </a>    PetscCallAmgX(AMGX_distribution_set_partition_data(dist, AMGX_DIST_PARTITION_OFFSETS, partitionOffsets.data()));
+<a name="line299">299: </a>    PetscCallAmgX(AMGX_matrix_upload_distributed(amgx-&gt;A, amgx-&gt;nGlobalRows, (int)amgx-&gt;nLocalRows, (int)amgx-&gt;nnz, amgx-&gt;bSize, amgx-&gt;bSize, rowOffsets, colIndices, amgx-&gt;values, NULL, dist));
+<a name="line300">300: </a>    PetscCallAmgX(AMGX_solver_setup(amgx-&gt;solver, amgx-&gt;A));
+<a name="line301">301: </a>    PetscCallAmgX(AMGX_vector_bind(amgx-&gt;sol, amgx-&gt;A));
+<a name="line302">302: </a>    PetscCallAmgX(AMGX_vector_bind(amgx-&gt;rhs, amgx-&gt;A));
+
+<a name="line304">304: </a>    <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nlr = 0;
+<a name="line305">305: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatRestoreRowIJ.html">MatRestoreRowIJ</a>(amgx-&gt;localA, 0, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, &amp;nlr, &amp;rowOffsets, &amp;colIndices, &amp;done));
+<a name="line306">306: </a>  } <font color="#4169E1">else</font> {
+<a name="line307">307: </a>    // The fast path <font color="#4169E1">for</font> <font color="#4169E1">if</font> the sparsity pattern persists
+<a name="line308">308: </a>    PetscCallAmgX(AMGX_matrix_replace_coefficients(amgx-&gt;A, amgx-&gt;nLocalRows, amgx-&gt;nnz, amgx-&gt;values, NULL));
+<a name="line309">309: </a>    PetscCallAmgX(AMGX_solver_resetup(amgx-&gt;solver, amgx-&gt;A));
+<a name="line310">310: </a>  }
+
+<a name="line312">312: </a>  <font color="#4169E1">if</font> (is_dev_ptrs) {
+<a name="line313">313: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSeqAIJCUSPARSERestoreArrayRead.html">MatSeqAIJCUSPARSERestoreArrayRead</a>(amgx-&gt;localA, &amp;amgx-&gt;values));
+<a name="line314">314: </a>  } <font color="#4169E1">else</font> {
+<a name="line315">315: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatSeqAIJRestoreArrayRead.html">MatSeqAIJRestoreArrayRead</a>(amgx-&gt;localA, &amp;amgx-&gt;values));
+<a name="line316">316: </a>  }
+<a name="line317">317: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(amgx_output_messages(amgx));
+<a name="line318">318: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line319">319: </a>}
+
+<a name="line321">321: </a><font color="#B22222">/*</font>
+<a name="line322">322: </a><font color="#B22222">   PCApply_AMGX - Applies the AmgX preconditioner to a vector.</font>
+
+<a name="line324">324: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line325">325: </a><font color="#B22222">.  pc - the preconditioner context</font>
+<a name="line326">326: </a><font color="#B22222">.  b - rhs vector</font>
+
+<a name="line328">328: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line329">329: </a><font color="#B22222">.  x - solution vector</font>
+
+<a name="line331">331: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>()</font>
+<a name="line332">332: </a><font color="#B22222"> */</font>
+<a name="line333">333: </a><strong><font color="#4169E1"><a name="PCApply_AMGX"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCApply_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> b, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x)</font></strong>
+<a name="line334">334: </a>{
+<a name="line335">335: </a>  PC_AMGX           *amgx = (PC_AMGX *)pc-&gt;data;
+<a name="line336">336: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *x_;
+<a name="line337">337: </a>  const <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *b_;
+<a name="line338">338: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>          is_dev_ptrs;
+
+<a name="line340">340: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line341">341: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompareAny.html">PetscObjectTypeCompareAny</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)x, &amp;is_dev_ptrs, <a href="../../../../../manualpages/Vec/VECCUDA.html">VECCUDA</a>, <a href="../../../../../manualpages/Vec/VECMPICUDA.html">VECMPICUDA</a>, VECSEQCUDA, <font color="#666666">""</font>));
+
+<a name="line343">343: </a>  <font color="#4169E1">if</font> (is_dev_ptrs) {
+<a name="line344">344: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCUDAGetArrayWrite.html">VecCUDAGetArrayWrite</a>(x, &amp;x_));
+<a name="line345">345: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCUDAGetArrayRead.html">VecCUDAGetArrayRead</a>(b, &amp;b_));
+<a name="line346">346: </a>  } <font color="#4169E1">else</font> {
+<a name="line347">347: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArrayWrite.html">VecGetArrayWrite</a>(x, &amp;x_));
+<a name="line348">348: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(b, &amp;b_));
+<a name="line349">349: </a>  }
+
+<a name="line351">351: </a>  PetscCallAmgX(AMGX_vector_upload(amgx-&gt;sol, amgx-&gt;nLocalRows, 1, x_));
+<a name="line352">352: </a>  PetscCallAmgX(AMGX_vector_upload(amgx-&gt;rhs, amgx-&gt;nLocalRows, 1, b_));
+<a name="line353">353: </a>  PetscCallAmgX(AMGX_solver_solve_with_0_initial_guess(amgx-&gt;solver, amgx-&gt;rhs, amgx-&gt;sol));
+
+<a name="line355">355: </a>  AMGX_SOLVE_STATUS status;
+<a name="line356">356: </a>  PetscCallAmgX(AMGX_solver_get_status(amgx-&gt;solver, &amp;status));
+<a name="line357">357: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCSetErrorIfFailure.html">PCSetErrorIfFailure</a>(pc, static_cast&lt;<a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>&gt;(status == AMGX_SOLVE_FAILED)));
+<a name="line358">358: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(status != AMGX_SOLVE_FAILED, amgx-&gt;comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_CONV_FAILED</a>, <font color="#666666">"AmgX solver failed to solve the system! The error code is %d."</font>, status);
+<a name="line359">359: </a>  PetscCallAmgX(AMGX_vector_download(amgx-&gt;sol, x_));
+
+<a name="line361">361: </a>  <font color="#4169E1">if</font> (is_dev_ptrs) {
+<a name="line362">362: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCUDARestoreArrayWrite.html">VecCUDARestoreArrayWrite</a>(x, &amp;x_));
+<a name="line363">363: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecCUDARestoreArrayRead.html">VecCUDARestoreArrayRead</a>(b, &amp;b_));
+<a name="line364">364: </a>  } <font color="#4169E1">else</font> {
+<a name="line365">365: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArrayWrite.html">VecRestoreArrayWrite</a>(x, &amp;x_));
+<a name="line366">366: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(b, &amp;b_));
+<a name="line367">367: </a>  }
+<a name="line368">368: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(amgx_output_messages(amgx));
+<a name="line369">369: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line370">370: </a>}
+
+<a name="line372">372: </a><strong><font color="#4169E1"><a name="PCReset_AMGX"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCReset_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line373">373: </a>{
+<a name="line374">374: </a>  PC_AMGX *amgx = (PC_AMGX *)pc-&gt;data;
+
+<a name="line376">376: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line377">377: </a>  <font color="#4169E1">if</font> (amgx-&gt;solve_state_init) {
+<a name="line378">378: </a>    PetscCallAmgX(AMGX_solver_destroy(amgx-&gt;solver));
+<a name="line379">379: </a>    PetscCallAmgX(AMGX_matrix_destroy(amgx-&gt;A));
+<a name="line380">380: </a>    PetscCallAmgX(AMGX_vector_destroy(amgx-&gt;sol));
+<a name="line381">381: </a>    PetscCallAmgX(AMGX_vector_destroy(amgx-&gt;rhs));
+<a name="line382">382: </a>    <font color="#4169E1">if</font> (amgx-&gt;nranks &gt; 1) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;amgx-&gt;localA));
+<a name="line383">383: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(amgx_output_messages(amgx));
+<a name="line384">384: </a>    amgx-&gt;solve_state_init = false;
+<a name="line385">385: </a>  }
+<a name="line386">386: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line387">387: </a>}
+
+<a name="line389">389: </a><font color="#B22222">/*</font>
+<a name="line390">390: </a><font color="#B22222">   PCDestroy_AMGX - Destroys the private context for the AmgX preconditioner</font>
+<a name="line391">391: </a><font color="#B22222">   that was created with PCCreate_AMGX().</font>
+
+<a name="line393">393: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line394">394: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line396">396: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCDestroy.html">PCDestroy</a>()</font>
+<a name="line397">397: </a><font color="#B22222">*/</font>
+<a name="line398">398: </a><strong><font color="#4169E1"><a name="PCDestroy_AMGX"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCDestroy_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line399">399: </a>{
+<a name="line400">400: </a>  PC_AMGX *amgx = (PC_AMGX *)pc-&gt;data;
+
+<a name="line402">402: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line403">403: </a>  <font color="#B22222">/* decrease the number of instances, only the last instance need to destroy resource and finalizing AmgX */</font>
+<a name="line404">404: </a>  <font color="#4169E1">if</font> (s_count == 1) {
+<a name="line405">405: </a>    <font color="#B22222">/* can put this in a PCAMGXInitializePackage method */</font>
+<a name="line406">406: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(amgx-&gt;rsrc != nullptr, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"s_rsrc == NULL"</font>);
+<a name="line407">407: </a>    PetscCallAmgX(AMGX_resources_destroy(amgx-&gt;rsrc));
+<a name="line408">408: </a>    <font color="#B22222">/* destroy config (need to use AMGX_SAFE_CALL after this point) */</font>
+<a name="line409">409: </a>    PetscCallAmgX(AMGX_config_destroy(amgx-&gt;cfg));
+<a name="line410">410: </a>    PetscCallAmgX(AMGX_finalize_plugins());
+<a name="line411">411: </a>    PetscCallAmgX(AMGX_finalize());
+<a name="line412">412: </a>    <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;amgx-&gt;comm));
+<a name="line413">413: </a>  } <font color="#4169E1">else</font> {
+<a name="line414">414: </a>    PetscCallAmgX(AMGX_config_destroy(amgx-&gt;cfg));
+<a name="line415">415: </a>  }
+<a name="line416">416: </a>  s_count -= 1;
+<a name="line417">417: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(amgx));
+<a name="line418">418: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line419">419: </a>}
+
+<a name="line421">421: </a>template &lt;class T&gt;
+<a name="line422">422: </a><strong><font color="#FF0000">std:</font></strong>:string map_reverse_lookup(const std::map&lt;std::string, T&gt; &amp;map, const T &amp;key)
+<a name="line423">423: </a>{
+<a name="line424">424: </a>  <font color="#4169E1">for</font> (auto const &amp;m : map) {
+<a name="line425">425: </a>    <font color="#4169E1">if</font> (m.second == key) <font color="#4169E1">return</font> m.first;
+<a name="line426">426: </a>  }
+<a name="line427">427: </a>  <font color="#4169E1">return</font> <font color="#666666">""</font>;
+<a name="line428">428: </a>}
+
+<a name="line430">430: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_AMGX"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetFromOptions_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line431">431: </a>{
+<a name="line432">432: </a>  PC_AMGX      *amgx          = (PC_AMGX *)pc-&gt;data;
+<a name="line433">433: </a>  constexpr int MAX_PARAM_LEN = 128;
+<a name="line434">434: </a>  char          option[MAX_PARAM_LEN];
+
+<a name="line436">436: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line437">437: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"AmgX options"</font>);
+<a name="line438">438: </a>  amgx-&gt;cfg_contents = <font color="#666666">"config_version=2,"</font>;
+<a name="line439">439: </a>  amgx-&gt;cfg_contents += <font color="#666666">"determinism_flag=1,"</font>;
+
+<a name="line441">441: </a>  // Set exact coarse solve
+<a name="line442">442: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_amgx_exact_coarse_solve"</font>, <font color="#666666">"AmgX AMG Exact Coarse Solve"</font>, <font color="#666666">""</font>, amgx-&gt;exact_coarse_solve, &amp;amgx-&gt;exact_coarse_solve, NULL));
+<a name="line443">443: </a>  <font color="#4169E1">if</font> (amgx-&gt;exact_coarse_solve) amgx-&gt;cfg_contents += <font color="#666666">"exact_coarse_solve=1,"</font>;
+
+<a name="line445">445: </a>  amgx-&gt;cfg_contents += <font color="#666666">"solver(amg)=AMG,"</font>;
+
+<a name="line447">447: </a>  // Set method
+<a name="line448">448: </a><strong><font color="#FF0000">  std:</font></strong>:string def_amg_method = map_reverse_lookup(AmgXControlMap::AMGMethods, amgx-&gt;amg_method);
+<a name="line449">449: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrncpy.html">PetscStrncpy</a>(option, def_amg_method.c_str(), <font color="#4169E1">sizeof</font>(option)));
+<a name="line450">450: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsString.html">PetscOptionsString</a>(<font color="#666666">"-pc_amgx_amg_method"</font>, <font color="#666666">"AmgX AMG Method"</font>, <font color="#666666">""</font>, option, option, MAX_PARAM_LEN, NULL));
+<a name="line451">451: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(AmgXControlMap::AMGMethods.count(option) == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"AMG Method %s not registered for AmgX."</font>, option);
+<a name="line452">452: </a>  amgx-&gt;amg_method = AmgXControlMap::AMGMethods.at(option);
+<a name="line453">453: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:algorithm="</font> + std::string(option) + <font color="#666666">","</font>;
+
+<a name="line455">455: </a>  // Set cycle
+<a name="line456">456: </a><strong><font color="#FF0000">  std:</font></strong>:string def_amg_cycle = map_reverse_lookup(AmgXControlMap::AMGCycles, amgx-&gt;amg_cycle);
+<a name="line457">457: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrncpy.html">PetscStrncpy</a>(option, def_amg_cycle.c_str(), <font color="#4169E1">sizeof</font>(option)));
+<a name="line458">458: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsString.html">PetscOptionsString</a>(<font color="#666666">"-pc_amgx_amg_cycle"</font>, <font color="#666666">"AmgX AMG Cycle"</font>, <font color="#666666">""</font>, option, option, MAX_PARAM_LEN, NULL));
+<a name="line459">459: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(AmgXControlMap::AMGCycles.count(option) == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"AMG Cycle %s not registered for AmgX."</font>, option);
+<a name="line460">460: </a>  amgx-&gt;amg_cycle = AmgXControlMap::AMGCycles.at(option);
+<a name="line461">461: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:cycle="</font> + std::string(option) + <font color="#666666">","</font>;
+
+<a name="line463">463: </a>  // Set smoother
+<a name="line464">464: </a><strong><font color="#FF0000">  std:</font></strong>:string def_smoother = map_reverse_lookup(AmgXControlMap::Smoothers, amgx-&gt;smoother);
+<a name="line465">465: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrncpy.html">PetscStrncpy</a>(option, def_smoother.c_str(), <font color="#4169E1">sizeof</font>(option)));
+<a name="line466">466: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsString.html">PetscOptionsString</a>(<font color="#666666">"-pc_amgx_smoother"</font>, <font color="#666666">"AmgX Smoother"</font>, <font color="#666666">""</font>, option, option, MAX_PARAM_LEN, NULL));
+<a name="line467">467: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(AmgXControlMap::Smoothers.count(option) == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Smoother %s not registered for AmgX."</font>, option);
+<a name="line468">468: </a>  amgx-&gt;smoother = AmgXControlMap::Smoothers.at(option);
+<a name="line469">469: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:smoother(smooth)="</font> + std::string(option) + <font color="#666666">","</font>;
+
+<a name="line471">471: </a>  <font color="#4169E1">if</font> (amgx-&gt;smoother == AmgXSmoother::JacobiL1 || amgx-&gt;smoother == AmgXSmoother::BlockJacobi) {
+<a name="line472">472: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsScalar.html">PetscOptionsScalar</a>(<font color="#666666">"-pc_amgx_jacobi_relaxation_factor"</font>, <font color="#666666">"AmgX AMG Jacobi Relaxation Factor"</font>, <font color="#666666">""</font>, amgx-&gt;jacobi_relaxation_factor, &amp;amgx-&gt;jacobi_relaxation_factor, NULL));
+<a name="line473">473: </a>    amgx-&gt;cfg_contents += <font color="#666666">"smooth:relaxation_factor="</font> + std::to_string(amgx-&gt;jacobi_relaxation_factor) + <font color="#666666">","</font>;
+<a name="line474">474: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (amgx-&gt;smoother == AmgXSmoother::GS || amgx-&gt;smoother == AmgXSmoother::MulticolorGS) {
+<a name="line475">475: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsScalar.html">PetscOptionsScalar</a>(<font color="#666666">"-pc_amgx_gs_symmetric"</font>, <font color="#666666">"AmgX AMG Gauss Seidel Symmetric"</font>, <font color="#666666">""</font>, amgx-&gt;gs_symmetric, &amp;amgx-&gt;gs_symmetric, NULL));
+<a name="line476">476: </a>    amgx-&gt;cfg_contents += <font color="#666666">"smooth:symmetric_GS="</font> + std::to_string(amgx-&gt;gs_symmetric) + <font color="#666666">","</font>;
+<a name="line477">477: </a>  }
+
+<a name="line479">479: </a>  // Set selector
+<a name="line480">480: </a><strong><font color="#FF0000">  std:</font></strong>:string def_selector = map_reverse_lookup(AmgXControlMap::Selectors, amgx-&gt;selector);
+<a name="line481">481: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrncpy.html">PetscStrncpy</a>(option, def_selector.c_str(), <font color="#4169E1">sizeof</font>(option)));
+<a name="line482">482: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsString.html">PetscOptionsString</a>(<font color="#666666">"-pc_amgx_selector"</font>, <font color="#666666">"AmgX Selector"</font>, <font color="#666666">""</font>, option, option, MAX_PARAM_LEN, NULL));
+<a name="line483">483: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(AmgXControlMap::Selectors.count(option) == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Selector %s not registered for AmgX."</font>, option);
+
+<a name="line485">485: </a>  // Double check that the user has selected an appropriate selector <font color="#4169E1">for</font> the AMG method
+<a name="line486">486: </a>  <font color="#4169E1">if</font> (amgx-&gt;amg_method == AmgXAMGMethod::Classical) {
+<a name="line487">487: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(amgx-&gt;selector == AmgXSelector::PMIS || amgx-&gt;selector == AmgXSelector::HMIS, amgx-&gt;comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Chosen selector is not used for AmgX Classical AMG: selector=%s"</font>, option);
+<a name="line488">488: </a>    amgx-&gt;cfg_contents += <font color="#666666">"amg:interpolator=D2,"</font>;
+<a name="line489">489: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (amgx-&gt;amg_method == AmgXAMGMethod::Aggregation) {
+<a name="line490">490: </a>    <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(amgx-&gt;selector == AmgXSelector::Size2 || amgx-&gt;selector == AmgXSelector::Size4 || amgx-&gt;selector == AmgXSelector::Size8 || amgx-&gt;selector == AmgXSelector::MultiPairwise, amgx-&gt;comm, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"Chosen selector is not used for AmgX Aggregation AMG"</font>);
+<a name="line491">491: </a>  }
+<a name="line492">492: </a>  amgx-&gt;selector = AmgXControlMap::Selectors.at(option);
+<a name="line493">493: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:selector="</font> + std::string(option) + <font color="#666666">","</font>;
+
+<a name="line495">495: </a>  // Set presweeps
+<a name="line496">496: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_amgx_presweeps"</font>, <font color="#666666">"AmgX AMG Presweep Count"</font>, <font color="#666666">""</font>, amgx-&gt;presweeps, &amp;amgx-&gt;presweeps, NULL));
+<a name="line497">497: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:presweeps="</font> + std::to_string(amgx-&gt;presweeps) + <font color="#666666">","</font>;
+
+<a name="line499">499: </a>  // Set postsweeps
+<a name="line500">500: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_amgx_postsweeps"</font>, <font color="#666666">"AmgX AMG Postsweep Count"</font>, <font color="#666666">""</font>, amgx-&gt;postsweeps, &amp;amgx-&gt;postsweeps, NULL));
+<a name="line501">501: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:postsweeps="</font> + std::to_string(amgx-&gt;postsweeps) + <font color="#666666">","</font>;
+
+<a name="line503">503: </a>  // Set max levels
+<a name="line504">504: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_amgx_max_levels"</font>, <font color="#666666">"AmgX AMG Max Level Count"</font>, <font color="#666666">""</font>, amgx-&gt;max_levels, &amp;amgx-&gt;max_levels, NULL));
+<a name="line505">505: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:max_levels=100,"</font>;
+
+<a name="line507">507: </a>  // Set dense LU num rows
+<a name="line508">508: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_amgx_dense_lu_num_rows"</font>, <font color="#666666">"AmgX Dense LU Number of Rows"</font>, <font color="#666666">""</font>, amgx-&gt;dense_lu_num_rows, &amp;amgx-&gt;dense_lu_num_rows, NULL));
+<a name="line509">509: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:dense_lu_num_rows="</font> + std::to_string(amgx-&gt;dense_lu_num_rows) + <font color="#666666">","</font>;
+
+<a name="line511">511: </a>  // Set strength threshold
+<a name="line512">512: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsScalar.html">PetscOptionsScalar</a>(<font color="#666666">"-pc_amgx_strength_threshold"</font>, <font color="#666666">"AmgX AMG Strength Threshold"</font>, <font color="#666666">""</font>, amgx-&gt;strength_threshold, &amp;amgx-&gt;strength_threshold, NULL));
+<a name="line513">513: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:strength_threshold="</font> + std::to_string(amgx-&gt;strength_threshold) + <font color="#666666">","</font>;
+
+<a name="line515">515: </a>  // Set aggressive_levels
+<a name="line516">516: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-pc_amgx_aggressive_levels"</font>, <font color="#666666">"AmgX AMG Presweep Count"</font>, <font color="#666666">""</font>, amgx-&gt;aggressive_levels, &amp;amgx-&gt;aggressive_levels, NULL));
+<a name="line517">517: </a>  <font color="#4169E1">if</font> (amgx-&gt;aggressive_levels &gt; 0) amgx-&gt;cfg_contents += <font color="#666666">"amg:aggressive_levels="</font> + std::to_string(amgx-&gt;aggressive_levels) + <font color="#666666">","</font>;
+
+<a name="line519">519: </a>  // Set coarse solver
+<a name="line520">520: </a><strong><font color="#FF0000">  std:</font></strong>:string def_coarse_solver = map_reverse_lookup(AmgXControlMap::CoarseSolvers, amgx-&gt;coarse_solver);
+<a name="line521">521: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscStrncpy.html">PetscStrncpy</a>(option, def_coarse_solver.c_str(), <font color="#4169E1">sizeof</font>(option)));
+<a name="line522">522: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsString.html">PetscOptionsString</a>(<font color="#666666">"-pc_amgx_coarse_solver"</font>, <font color="#666666">"AmgX CoarseSolver"</font>, <font color="#666666">""</font>, option, option, MAX_PARAM_LEN, NULL));
+<a name="line523">523: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(AmgXControlMap::CoarseSolvers.count(option) == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"CoarseSolver %s not registered for AmgX."</font>, option);
+<a name="line524">524: </a>  amgx-&gt;coarse_solver = AmgXControlMap::CoarseSolvers.at(option);
+<a name="line525">525: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:coarse_solver="</font> + std::string(option) + <font color="#666666">","</font>;
+
+<a name="line527">527: </a>  // Set max iterations
+<a name="line528">528: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:max_iters=1,"</font>;
+
+<a name="line530">530: </a>  // Set output control parameters
+<a name="line531">531: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_amgx_print_grid_stats"</font>, <font color="#666666">"AmgX Print Grid Stats"</font>, <font color="#666666">""</font>, amgx-&gt;print_grid_stats, &amp;amgx-&gt;print_grid_stats, NULL));
+
+<a name="line533">533: </a>  <font color="#4169E1">if</font> (amgx-&gt;print_grid_stats) amgx-&gt;cfg_contents += <font color="#666666">"amg:print_grid_stats=1,"</font>;
+<a name="line534">534: </a>  amgx-&gt;cfg_contents += <font color="#666666">"amg:monitor_residual=0"</font>;
+
+<a name="line536">536: </a>  // Set whether AmgX output will be seen
+<a name="line537">537: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_amgx_verbose"</font>, <font color="#666666">"Enable output from AmgX"</font>, <font color="#666666">""</font>, amgx-&gt;verbose, &amp;amgx-&gt;verbose, NULL));
+<a name="line538">538: </a>  PetscOptionsHeadEnd();
+<a name="line539">539: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line540">540: </a>}
+
+<a name="line542">542: </a><strong><font color="#4169E1"><a name="PCView_AMGX"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCView_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line543">543: </a>{
+<a name="line544">544: </a>  PC_AMGX  *amgx = (PC_AMGX *)pc-&gt;data;
+<a name="line545">545: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> iascii;
+
+<a name="line547">547: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line548">548: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line549">549: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line550">550: </a><strong><font color="#FF0000">    std:</font></strong>:string output_cfg(amgx-&gt;cfg_contents);
+<a name="line551">551: </a><strong><font color="#FF0000">    std:</font></strong>:replace(output_cfg.begin(), output_cfg.end(), ',', '\n');
+<a name="line552">552: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"\n%s\n"</font>, output_cfg.c_str()));
+<a name="line553">553: </a>  }
+<a name="line554">554: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line555">555: </a>}
+
+<a name="line557">557: </a><font color="#B22222">/*MC</font>
+<a name="line558">558: </a><font color="#B22222">     <a href="../../../../../manualpages/PC/PCAMGX.html">PCAMGX</a> - Interface to NVIDIA's AmgX algebraic multigrid</font>
+
+<a name="line560">560: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line561">561: </a><font color="#B22222">+    -pc_amgx_amg_method &lt;CLASSICAL,AGGREGATION&gt; - set the AMG algorithm to use</font>
+<a name="line562">562: </a><font color="#B22222">.    -pc_amgx_amg_cycle &lt;V,W,F,CG&gt; - set the AMG cycle type</font>
+<a name="line563">563: </a><font color="#B22222">.    -pc_amgx_smoother &lt;PCG,PCGF,PBICGSTAB,GMRES,FGMRES,JACOBI_L1,BLOCK_JACOBI,GS,MULTICOLOR_GS,MULTICOLOR_ILU,MULTICOLOR_DILU,CHEBYSHEV_POLY,NOSOLVER&gt; - set the AMG pre/post smoother</font>
+<a name="line564">564: </a><font color="#B22222">.    -pc_amgx_jacobi_relaxation_factor - set the relaxation factor for Jacobi smoothing</font>
+<a name="line565">565: </a><font color="#B22222">.    -pc_amgx_gs_symmetric - enforce symmetric Gauss-Seidel smoothing (only applies if GS smoothing is selected)</font>
+<a name="line566">566: </a><font color="#B22222">.    -pc_amgx_selector &lt;SIZE_2,SIZE_4,SIZE_8,MULTI_PAIRWISE,PMIS,HMIS&gt; - set the AMG coarse selector</font>
+<a name="line567">567: </a><font color="#B22222">.    -pc_amgx_presweeps - set the number of AMG pre-sweeps</font>
+<a name="line568">568: </a><font color="#B22222">.    -pc_amgx_postsweeps - set the number of AMG post-sweeps</font>
+<a name="line569">569: </a><font color="#B22222">.    -pc_amgx_max_levels - set the maximum number of levels in the AMG level hierarchy</font>
+<a name="line570">570: </a><font color="#B22222">.    -pc_amgx_strength_threshold - set the strength threshold for the AMG coarsening</font>
+<a name="line571">571: </a><font color="#B22222">.    -pc_amgx_aggressive_levels - set the number of levels (from the finest) that should apply aggressive coarsening</font>
+<a name="line572">572: </a><font color="#B22222">.    -pc_amgx_coarse_solver &lt;DENSE_LU_SOLVER,NOSOLVER&gt; - set the coarse solve</font>
+<a name="line573">573: </a><font color="#B22222">.    -pc_amgx_print_grid_stats - output the AMG grid hierarchy to stdout</font>
+<a name="line574">574: </a><font color="#B22222">-    -pc_amgx_verbose - enable AmgX output</font>
+
+<a name="line576">576: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line578">578: </a><font color="#B22222">   Note:</font>
+<a name="line579">579: </a><font color="#B22222">     Implementation will accept host or device pointers, but good performance will require that the `<a href="../../../../../manualpages/KSP/KSP.html">KSP</a>` is also GPU accelerated so that data is not frequently transferred between host and device.</font>
+
+<a name="line581">581: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>`, `<a href="../../../../../manualpages/PC/PCHYPRE.html">PCHYPRE</a>`, `<a href="../../../../../manualpages/PC/PCMG.html">PCMG</a>`, `<a href="../../../../../manualpages/PC/PCAmgXGetResources.html">PCAmgXGetResources</a>()`, `<a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>()`, `<a href="../../../../../manualpages/PC/PCSetType.html">PCSetType</a>()`, `<a href="../../../../../manualpages/PC/PCType.html">PCType</a>` (for list of available types), `<a href="../../../../../manualpages/PC/PC.html">PC</a>`</font>
+<a name="line582">582: </a><font color="#B22222">M*/</font>
+
+<a name="line584">584: </a><strong><font color="#4169E1"><a name="PCCreate_AMGX"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCCreate_AMGX(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line585">585: </a>{
+<a name="line586">586: </a>  PC_AMGX *amgx;
+
+<a name="line588">588: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line589">589: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;amgx));
+<a name="line590">590: </a>  pc-&gt;ops-&gt;apply          = PCApply_AMGX;
+<a name="line591">591: </a>  pc-&gt;ops-&gt;setfromoptions = PCSetFromOptions_AMGX;
+<a name="line592">592: </a>  pc-&gt;ops-&gt;setup          = PCSetUp_AMGX;
+<a name="line593">593: </a>  pc-&gt;ops-&gt;view           = PCView_AMGX;
+<a name="line594">594: </a>  pc-&gt;ops-&gt;destroy        = PCDestroy_AMGX;
+<a name="line595">595: </a>  pc-&gt;ops-&gt;reset          = PCReset_AMGX;
+<a name="line596">596: </a>  pc-&gt;data                = (void *)amgx;
+
+<a name="line598">598: </a>  // Set the defaults
+<a name="line599">599: </a>  amgx-&gt;selector                 = AmgXSelector::PMIS;
+<a name="line600">600: </a>  amgx-&gt;smoother                 = AmgXSmoother::BlockJacobi;
+<a name="line601">601: </a>  amgx-&gt;amg_method               = AmgXAMGMethod::Classical;
+<a name="line602">602: </a>  amgx-&gt;coarse_solver            = AmgXCoarseSolver::DenseLU;
+<a name="line603">603: </a>  amgx-&gt;amg_cycle                = AmgXAMGCycle::V;
+<a name="line604">604: </a>  amgx-&gt;exact_coarse_solve       = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line605">605: </a>  amgx-&gt;presweeps                = 1;
+<a name="line606">606: </a>  amgx-&gt;postsweeps               = 1;
+<a name="line607">607: </a>  amgx-&gt;max_levels               = 100;
+<a name="line608">608: </a>  amgx-&gt;strength_threshold       = 0.5;
+<a name="line609">609: </a>  amgx-&gt;aggressive_levels        = 0;
+<a name="line610">610: </a>  amgx-&gt;dense_lu_num_rows        = 1;
+<a name="line611">611: </a>  amgx-&gt;jacobi_relaxation_factor = 0.9;
+<a name="line612">612: </a>  amgx-&gt;gs_symmetric             = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line613">613: </a>  amgx-&gt;print_grid_stats         = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line614">614: </a>  amgx-&gt;verbose                  = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line615">615: </a>  amgx-&gt;rsrc_init                = false;
+<a name="line616">616: </a>  amgx-&gt;solve_state_init         = false;
+
+<a name="line618">618: </a>  s_count++;
+
+<a name="line620">620: </a>  PetscCallCUDA(cudaGetDevice(&amp;amgx-&gt;devID));
+<a name="line621">621: </a>  <font color="#4169E1">if</font> (s_count == 1) {
+<a name="line622">622: </a>    PetscCallAmgX(AMGX_initialize());
+<a name="line623">623: </a>    PetscCallAmgX(AMGX_initialize_plugins());
+<a name="line624">624: </a>    PetscCallAmgX(AMGX_register_print_callback(&amp;print_callback));
+<a name="line625">625: </a>    PetscCallAmgX(AMGX_install_signal_handler());
+<a name="line626">626: </a>  }
+<a name="line627">627: </a>  <font color="#B22222">/* This communicator is not yet known to this system, so we duplicate it and make an internal communicator */</font>
+<a name="line628">628: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_dup.html#MPI_Comm_dup">MPI_Comm_dup</a>(<a href="../../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc), &amp;amgx-&gt;comm));
+<a name="line629">629: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(amgx-&gt;comm, &amp;amgx-&gt;nranks));
+<a name="line630">630: </a>  <a href="../../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(amgx-&gt;comm, &amp;amgx-&gt;rank));
+
+<a name="line632">632: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(amgx_output_messages(amgx));
+<a name="line633">633: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line634">634: </a>}
+
+<a name="line636">636: </a><font color="#B22222">/*@C</font>
+<a name="line637">637: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCAmgXGetResources.html">PCAmgXGetResources</a> - get AMGx's internal resource object</font>
+
+<a name="line639">639: </a><font color="#B22222">    Not Collective</font>
+
+<a name="line641">641: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line642">642: </a><font color="#B22222">.  pc - the <a href="../../../../../manualpages/PC/PC.html">PC</a></font>
+
+<a name="line644">644: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line645">645: </a><font color="#B22222">.  rsrc_out - pointer to the AMGx resource object</font>
+
+<a name="line647">647: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line649">649: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCAMGX.html">PCAMGX</a>`, `<a href="../../../../../manualpages/PC/PC.html">PC</a>`, `<a href="../../../../../manualpages/PC/PCGAMG.html">PCGAMG</a>`</font>
+<a name="line650">650: </a><font color="#B22222">@*/</font>
+<a name="line651">651: </a><strong><font color="#4169E1"><a name="PCAmgXGetResources"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCAmgXGetResources.html">PCAmgXGetResources</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, void *rsrc_out)</font></strong>
+<a name="line652">652: </a>{
+<a name="line653">653: </a>  PC_AMGX *amgx = (PC_AMGX *)pc-&gt;data;
+
+<a name="line655">655: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line656">656: </a>  <font color="#4169E1">if</font> (!amgx-&gt;rsrc_init) {
+<a name="line657">657: </a>    // Read configuration file
+<a name="line658">658: </a>    PetscCallAmgX(AMGX_config_create(&amp;amgx-&gt;cfg, amgx-&gt;cfg_contents.c_str()));
+<a name="line659">659: </a>    PetscCallAmgX(AMGX_resources_create(&amp;amgx-&gt;rsrc, amgx-&gt;cfg, &amp;amgx-&gt;comm, 1, &amp;amgx-&gt;devID));
+<a name="line660">660: </a>    amgx-&gt;rsrc_init = true;
+<a name="line661">661: </a>  }
+<a name="line662">662: </a>  *static_cast&lt;AMGX_resources_handle *&gt;(rsrc_out) = amgx-&gt;rsrc;
+<a name="line663">663: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line664">664: </a>}
+</pre>
+</body>
+
+</html>

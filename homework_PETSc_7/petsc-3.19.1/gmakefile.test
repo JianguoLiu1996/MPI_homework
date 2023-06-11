@@ -1,0 +1,539 @@
+# -*- mode: makefile-gmake -*-
+-include petscdir.mk
+
+.SUFFIXES: .F  .F90 .f90 ${SUFFIXES} .PETSc .C .cc .cpp .cxx .r .rm .so .html .ad .m .tex .make  .fig .svg .eps .pdf .jpg .png .dvi .ps .F95 .f95 .fiat .cu .kokkos.cxx .raja.cxx .hip.cpp .sycl.cxx
+
+CONFIGDIR := $(PETSC_DIR)/config
+
+# TESTSRCDIR is always relative to gmakefile.test
+#  This must be before includes
+mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
+TESTSRCDIR := $(dir $(mkfile_path))src
+
+-include $(PETSC_DIR)/$(PETSC_ARCH)/lib/petsc/conf/petscvariables
+-include $(PETSC_DIR)/lib/petsc/conf/variables
+
+TESTDIR ?= ./$(PETSC_ARCH)/tests
+MODDIR := $(PETSC_DIR)/$(PETSC_ARCH)/include
+TESTLOGTAPFILE ?= $(TESTDIR)/test_$(PETSC_ARCH)_tap.log
+TESTLOGERRFILE ?= $(TESTDIR)/test_$(PETSC_ARCH)_err.log
+EXAMPLESDIR := $(TESTSRCDIR)
+
+pkgs := sys vec mat dm ksp snes ts tao
+
+petscconf      := $(PETSC_DIR)/$(PETSC_ARCH)/include/petscconf.h
+petscvariables := $(PETSC_DIR)/$(PETSC_ARCH)/lib/petsc/conf/petscvariables
+generatedtest  := $(TESTDIR)/testfiles
+
+.SECONDEXPANSION:		# to expand $$(@D)/.DIR
+
+TESTFLAGS :=             # Initialize as simple variable
+
+#workaround old cygwin versions
+ifeq ($(PETSC_CYGWIN_BROKEN_PIPE),1)
+ifeq ($(shell basename $(AR)),ar)
+  V ?=1
+endif
+endif
+# gmake should turn '-s', '--silent', and '--quiet' into an 's' in the first word of MAKEFLAGS
+MAKEFLAGS_FW=$(firstword $(MAKEFLAGS))
+# ignore first work if it starts with -, because then there are no shortoptions
+MAKEFLAGS_SHORT=$(patsubst -%,,$(MAKEFLAGS_FW))
+MAKEFLAGS_SILENT=$(findstring s,$(MAKEFLAGS_SHORT))
+V ?= $(if $(MAKEFLAGS_SILENT),0)
+ifeq ($(V),)  # Default
+  quiet_HELP := "Use \"$(MAKE) V=1\" to see verbose compile lines, \"$(MAKE) V=0\" to suppress.\n"
+  quiet = @printf $(quiet_HELP)$(eval quiet_HELP:=)" %10s %s\n" "$1$2" "$@"; $($1)
+  quiettest = @printf " %10s %s\n" "TEST" "$(@:$(TESTDIR)/counts/%.counts=%)";
+else ifeq ($(V),0)		# Suppress entire command
+  quiet = @$($1)
+  quiettest = @
+  TESTFLAGS += -o err_only
+else				# Show the full command line
+  quiet = $($1)
+  quiettest =
+  TESTFLAGS += -v
+endif
+
+ifeq ($(FORCE),1)
+  TESTFLAGS += -f    # force test execution
+endif
+ifeq ($(CUDAMEMCHECK),1)
+  TESTFLAGS += -U    # Add cuda-memcheck option to the flags
+endif
+ifeq ($(VALGRIND),1)
+  TESTFLAGS += -V    # Add valgrind option to the flags
+endif
+ifeq ($(DEBUG),1)
+  TESTFLAGS += -d    # Launch test in debugger
+endif
+ifeq ($(REPLACE),1)
+  TESTFLAGS += -m    # Replace results by passing -m to petscdiff
+endif
+ifeq ($(OUTPUT),1)
+  TESTFLAGS += -o 'err_only'    # Show only the errors on stdout
+endif
+ifeq ($(ALT),1)
+  TESTFLAGS += -M    # Replace alt files by passing -M to petscdiff
+endif
+PRINTONLY ?= 0
+ifeq ($(PRINTONLY),1)
+  TESTFLAGS += -p    # Pass -p to petscdiff to print only command
+endif
+ifeq ($(DIFF_NUMBERS),1)
+  TESTFLAGS += -j    # Pass -j to petscdiff to diff the actual numbers
+endif
+ifdef OPTIONS
+  TESTFLAGS += -a '$(OPTIONS)'   # override arguments
+endif
+ifdef EXTRA_OPTIONS
+  TESTFLAGS += -e '$(EXTRA_OPTIONS)'  # add extra arguments
+endif
+ifdef NP
+  TESTFLAGS += -n $(NP)  # set number of processes
+endif
+# Override the default timeout that may be found at the top of config/petsc_harness.sh
+# This must be an integer.  It is given in seconds.
+ifdef TIMEOUT
+  TESTFLAGS += -t $(TIMEOUT)  # Override the default timeout
+endif
+
+$(generatedtest) : $(petscconf) $(petscvariables) $(CONFIGDIR)/gmakegentest.py $(TESTDIR)/.DIR | $$(@D)/.DIR
+	$(PYTHON) $(CONFIGDIR)/gmakegentest.py --petsc-dir=$(PETSC_DIR) --petsc-arch=$(PETSC_ARCH) --testdir=$(TESTDIR)
+
+ifneq ($(filter-out help clean check info libs all install install-lib checkbadSource checkbadFileChange allfortranstubs alletags clangformat checkclangformat get%,$(MAKECMDGOALS:clean%=clean)),)
+include $(generatedtest)
+endif
+
+ifeq ($(PETSC_LANGUAGE),CXXONLY)
+  cc_name := CXX
+else
+  cc_name := CC
+endif
+
+PETSC_COMPILE.c = $(call quiet,$(cc_name)) -c $(PCC_FLAGS) $($(CLANGUAGE)FLAGS) $(CCPPFLAGS) $(C_DEPFLAGS)
+PETSC_COMPILE.cxx = $(call quiet,CXX) -c $(CXX_FLAGS) $(CXXFLAGS) $(CXXCPPFLAGS) $(CXX_DEPFLAGS)
+PETSC_COMPILE.cu = $(call quiet,CUDAC) -c $(MPICXX_INCLUDES) $(CUDAC_FLAGS) $(CUDAPP_FLAGS) $(CUDAFLAGS) $(CUDA_HOSTFLAGS)
+PETSC_COMPILE.hip.cpp = $(call quiet,HIPC) -c $(MPICXX_INCLUDES) $(HIPC_FLAGS) $(HIPPP_FLAGS) $(HIPFLAGS) $(HIPPPFLAGS) $(HIPOPTFLAGS) $(HIPC_DEPFLAGS) $(CXXFLAGS) $(CXXCPPFLAGS) $(HIP_DEPFLAGS)
+PETSC_COMPILE.sycl.cxx = $(call quiet,SYCLC) -c $(MPICXX_INCLUDES) $(SYCLC_FLAGS) $(SYCLPP_FLAGS) $(SYCLFLAGS) $(SYCLPPFLAGS) $(SYCLOPTFLAGS) $(CXXFLAGS) $(CXXCPPFLAGS) $(SYCL_DEPFLAGS)
+PETSC_GENDEPS.cu = ${CUDA_PETSC_GENDEPS}
+PETSC_COMPILE.F = $(call quiet,FC) -c $(FC_FLAGS) $(FFLAGS) $(FCPPFLAGS) $(FC_DEPFLAGS)
+
+ifneq ($(KOKKOS_USE_CUDA_COMPILER),)
+  # Kokkos requires nvcc to be in PATH and the C++ compiler to be given in an environmental variable
+  KOKC = PATH=`dirname $(CUDAC)`:$(PATH) NVCC_WRAPPER_DEFAULT_COMPILER="$(CUDA_CXX)" $(KOKKOS_BIN)/nvcc_wrapper --expt-extended-lambda
+  KOKKOS_COMPILE = $(call quiet,KOKC) -c $(CUDAC_FLAGS) ${PETSC_CXXCPPFLAGS} $(CUDACPPFLAGS) $(CUDA_CXXFLAGS) $(MPICXX_INCLUDES)
+else ifneq ($(KOKKOS_USE_CUDACLANG_COMPILER),)
+  KOKKOS_COMPILE = $(PETSC_COMPILE.cu)
+else ifneq ($(KOKKOS_USE_HIP_COMPILER),)
+  KOKKOS_COMPILE = $(PETSC_COMPILE.hip.cpp)
+else ifneq ($(KOKKOS_USE_SYCL_COMPILER),)
+  KOKKOS_COMPILE = $(PETSC_COMPILE.sycl.cxx)
+else
+  KOKKOS_COMPILE = $(PETSC_COMPILE.cxx)
+endif
+# https://github.com/kokkos/kokkos/pull/5473 used a C++17 feature, inline static variables.
+# We found -fvisibility=hidden could hide these variables such that the supposed globally unique
+# variables become local to each file including them and thus have multiple copies (see an example
+# at the end of PR5473). It might be a gcc bug thus we also filed at https://gcc.gnu.org/bugzilla/show_bug.cgi?id=107535
+# See also an older bug report related to visibility, https://gcc.gnu.org/bugzilla/show_bug.cgi?id=59693
+#
+# Our workaround here is to git rid of -fvisibility=hidden from Kokkos compiler options, so that petsc
+# files including Kokkos headers won't be affected by this flag.
+#
+# The solution is not ideal in the sense we have to duplicate the same workaround to any external libraries
+# using C++17 inline static variables. We have to wait for GNU to clarify this issue.
+PETSC_COMPILE.kokkos.cxx = $(filter-out -fvisibility=hidden,$(KOKKOS_COMPILE))
+
+ifneq ($(RAJA_USE_CUDA_COMPILER),)
+  PETSC_COMPILE.raja.cxx  = ${CUDAC} $(MPICXX_INCLUDES) ${CUDAC_FLAGS} -x cu -Xcudafe "--display_error_number" -c --compiler-options="${PETSC_CXXCPPFLAGS} ${PETSC_CC_INCLUDES} ${CUDA_CXXFLAGS}" --expt-extended-lambda --expt-relaxed-constexpr
+else
+  PETSC_COMPILE.raja.cxx = ${CXX} -o $*.o -c ${CXX_FLAGS} ${CXXFLAGS} ${CXXCPPFLAGS}
+endif
+
+testlangs := c cu cxx F F90 kokkos.cxx hip.cpp sycl.cxx raja.cxx
+$(foreach lang, $(testlangs), $(eval \
+  testexe.$(lang) = $(foreach pkg, $(pkgs), $(testsrcs-$(pkg).$(lang):%.$(lang)=$(TESTDIR)/%))))
+concattestlang = $(foreach lang, $(2), $(testsrcs-$(1).$(lang):%.$(lang)=$(TESTDIR)/%.o))
+testsrcs.o := $(foreach pkg, $(pkgs), $(call concattestlang,$(pkg),$(testlangs)))
+testsrcs-rel := $(foreach pkg, $(pkgs), $(foreach lang, $(testlangs), $(testsrcs-$(pkg).$(lang))))
+testsrcs := $(foreach sfile, $(testsrcs-rel), $(TESTSRCDIR)/$(sfile))
+
+# workaround win32fe failure
+ifneq (,$(findstring win_,$(call quiet,$(cc_name))))
+$(TESTDIR)/ts/tutorials/multirate/ex6: | $(TESTDIR)/ts/tutorials/multirate/ex5
+$(TESTDIR)/ts/tutorials/multirate/ex8: | $(TESTDIR)/ts/tutorials/multirate/ex6
+endif
+
+# Refresh testfiles when sources change, but don't balk if the source file is nonexistent (deleted)
+$(generatedtest) : $(testsrcs)
+$(testsrcs) :
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.c | $$(@D)/.DIR
+	$(PETSC_COMPILE.c) $(abspath $<) -o $@
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.kokkos.cxx | $$(@D)/.DIR
+	$(PETSC_COMPILE.kokkos.cxx) $(abspath $<) -o $@
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.sycl.cxx | $$(@D)/.DIR
+	$(PETSC_COMPILE.sycl.cxx) $(abspath $<) -o $@
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.raja.cxx | $$(@D)/.DIR
+	$(PETSC_COMPILE.raja.cxx) $(abspath $<) -o $@
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.cxx | $$(@D)/.DIR
+	$(PETSC_COMPILE.cxx) $(abspath $<) -o $@
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.cu | $$(@D)/.DIR
+	$(PETSC_COMPILE.cu) $(abspath $<) -o $@ # Compile first so that if there is an error, it comes from a normal compile
+	@$(PETSC_GENDEPS.cu) $(abspath $<) -o $(@:%.o=%.d) # Generate the dependencies for later
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.hip.cpp | $$(@D)/.DIR
+	$(PETSC_COMPILE.hip.cpp) $(abspath $<) -o $@
+
+# Test modules go in the same directory as the target *.o
+TESTMODDIR = $(@D)
+FCMOD = cd
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.F | $$(@D)/.DIR
+ifeq ($(FC_MODULE_OUTPUT_FLAG),)
+	$(call quiet,FCMOD) $(TESTMODDIR) && $(FC) -c $(FC_FLAGS) $(FFLAGS) $(FCPPFLAGS) $(FC_DEPFLAGS) -I$(dir $<) $(abspath $<) -o $(abspath $@)
+else
+	$(PETSC_COMPILE.F) -I$(dir $<) $(abspath $<) -o $@ $(FC_MODULE_OUTPUT_FLAG)$(TESTMODDIR) $(FC_MODULE_FLAG)$(TESTMODDIR)
+endif
+	-@$(GFORTRAN_DEP_CLEANUP)
+
+$(TESTDIR)/%.o : $(EXAMPLESDIR)/%.F90 | $$(@D)/.DIR
+ifeq ($(FC_MODULE_OUTPUT_FLAG),)
+	$(call quiet,FCMOD) $(TESTMODDIR) && $(FC) -c $(FC_FLAGS) $(FFLAGS) $(FCPPFLAGS) $(FC_DEPFLAGS) -I$(dir $<) $(abspath $<) -o $(abspath $@)
+else
+	$(PETSC_COMPILE.F) -I$(dir $<) $(abspath $<) -o $@ $(FC_MODULE_OUTPUT_FLAG)$(TESTMODDIR) $(FC_MODULE_FLAG)$(TESTMODDIR)
+endif
+	-@$(GFORTRAN_DEP_CLEANUP)
+
+#   This is a hack to fix a broken gfortran.
+define GFORTRAN_DEP_CLEANUP
+  if test -e "$(@:%.o=%.d)" && head -1 "$(@:%.o=%.d)" | grep -F -q -v : ; then\
+    echo "$(@): \\" > $(@:%.o=%.dtemp) ; \
+    tr '\n' '@' < $(@:%.o=%.d) | cut -d: -f2- | tr '@' '\n' >> $(@:%.o=%.dtemp) ; \
+    mv $(@:%.o=%.dtemp) $(@:%.o=%.d); \
+  fi
+endef
+
+# link line constructed differently for gmakefile vs gmakefile.test invocation
+ifeq ($(libpetscall),)
+PETSC_TEST_LIB = $(PETSC_LIB)
+else
+PETSC_TEST_LIB = $(C_SH_LIB_PATH) $(PETSC_EXTERNAL_LIB_BASIC)
+endif
+
+# manually list some some library dependencies to check for circular dependencies
+$(TESTDIR)/sys/tests/ex9: PETSC_TEST_LIB = $(PETSC_SYS_LIB)
+$(TESTDIR)/vec/vec/tests/ex1: PETSC_TEST_LIB = $(PETSC_VEC_LIB)
+$(TESTDIR)/mat/tests/ex1: PETSC_TEST_LIB = $(PETSC_MAT_LIB)
+$(TESTDIR)/dm/tests/ex1: PETSC_TEST_LIB = $(PETSC_DM_LIB)
+$(TESTDIR)/ksp/ksp/tests/ex1: PETSC_TEST_LIB = $(PETSC_KSP_LIB)
+$(TESTDIR)/snes/tests/ex1: PETSC_TEST_LIB = $(PETSC_SNES_LIB)
+$(TESTDIR)/ts/tests/ex2: PETSC_TEST_LIB = $(PETSC_TS_LIB)
+$(TESTDIR)/tao/tutorials/ex1: PETSC_TEST_LIB = $(PETSC_TAO_LIB)
+
+# MACOS FIREWALL HANDLING
+# - if run with MACOS_FIREWALL=1
+#   (automatically set in $PETSC_ARCH/lib/petsc/conf/petscvariables if configured --with-macos-firewall-rules),
+#   ensure mpiexec and test executable is on firewall list
+#
+ifeq ($(MACOS_FIREWALL),1)
+FW := /usr/libexec/ApplicationFirewall/socketfilterfw
+# There is no reliable realpath command in macOS without need for 3rd party tools like homebrew coreutils
+# Using Python's realpath seems like the most robust way here
+realpath-py = $(shell $(PYTHON) -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' $(1))
+#
+define macos-firewall-register
+  @APP=$(call realpath-py, $(1)); \
+    if ! sudo -n true 2>/dev/null; then printf "Asking for sudo password to add new firewall rule for\n  $$APP\n"; fi; \
+    sudo $(FW) --remove $$APP --add $$APP --blockapp $$APP
+endef
+endif
+#
+macos-firewall-register-mpiexec:
+	-$(call macos-firewall-register, $(MPIEXEC))
+
+# Test executables
+$(testexe.F) $(testexe.F90) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	$(call quiet,FLINKER) -o $@ $^ $(PETSC_TEST_LIB)
+	-$(call macos-firewall-register,$@)
+
+ifneq (,$(findstring emcc,$(CC)))
+$(testexe.c) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	-@$(call quiet,CLINKER) -s MAIN_MODULE -s ASSERTIONS=2 -s SAFE_HEAP=1 -s STACK_OVERFLOW_CHECK=1 -s ALLOW_MEMORY_GROWTH $(EXEFLAGS) -o $@.js $@.o $(PETSC_LIB)
+	-@printf '#!/usr/bin/env sh\nnode --redirect-warnings=/dev/null  $$0.js $$*  | grep -v "Heap resize call from"'  > $@
+	-@chmod u+x $@
+else
+$(testexe.c) $(testexe.cu) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	$(call quiet,CLINKER) $(EXEFLAGS) -o $@ $^ $(PETSC_TEST_LIB)
+	-$(call macos-firewall-register,$@)
+
+endif
+
+$(testexe.hip.cpp) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	$(call quiet,CLINKER) -o $@ $^ $(PETSC_TEST_LIB)
+	-$(call macos-firewall-register,$@)
+
+$(testexe.kokkos.cxx) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	$(call quiet,CLINKER) $(EXEFLAGS) -o $@ $^ $(PETSC_TEST_LIB)
+	-$(call macos-firewall-register,$@)
+
+$(testexe.raja.cxx) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	$(call quiet,CLINKER) -o $@ $^ $(PETSC_TEST_LIB)
+	-$(call macos-firewall-register,$@)
+
+$(testexe.cxx) : $(TESTDIR)/% : $(TESTDIR)/%.o $$^ $(libpetscall)
+	$(call quiet,CXXLINKER) -o $@ $^ $(PETSC_TEST_LIB)
+	-$(call macos-firewall-register,$@)
+
+# Fortran source files need petsc*.mod, which isn't explicitly managed in the makefile.
+$(foreach pkg, $(pkgs), $(call concattestlang,$(pkg),F F90)) : $(libpetscall)
+
+# Testing convenience targets
+.PHONY: test pre-clean
+
+test: report_tests
+
+pre-clean:
+	@$(RM) -rf $(TESTDIR)/counts $(TESTLOGTAPFILE) $(TESTLOGERRFILE)
+	@touch $(TESTLOGTAPFILE) $(TESTLOGERRFILE)
+	@echo "Using MAKEFLAGS:" ${MAKEFLAGS}
+
+check-test-errors:
+	@grep '^not ok' $(TESTLOGTAPFILE) | grep -v 'Exceeded timeout' | tee $(TESTDIR)/allgtests-tap-err.log
+	@test ! -s $(TESTDIR)/allgtests-tap-err.log
+
+.PHONY: $(foreach pkg, $(pkgs), test-$(pkg) $(foreach lang, $(testlangs), test-$(pkg).$(lang) test-rm-$(pkg).$(lang)))
+testpkgs := $(foreach pkg, $(pkgs), test-$(pkg))
+# Targets to run tests in test-$pkg.$lang and delete the executables, language by language
+$(testpkgs) : test-% : $(foreach lang, $(testlangs), test-rm-%.$(lang))
+# List of raw test run targets
+alltesttargets := $(foreach tp, $(testpkgs), $(foreach lang, $(testlangs), $($(tp).$(lang))))
+
+# Run targets
+$(alltesttargets) : % : $(TESTDIR)/counts/%.counts
+.PHONY: $(alltesttargets)
+
+$(TESTDIR)/counts/%.counts :
+	$(quiettest) $< $(TESTFLAGS)
+
+# Targets to run tests and remove executables, by package-lang pairs.
+# Run the tests in each batch using recursive invocation of make because
+# we need all of them to complete before removing the executables.  Make
+# doesn't guarantee an exploration order for the graph.  Only recursive
+# if there is something to be done.
+alltest-rm := $(foreach pkg, $(pkgs), $(foreach lang, $(testlangs), test-rm-$(pkg).$(lang)))
+$(alltest-rm) : test-rm-% : test-%
+ifneq ($(NO_RM),1)
+	$(call quiet,RM) $(addprefix $(TESTDIR)/,$(basename $($(@:test-rm-%=testsrcs-%))))
+endif
+
+# Remove intermediate .o files
+# This only removes the files at the end which is insufficient
+#.INTERMEDIATE: $(testsrcs.o:%.o=%)
+
+# all sources should get recompiled when petscvariables changes (i.e when configure is rerun or when petscvariables is manually edited.)
+$(testsrcs.o) : $(petscvariables)
+
+%/.DIR :
+	@mkdir -p $(@D)
+	@touch $@
+
+.PRECIOUS: %/.DIR
+
+.SUFFIXES: # Clear .SUFFIXES because we don't use implicit rules
+.DELETE_ON_ERROR:               # Delete likely-corrupt target file if rule fails
+
+.PHONY: clean cleantest all
+
+cleantest:
+	${RM} -r $(TESTDIR) $(generatedtest)
+
+clean: cleantest
+
+alltest.d := $(testsrcs.o:%.o=%.d)
+# Tell make that alltest.d are all up to date.  Without this, the include
+# below has quadratic complexity, taking more than one second for a
+# do-nothing build of PETSc (much worse for larger projects)
+$(alltest.d) : ;
+
+-include $(alltest.d)
+
+# Tests can be generated by searching -- see documentation below
+showreport=
+ifndef searchin
+   searchin = " "
+endif
+ifdef i
+   searchin = $(i)
+endif
+ifdef gs
+  gmakesearch = $(gs)
+endif
+ifdef gmakesearch
+  TESTTARGETS := $(filter $(gmakesearch),$(alltesttargets))
+  ifdef gmakesearchin
+    TESTTARGETS2 := $(foreach v,$(TESTTARGETS),$(if $(findstring $(gmakesearchin),$(v)),$(v)))
+    TESTTARGETS := $(TESTTARGETS2)
+  endif
+else ifdef gmakesearchin
+  TESTTARGETS := $(foreach v,$(alltesttargets),$(if $(findstring $(gmakesearchin),$(v)),$(v)))
+else ifdef argsearch
+  TESTTARGETS := $(foreach v,$(alltesttargets),$(if $(findstring $(argsearch),$($(v)_ARGS)),$(v)))
+else ifdef search
+  TESTTARGETS := $(shell $(PYTHON) $(CONFIGDIR)/query_tests.py --testdir=$(TESTDIR) --petsc-dir=$(PETSC_DIR) --petsc-arch=$(PETSC_ARCH) --searchin=$(searchin) 'name' '$(search)')
+else ifdef s
+  TESTTARGETS := $(shell $(PYTHON) $(CONFIGDIR)/query_tests.py --testdir=$(TESTDIR) --petsc-dir=$(PETSC_DIR) --petsc-arch=$(PETSC_ARCH) --searchin=$(searchin) 'name' '$(s)')
+else ifdef test-fail
+  TESTTARGETS := $(shell $(TESTDIR)/echofailures.sh)
+else ifdef query
+  TESTTARGETS := $(shell $(PYTHON) $(CONFIGDIR)/query_tests.py --testdir=$(TESTDIR) --petsc-dir=$(PETSC_DIR) --petsc-arch=$(PETSC_ARCH) --searchin=$(searchin) '$(query)' '$(queryval)')
+else ifdef q
+  TESTTARGETS := $(shell $(PYTHON) $(CONFIGDIR)/query_tests.py --testdir=$(TESTDIR) --petsc-dir=$(PETSC_DIR) --petsc-arch=$(PETSC_ARCH) --searchin=$(searchin) '$(q)' '$(qv)')
+else                            # No filter - run them all, but delete the executables as we go
+  TESTTARGETS := $(testpkgs)
+  ifneq ($(PRINTONLY),1)
+    showreport = "-s"  # Only show full report when all tests are run
+  endif
+endif
+
+.PHONY: report_tests print-test
+
+print-test:
+	$(info $(TESTTARGETS))
+	@true
+
+show-fail:
+	-@$(PYTHON) $(CONFIGDIR)/report_tests.py -d $(TESTDIR)/counts -f
+
+
+
+# Don't start running tests until starttime has completed
+$(alltesttargets:%=$(TESTDIR)/counts/%.counts) : starttime
+
+# Ensure that libpetsc (if it is a prerequisite) has been built and clean the counts/logs before starting timer
+starttime: pre-clean $(libpetscall) macos-firewall-register-mpiexec
+	@$(eval STARTTIME := $(shell date +%s))
+
+report_tests: starttime $(TESTTARGETS)
+	@$(eval ENDTIME := $(shell date +%s))
+	-@ elapsed_time=$$(($(ENDTIME)- $(STARTTIME))) && \
+	$(PYTHON) $(CONFIGDIR)/report_tests.py -m $(MAKE) -d $(TESTDIR)/counts -t 5 -e $${elapsed_time} $(showreport)
+
+check_output:
+	$(PYTHON) $(CONFIGDIR)/gmakegentest.py --petsc-dir=$(PETSC_DIR) --petsc-arch=$(PETSC_ARCH) --testdir=$(TESTDIR) --check-output
+
+# If users make is a gnumake then these messages are provided even if the user does not do make -f gmakefile.test
+HASGMAKEFILE := $(filter gmakefile,$(MAKEFILE_LIST))
+ifeq ($(HASGMAKEFILE),gmakefile)
+helpdeps:= help-nontest
+else
+helpdeps:= help-test
+endif
+
+help: help-make ${helpdeps}
+	-@echo ""
+
+help-make:
+	-@echo
+	-@echo "PETSc makefile Basic usage:"
+	-@echo "  ${OMAKE} rule <V=1 for verbose output> <other options>"
+	-@echo
+
+help-nontest:
+	-@echo "Available rules:"
+	-@echo "   all - build (update) the PETSc and related libraries in parallel"
+	-@echo "   libs - build (update) the PETSc and related libraries"
+	-@echo "   check - run a basic check that the libraries are built correctly and can be used"
+	-@echo "   "
+	-@echo "   getlinklibs - print the libraries that a PETSc application must link against"
+	-@echo "   getincludedirs - print the include directories that a PETSc application must be compiled against"
+	-@echo "   getcflags - print the C compiler flags PETSc is using"
+	-@echo "   getcxxflags - print the C++ compiler flags PETSc is using"
+	-@echo "   getfortranflags - print the Fortran compiler flags PETSc is using"
+	-@echo "   "
+	-@echo "   petsc4pytest - run the entire petsc4py test suite"
+	-@echo "   alltests - run the entire PETSc test suite"
+	-@echo "   test - use \"make help-test\" for help on running the extensive tests"
+	-@echo
+	-@echo "Developer rules:"
+	-@echo "   docs - build all the PETSc documentation locally as a website"
+	-@echo "   clean - delete libraries and Fortran module files (used in $PETSC_DIR)"
+	-@echo "           delete compilied examples, .o and related files (used in tutorials or test directories)"
+	-@echo "   clangformat - run clangformat on the PETSc C/C++ source code"
+	-@echo "   allfortranstubs - regenerate Fortran stubs/interface definitions, needed after git pulls or source code changes"
+	-@echo "   deletefortranstubs - delete the generated Fortran stubs/interface definitions"
+	-@echo "   checkbadSource - check the source code for violations of coding standards"
+	-@echo "   abitest - Compare ABI/API of two versions of PETSc library with the old one defined by PETSC_{DIR,ARCH}_ABI_OLD"
+	-@echo "   reconfigure - delete libraries and Fortran module files and run the previously run configure again"
+	-@echo "   lint - run lint on the source code, including its embedded documentation"
+	-@echo "     Run \"${OMAKE} help-lint\" for lint options"
+	-@echo "   "
+	-@echo "Building website: (run in the doc directory)"
+	-@cd doc; ${OMAKE} help
+	-@echo "   "
+
+help-test:
+	-@echo "Test usage:"
+	-@echo "   ${OMAKE} test <options>"
+	-@echo
+	-@echo "Options:"
+	-@echo "  NO_RM=1           Do not remove the executables after running"
+	-@echo "  REPLACE=1         Replace the output in PETSC_DIR source tree (-m to test scripts)"
+	-@echo "  OUTPUT=1          Show only the errors on stdout"
+	-@echo "  ALT=1             Replace 'alt' output in PETSC_DIR source tree (-M to test scripts)"
+	-@echo "  DIFF_NUMBERS=1    Diff the numbers in the output (-j to test scripts and petscdiff)"
+	-@echo "  CUDAMEMCHECK=1    Execute the tests using cuda-memcheck (-U to test scripts)"
+	-@echo "                    Use PETSC_CUDAMEMCHECK_COMMAND to change the executable to run and"
+	-@echo "                    PETSC_CUDAMEMCHECK_ARGS to change the arguments (note: both"
+	-@echo "                    cuda-memcheck and compute-sanitizer are supported)"
+	-@echo "  VALGRIND=1        Execute the tests using valgrind (-V to test scripts)"
+	-@echo "  DEBUG=1           Launch tests in the debugger (-d to the scripts)"
+	-@echo "  NP=<num proc>     Set a number of processors to pass to scripts."
+	-@echo "  FORCE=1           Force SKIP or TODO tests to run"
+	-@echo "  PRINTONLY=1       Print the command, but do not run.  For loops print first command"
+	-@echo "  TIMEOUT=<time>    Test timeout limit in seconds (default in config/petsc_harness.sh)"
+	-@echo "  TESTDIR='tests'   Subdirectory where tests are run ($${PETSC_DIR}/$${PETSC_ARCH}/$${TESTDIR}"
+	-@echo "                    or $${PREFIX_DIR}/$${TESTDIR}"
+	-@echo "                    or $${PREFIX_DIR}/share/petsc/examples/$${TESTDIR})"
+	-@echo "  TESTBASE='tests'   Subdirectory where tests are run ($${PETSC_DIR}/$${PETSC_ARCH}/$${TESTDIR}"
+	-@echo "  OPTIONS='<args>'  Override options to scripts (-a to test scripts)"
+	-@echo "  EXTRA_OPTIONS='<args>'  Add options to scripts (-e to test scripts)"
+	-@echo
+	-@echo "Special options for macOS:"
+	-@echo "  MACOS_FIREWALL=1  Add each built test to the macOS firewall list to prevent popups. Configure --with-macos-firewall-rules to make this default"
+	-@echo
+	-@echo "Tests can be generated by searching with multiple methods"
+	-@echo "  For general searching (using config/query_tests.py):"
+	-@echo "    ${OMAKE} test search='sys*ex2*'"
+	-@echo "   or the shortcut using s"
+	-@echo "    ${OMAKE} test s='sys*ex2*'"
+	-@echo "  You can also use the full path to a file directory"
+	-@echo "    ${OMAKE} test s='src/sys/tests/'"
+	-@echo
+	-@echo "  To search for fields from the original test definitions:"
+	-@echo "    ${OMAKE} test query='requires' queryval='*MPI_PROCESS_SHARED_MEMORY*'"
+	-@echo "   or the shortcut using q and qv"
+	-@echo "    ${OMAKE} test q='requires' qv='*MPI_PROCESS_SHARED_MEMORY*'"
+	-@echo "  To filter results from other searches, use searchin"
+	-@echo "    ${OMAKE} test s='src/sys/tests/' searchin='*options*'"
+	-@echo
+	-@echo "  To re-run the last tests which failed:"
+	-@echo "    ${OMAKE} test test-fail='1'"
+	-@echo
+	-@echo "  To see which targets match a given pattern (useful for doing a specific target):"
+	-@echo "    ${OMAKE} print-test search=sys*"
+	-@echo
+	-@echo "  To build an executable, give full path to location:"
+	-@echo '    ${OMAKE} $${PETSC_ARCH}/tests/sys/tests/ex1'
+	-@echo "  or make the test with NO_RM=1"
+	-@echo
+
+help-targets:
+	-@echo "All makefile targets and their dependencies:"
+	-@grep ^[a-z] ${makefile} | grep : | grep -v =
+	-@echo

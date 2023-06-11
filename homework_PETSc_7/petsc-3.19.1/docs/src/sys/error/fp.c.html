@@ -1,0 +1,678 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/sys/error/fp.c">Actual source code: fp.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:32+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">   IEEE error handler for all machines. Since each OS has</font>
+<a name="line4">  4: </a><font color="#B22222">   enough slight differences we have completely separate codes for each one.</font>
+<a name="line5">  5: </a><font color="#B22222">*/</font>
+
+<a name="line7">  7: </a><font color="#B22222">/*</font>
+<a name="line8">  8: </a><font color="#B22222">  This feature test macro provides FE_NOMASK_ENV on GNU.  It must be defined</font>
+<a name="line9">  9: </a><font color="#B22222">  at the top of the file because other headers may pull in fenv.h even when</font>
+<a name="line10"> 10: </a><font color="#B22222">  not strictly necessary.  Strictly speaking, we could include ONLY petscconf.h,</font>
+<a name="line11"> 11: </a><font color="#B22222">  check PETSC_HAVE_FENV_H, and only define _GNU_SOURCE in that case, but such</font>
+<a name="line12"> 12: </a><font color="#B22222">  shenanigans ought to be unnecessary.</font>
+<a name="line13"> 13: </a><font color="#B22222">*/</font>
+<a name="line14"> 14: </a><font color="#A020F0">#if !defined(_GNU_SOURCE)</font>
+<a name="line15"> 15: </a><strong><font color="#228B22">  #define _GNU_SOURCE</font></strong>
+<a name="line16"> 16: </a><font color="#A020F0">#endif</font>
+
+<a name="line18"> 18: </a>#include <A href="../../../include/petsc/private/petscimpl.h.html">&lt;petsc/private/petscimpl.h&gt;</A>
+<a name="line19"> 19: </a><font color="#A020F0">#include &lt;signal.h&gt;</font>
+
+<a name="line21"> 21: </a><font color="#4169E1"><a name="PetscFPTrapLink"></a>struct PetscFPTrapLink </font>{
+<a name="line22"> 22: </a>  <a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a>             trapmode;
+<a name="line23"> 23: </a>  <font color="#4169E1">struct PetscFPTrapLink</font> *next;
+<a name="line24"> 24: </a>};
+<a name="line25"> 25: </a>static <a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a>             _trapmode = <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_OFF</a>; <font color="#B22222">/* Current trapping mode; see <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>() */</font>
+<a name="line26"> 26: </a>static <font color="#4169E1">struct PetscFPTrapLink</font> *_trapstack;                    <font color="#B22222">/* Any pushed states of _trapmode */</font>
+
+<a name="line28"> 28: </a><font color="#B22222">/*@</font>
+<a name="line29"> 29: </a><font color="#B22222">   <a href="../../../manualpages/Sys/PetscFPTrapPush.html">PetscFPTrapPush</a> - push a floating point trapping mode, restored using `<a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>()`</font>
+
+<a name="line31"> 31: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line33"> 33: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line34"> 34: </a><font color="#B22222">.    trap - `PETSC_FP_TRAP_ON` or `<a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_OFF</a>` or any of the values passable to `<a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>()`</font>
+
+<a name="line36"> 36: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line38"> 38: </a><font color="#B22222">   Notes:</font>
+<a name="line39"> 39: </a><font color="#B22222">     This only changes the trapping if the new mode is different than the current mode.</font>
+
+<a name="line41"> 41: </a><font color="#B22222">     This routine is called to turn off trapping for certain LAPACK routines that assume that dividing</font>
+<a name="line42"> 42: </a><font color="#B22222">     by zero is acceptable. In particular the routine ieeeck().</font>
+
+<a name="line44"> 44: </a><font color="#B22222">     Most systems by default have all trapping turned off, but certain Fortran compilers have</font>
+<a name="line45"> 45: </a><font color="#B22222">     link flags that turn on trapping before the program begins.</font>
+<a name="line46"> 46: </a><font color="#B22222">$       gfortran -ffpe-trap=invalid,zero,overflow,underflow,denormal</font>
+<a name="line47"> 47: </a><font color="#B22222">$       ifort -fpe0</font>
+
+<a name="line49"> 49: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>()`, `<a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>()`, `<a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>()`</font>
+<a name="line50"> 50: </a><font color="#B22222">@*/</font>
+<a name="line51"> 51: </a><strong><font color="#4169E1"><a name="PetscFPTrapPush"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscFPTrapPush.html">PetscFPTrapPush</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> trap)</font></strong>
+<a name="line52"> 52: </a>{
+<a name="line53"> 53: </a>  <font color="#4169E1">struct PetscFPTrapLink</font> *link;
+
+<a name="line55"> 55: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line56"> 56: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;link));
+<a name="line57"> 57: </a><font color="#A020F0">#if defined(PETSC_HAVE_THREADSAFETY) &amp;&amp; defined(PETSC_HAVE_OPENMP)</font>
+<a name="line58"> 58: </a>  PetscPragmaOMP(critical)
+<a name="line59"> 59: </a><font color="#A020F0">#endif</font>
+<a name="line60"> 60: </a>  {
+<a name="line61"> 61: </a>    link-&gt;trapmode = _trapmode;
+<a name="line62"> 62: </a>    link-&gt;next     = _trapstack;
+<a name="line63"> 63: </a>    _trapstack     = link;
+<a name="line64"> 64: </a>  }
+<a name="line65"> 65: </a>  <font color="#4169E1">if</font> (trap != _trapmode) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(trap));
+<a name="line66"> 66: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line67"> 67: </a>}
+
+<a name="line69"> 69: </a><font color="#B22222">/*@</font>
+<a name="line70"> 70: </a><font color="#B22222">   <a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a> - push a floating point trapping mode, to be restored using `<a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>()`</font>
+
+<a name="line72"> 72: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line74"> 74: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line76"> 76: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscFPTrapPush.html">PetscFPTrapPush</a>()`, `<a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>()`, `<a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>()`</font>
+<a name="line77"> 77: </a><font color="#B22222">@*/</font>
+<a name="line78"> 78: </a><strong><font color="#4169E1"><a name="PetscFPTrapPop"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>(void)</font></strong>
+<a name="line79"> 79: </a>{
+<a name="line80"> 80: </a>  <font color="#4169E1">struct PetscFPTrapLink</font> *link;
+
+<a name="line82"> 82: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line83"> 83: </a>  <font color="#4169E1">if</font> (_trapstack-&gt;trapmode != _trapmode) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(_trapstack-&gt;trapmode));
+<a name="line84"> 84: </a><font color="#A020F0">#if defined(PETSC_HAVE_THREADSAFETY) &amp;&amp; defined(PETSC_HAVE_OPENMP)</font>
+<a name="line85"> 85: </a>  PetscPragmaOMP(critical)
+<a name="line86"> 86: </a><font color="#A020F0">#endif</font>
+<a name="line87"> 87: </a>  {
+<a name="line88"> 88: </a>    link       = _trapstack;
+<a name="line89"> 89: </a>    _trapstack = _trapstack-&gt;next;
+<a name="line90"> 90: </a>  }
+<a name="line91"> 91: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscFree.html">PetscFree</a>(link));
+<a name="line92"> 92: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line93"> 93: </a>}
+
+<a name="line95"> 95: </a><font color="#B22222">/*--------------------------------------- ---------------------------------------------------*/</font>
+<a name="line96"> 96: </a><font color="#A020F0">#if defined(PETSC_HAVE_SUN4_STYLE_FPTRAP)</font>
+<a name="line97"> 97: </a><font color="#A020F0">  #include &lt;floatingpoint.h&gt;</font>
+
+<a name="line99"> 99: </a><strong><font color="#4169E1">PETSC_EXTERN <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ieee_flags(char *, char *, char *, char **)</font></strong>;
+<a name="line100">100: </a><strong><font color="#4169E1"><a name="ieee_handler"></a>PETSC_EXTERN <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ieee_handler(char *, char *, sigfpe_handler_type(int, int, struct sigcontext *, char *)</font></strong>);
+
+<a name="line102">102: </a>static <font color="#4169E1">struct</font> {
+<a name="line103">103: </a>  int   code_no;
+<a name="line104">104: </a>  char *name;
+<a name="line105">105: </a>} error_codes[] = {
+<a name="line106">106: </a>  {FPE_INTDIV_TRAP,   <font color="#666666">"integer divide"</font>               },
+<a name="line107">107: </a>  {FPE_FLTOPERR_TRAP, <font color="#666666">"IEEE operand error"</font>           },
+<a name="line108">108: </a>  {FPE_FLTOVF_TRAP,   <font color="#666666">"floating point overflow"</font>      },
+<a name="line109">109: </a>  {FPE_FLTUND_TRAP,   <font color="#666666">"floating point underflow"</font>     },
+<a name="line110">110: </a>  {FPE_FLTDIV_TRAP,   <font color="#666666">"floating pointing divide"</font>     },
+<a name="line111">111: </a>  {FPE_FLTINEX_TRAP,  <font color="#666666">"inexact floating point result"</font>},
+<a name="line112">112: </a>  {0,                 <font color="#666666">"unknown error"</font>                }
+<a name="line113">113: </a>};
+<a name="line114">114: </a><strong><font color="#228B22">  #define SIGPC(scp) (scp-&gt;sc_pc)</font></strong>
+
+<a name="line116">116: </a><font color="#B22222">/* this function gets called if a trap has occurred and been caught */</font>
+<a name="line117">117: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>sigfpe_handler_type PetscDefaultFPTrap(int sig, int code, struct sigcontext *scp, char *addr)</font></strong>
+<a name="line118">118: </a>{
+<a name="line119">119: </a>  int            err_ind = -1;
+<a name="line120">120: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line122">122: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line123">123: </a>  <font color="#4169E1">for</font> (int j = 0; error_codes[j].code_no; j++) {
+<a name="line124">124: </a>    <font color="#4169E1">if</font> (error_codes[j].code_no == code) err_ind = j;
+<a name="line125">125: </a>  }
+
+<a name="line127">127: </a>  <font color="#4169E1">if</font> (err_ind &gt;= 0) ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** %s occurred at pc=%X ***\n"</font>, error_codes[err_ind].name, SIGPC(scp));
+<a name="line128">128: </a>  <font color="#4169E1">else</font> ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error 0x%x occurred at pc=%X ***\n"</font>, code, SIGPC(scp));
+
+<a name="line130">130: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line131">131: </a>  (void)ierr;
+<a name="line132">132: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line133">133: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line134">134: </a>}
+
+<a name="line136">136: </a><font color="#B22222">/*@</font>
+<a name="line137">137: </a><font color="#B22222">   <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a> - Enables traps/exceptions on common floating point errors. This option may not work on certain systems or only a</font>
+<a name="line138">138: </a><font color="#B22222">   subset of exceptions may be trapable.</font>
+
+<a name="line140">140: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line142">142: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line143">143: </a><font color="#B22222">.  flag - values are</font>
+<a name="line144">144: </a><font color="#B22222">.vb</font>
+<a name="line145">145: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_OFF</a>   - do not trap any exceptions</font>
+<a name="line146">146: </a><font color="#B22222">    PETSC_FP_TRAP_ON - all exceptions that are possible on the system except underflow</font>
+<a name="line147">147: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_INDIV</a> - integer divide by zero</font>
+<a name="line148">148: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_FLTOPERR</a> - improper argument to function, for example with real numbers, the square root of a negative number</font>
+<a name="line149">149: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_FLTOVF</a> - overflow</font>
+<a name="line150">150: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_FLTUND</a> - underflow - not trapped by default on most systems</font>
+<a name="line151">151: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_FLTDIV</a> - floating point divide by zero</font>
+<a name="line152">152: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_FLTINEX</a> - inexact floating point result</font>
+<a name="line153">153: </a><font color="#B22222">.ve</font>
+
+<a name="line155">155: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line156">156: </a><font color="#B22222">.  -fp_trap &lt;off,on&gt; - turn on or off trapping of floating point exceptions</font>
+
+<a name="line158">158: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line160">160: </a><font color="#B22222">   Notes:</font>
+<a name="line161">161: </a><font color="#B22222">   Currently only `<a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_OFF</a>` and `PETSC_FP_TRAP_ON` are handled. All others are treated as `PETSC_FP_TRAP_ON`.</font>
+
+<a name="line163">163: </a><font color="#B22222">   The values are bit values and may be |ed together in the function call</font>
+
+<a name="line165">165: </a><font color="#B22222">   On systems that support it this routine causes floating point</font>
+<a name="line166">166: </a><font color="#B22222">   overflow, divide-by-zero, and invalid-operand (e.g., a NaN), but not underflow, to</font>
+<a name="line167">167: </a><font color="#B22222">   cause a message to be printed and the program to exit.</font>
+
+<a name="line169">169: </a><font color="#B22222">   On many common systems, the floating</font>
+<a name="line170">170: </a><font color="#B22222">   point exception state is not preserved from the location where the trap</font>
+<a name="line171">171: </a><font color="#B22222">   occurred through to the signal handler.  In this case, the signal handler</font>
+<a name="line172">172: </a><font color="#B22222">   will just say that an unknown floating point exception occurred and which</font>
+<a name="line173">173: </a><font color="#B22222">   function it occurred in.  If you run with -fp_trap in a debugger, it will</font>
+<a name="line174">174: </a><font color="#B22222">   break on the line where the error occurred.  On systems that support C99</font>
+<a name="line175">175: </a><font color="#B22222">   floating point exception handling You can check which</font>
+<a name="line176">176: </a><font color="#B22222">   exception occurred using fetestexcept(FE_ALL_EXCEPT).  See fenv.h</font>
+<a name="line177">177: </a><font color="#B22222">   (usually at /usr/include/bits/fenv.h) for the enum values on your system.</font>
+
+<a name="line179">179: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscFPTrapPush.html">PetscFPTrapPush</a>()`, `<a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>()`, `<a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>()`</font>
+<a name="line180">180: </a><font color="#B22222">@*/</font>
+<a name="line181">181: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line182">182: </a>{
+<a name="line183">183: </a>  char *out;
+
+<a name="line185">185: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line186">186: </a>  <font color="#B22222">/* Clear accumulated exceptions.  Used to suppress meaningless messages from f77 programs */</font>
+<a name="line187">187: </a>  (void)ieee_flags(<font color="#666666">"clear"</font>, <font color="#666666">"exception"</font>, <font color="#666666">"all"</font>, &amp;out);
+<a name="line188">188: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line189">189: </a>    <font color="#B22222">/*</font>
+<a name="line190">190: </a><font color="#B22222">      To trap more fp exceptions, including underflow, change the line below to</font>
+<a name="line191">191: </a><font color="#B22222">      if (ieee_handler("set","all",PetscDefaultFPTrap)) {</font>
+<a name="line192">192: </a><font color="#B22222">    */</font>
+<a name="line193">193: </a>    <font color="#4169E1">if</font> (ieee_handler(<font color="#666666">"set"</font>, <font color="#666666">"common"</font>, PetscDefaultFPTrap)) (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can't set floatingpoint handler\n"</font>);
+<a name="line194">194: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (ieee_handler(<font color="#666666">"clear"</font>, <font color="#666666">"common"</font>, PetscDefaultFPTrap)) (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can't clear floatingpoint handler\n"</font>);
+
+<a name="line196">196: </a>  _trapmode = flag;
+<a name="line197">197: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_SUN4_STYLE_FPTRAP\n"</font>));
+<a name="line198">198: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line199">199: </a>}
+
+<a name="line201">201: </a><font color="#B22222">/*@</font>
+<a name="line202">202: </a><font color="#B22222">   <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a> - Attempts to determine the floating point trapping that exists when `<a href="../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>()` is called</font>
+
+<a name="line204">204: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line206">206: </a><font color="#B22222">   Note:</font>
+<a name="line207">207: </a><font color="#B22222">      Currently only supported on Linux and MacOS. Checks if divide by zero is enable and if so declares that trapping is on.</font>
+
+<a name="line209">209: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line211">211: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscFPTrapPush.html">PetscFPTrapPush</a>()`, `<a href="../../../manualpages/Sys/PetscFPTrapPop.html">PetscFPTrapPop</a>()`, `<a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>()`</font>
+<a name="line212">212: </a><font color="#B22222">@*/</font>
+<a name="line213">213: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line214">214: </a>{
+<a name="line215">215: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line216">216: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line217">217: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line218">218: </a>}
+
+<a name="line220">220: </a><font color="#B22222">/* -------------------------------------------------------------------------------------------*/</font>
+<a name="line221">221: </a><font color="#A020F0">#elif defined(PETSC_HAVE_SOLARIS_STYLE_FPTRAP)</font>
+<a name="line222">222: </a><font color="#A020F0">  #include &lt;sunmath.h&gt;</font>
+<a name="line223">223: </a><font color="#A020F0">  #include &lt;floatingpoint.h&gt;</font>
+<a name="line224">224: </a><font color="#A020F0">  #include &lt;siginfo.h&gt;</font>
+<a name="line225">225: </a><font color="#A020F0">  #include &lt;ucontext.h&gt;</font>
+
+<a name="line227">227: </a>static <font color="#4169E1">struct</font> {
+<a name="line228">228: </a>  int   code_no;
+<a name="line229">229: </a>  char *name;
+<a name="line230">230: </a>} error_codes[] = {
+<a name="line231">231: </a>  {FPE_FLTINV, <font color="#666666">"invalid floating point operand"</font>},
+<a name="line232">232: </a>  {FPE_FLTRES, <font color="#666666">"inexact floating point result"</font> },
+<a name="line233">233: </a>  {FPE_FLTDIV, <font color="#666666">"division-by-zero"</font>              },
+<a name="line234">234: </a>  {FPE_FLTUND, <font color="#666666">"floating point underflow"</font>      },
+<a name="line235">235: </a>  {FPE_FLTOVF, <font color="#666666">"floating point overflow"</font>       },
+<a name="line236">236: </a>  {0,          <font color="#666666">"unknown error"</font>                 }
+<a name="line237">237: </a>};
+<a name="line238">238: </a><strong><font color="#228B22">  #define SIGPC(scp) (scp-&gt;si_addr)</font></strong>
+
+<a name="line240">240: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(int sig, siginfo_t *scp, ucontext_t *uap)</font></strong>
+<a name="line241">241: </a>{
+<a name="line242">242: </a>  int            err_ind = -1, code = scp-&gt;si_code;
+<a name="line243">243: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line245">245: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line246">246: </a>  <font color="#4169E1">for</font> (int j = 0; error_codes[j].code_no; j++) {
+<a name="line247">247: </a>    <font color="#4169E1">if</font> (error_codes[j].code_no == code) err_ind = j;
+<a name="line248">248: </a>  }
+
+<a name="line250">250: </a>  <font color="#4169E1">if</font> (err_ind &gt;= 0) ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** %s occurred at pc=%X ***\n"</font>, error_codes[err_ind].name, SIGPC(scp));
+<a name="line251">251: </a>  <font color="#4169E1">else</font> ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error 0x%x occurred at pc=%X ***\n"</font>, code, SIGPC(scp));
+
+<a name="line253">253: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line254">254: </a>  (void)ierr;
+<a name="line255">255: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line256">256: </a>}
+
+<a name="line258">258: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line259">259: </a>{
+<a name="line260">260: </a>  char *out;
+
+<a name="line262">262: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line263">263: </a>  <font color="#B22222">/* Clear accumulated exceptions.  Used to suppress meaningless messages from f77 programs */</font>
+<a name="line264">264: </a>  (void)ieee_flags(<font color="#666666">"clear"</font>, <font color="#666666">"exception"</font>, <font color="#666666">"all"</font>, &amp;out);
+<a name="line265">265: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line266">266: </a>    <font color="#4169E1">if</font> (ieee_handler(<font color="#666666">"set"</font>, <font color="#666666">"common"</font>, (sigfpe_handler_type)PetscDefaultFPTrap)) (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can't set floating point handler\n"</font>);
+<a name="line267">267: </a>  } <font color="#4169E1">else</font> {
+<a name="line268">268: </a>    <font color="#4169E1">if</font> (ieee_handler(<font color="#666666">"clear"</font>, <font color="#666666">"common"</font>, (sigfpe_handler_type)PetscDefaultFPTrap)) (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can't clear floatingpoint handler\n"</font>);
+<a name="line269">269: </a>  }
+<a name="line270">270: </a>  _trapmode = flag;
+<a name="line271">271: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL,<font color="#666666">"Using PETSC_HAVE_SOLARIS_STYLE_FPTRAP\n"</font>);
+<a name="line272">272: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line273">273: </a>}
+
+<a name="line275">275: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line276">276: </a>{
+<a name="line277">277: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line278">278: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line279">279: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line280">280: </a>}
+
+<a name="line282">282: </a><font color="#B22222">/* ------------------------------------------------------------------------------------------*/</font>
+<a name="line283">283: </a><font color="#A020F0">#elif defined(PETSC_HAVE_IRIX_STYLE_FPTRAP)</font>
+<a name="line284">284: </a><font color="#A020F0">  #include &lt;sigfpe.h&gt;</font>
+<a name="line285">285: </a>static <font color="#4169E1">struct</font> {
+<a name="line286">286: </a>  int   code_no;
+<a name="line287">287: </a>  char *name;
+<a name="line288">288: </a>} error_codes[] = {
+<a name="line289">289: </a>  {_INVALID, <font color="#666666">"IEEE operand error"</font>      },
+<a name="line290">290: </a>  {_OVERFL,  <font color="#666666">"floating point overflow"</font> },
+<a name="line291">291: </a>  {_UNDERFL, <font color="#666666">"floating point underflow"</font>},
+<a name="line292">292: </a>  {_DIVZERO, <font color="#666666">"floating point divide"</font>   },
+<a name="line293">293: </a>  {0,        <font color="#666666">"unknown error"</font>           }
+<a name="line294">294: </a>};
+<a name="line295">295: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(unsigned exception[], int val[])</font></strong>
+<a name="line296">296: </a>{
+<a name="line297">297: </a>  int            err_ind = -1, code = exception[0];
+<a name="line298">298: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line300">300: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line301">301: </a>  <font color="#4169E1">for</font> (int j = 0; error_codes[j].code_no; j++) {
+<a name="line302">302: </a>    <font color="#4169E1">if</font> (error_codes[j].code_no == code) err_ind = j;
+<a name="line303">303: </a>  }
+<a name="line304">304: </a>  <font color="#4169E1">if</font> (err_ind &gt;= 0) ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** %s occurred ***\n"</font>, error_codes[err_ind].name);
+<a name="line305">305: </a>  <font color="#4169E1">else</font> ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error 0x%x occurred ***\n"</font>, code);
+
+<a name="line307">307: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line308">308: </a>  (void)ierr;
+<a name="line309">309: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line310">310: </a>}
+
+<a name="line312">312: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line313">313: </a>{
+<a name="line314">314: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line315">315: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) handle_sigfpes(_ON, , _EN_UNDERFL | _EN_OVERFL | _EN_DIVZERO | _EN_INVALID, PetscDefaultFPTrap, _ABORT_ON_ERROR, 0);
+<a name="line316">316: </a>  <font color="#4169E1">else</font> handle_sigfpes(_OFF, _EN_UNDERFL | _EN_OVERFL | _EN_DIVZERO | _EN_INVALID, 0, _ABORT_ON_ERROR, 0);
+<a name="line317">317: </a>  _trapmode = flag;
+<a name="line318">318: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_IRIX_STYLE_FPTRAP\n"</font>));
+<a name="line319">319: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line320">320: </a>}
+
+<a name="line322">322: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line323">323: </a>{
+<a name="line324">324: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line325">325: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line326">326: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line327">327: </a>}
+
+<a name="line329">329: </a><font color="#B22222">/*----------------------------------------------- --------------------------------------------*/</font>
+<a name="line330">330: </a><font color="#A020F0">#elif defined(PETSC_HAVE_RS6000_STYLE_FPTRAP)</font>
+<a name="line331">331: </a><font color="#B22222">/* In "fast" mode, floating point traps are imprecise and ignored.</font>
+<a name="line332">332: </a><font color="#B22222">   This is the reason for the fptrap(FP_TRAP_SYNC) call */</font>
+<a name="line333">333: </a><font color="#4169E1"><a name="sigcontext"></a>struct sigcontext</font>;
+<a name="line334">334: </a><font color="#A020F0">  #include &lt;fpxcp.h&gt;</font>
+<a name="line335">335: </a><font color="#A020F0">  #include &lt;fptrap.h&gt;</font>
+<a name="line336">336: </a><strong><font color="#228B22">  #define FPE_FLTOPERR_TRAP (fptrap_t)(0x20000000)</font></strong>
+<a name="line337">337: </a><strong><font color="#228B22">  #define FPE_FLTOVF_TRAP   (fptrap_t)(0x10000000)</font></strong>
+<a name="line338">338: </a><strong><font color="#228B22">  #define FPE_FLTUND_TRAP   (fptrap_t)(0x08000000)</font></strong>
+<a name="line339">339: </a><strong><font color="#228B22">  #define FPE_FLTDIV_TRAP   (fptrap_t)(0x04000000)</font></strong>
+<a name="line340">340: </a><strong><font color="#228B22">  #define FPE_FLTINEX_TRAP  (fptrap_t)(0x02000000)</font></strong>
+
+<a name="line342">342: </a>static <font color="#4169E1">struct</font> {
+<a name="line343">343: </a>  int   code_no;
+<a name="line344">344: </a>  char *name;
+<a name="line345">345: </a>} error_codes[] = {
+<a name="line346">346: </a>  {FPE_FLTOPERR_TRAP, <font color="#666666">"IEEE operand error"</font>           },
+<a name="line347">347: </a>  {FPE_FLTOVF_TRAP,   <font color="#666666">"floating point overflow"</font>      },
+<a name="line348">348: </a>  {FPE_FLTUND_TRAP,   <font color="#666666">"floating point underflow"</font>     },
+<a name="line349">349: </a>  {FPE_FLTDIV_TRAP,   <font color="#666666">"floating point divide"</font>        },
+<a name="line350">350: </a>  {FPE_FLTINEX_TRAP,  <font color="#666666">"inexact floating point result"</font>},
+<a name="line351">351: </a>  &lt; {0,                 <font color="#666666">"unknown error"</font>                }
+<a name="line352">352: </a>};
+<a name="line353">353: </a><strong><font color="#228B22">  #define SIGPC(scp)        (0) </font><font color="#B22222">/* Info MIGHT be in scp-&gt;sc_jmpbuf.jmp_context.iar */</font><font color="#228B22"></font></strong>
+<a name="line354">354: </a><font color="#B22222">/*</font>
+<a name="line355">355: </a><font color="#B22222">   For some reason, scp-&gt;sc_jmpbuf does not work on the RS6000, even though</font>
+<a name="line356">356: </a><font color="#B22222">   it looks like it should from the include definitions.  It is probably</font>
+<a name="line357">357: </a><font color="#B22222">   some strange interaction with the "POSIX_SOURCE" that we require.</font>
+<a name="line358">358: </a><font color="#B22222">*/</font>
+
+<a name="line360">360: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(int sig, int code, struct sigcontext *scp)</font></strong>
+<a name="line361">361: </a>{
+<a name="line362">362: </a>  int            err_ind, j;
+<a name="line363">363: </a>  fp_ctx_t       flt_context;
+<a name="line364">364: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line366">366: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line367">367: </a>  fp_sh_trap_info(scp, &amp;flt_context);
+
+<a name="line369">369: </a>  err_ind = -1;
+<a name="line370">370: </a>  <font color="#4169E1">for</font> (j = 0; error_codes[j].code_no; j++) {
+<a name="line371">371: </a>    <font color="#4169E1">if</font> (error_codes[j].code_no == flt_context.trap) err_ind = j;
+<a name="line372">372: </a>  }
+
+<a name="line374">374: </a>  <font color="#4169E1">if</font> (err_ind &gt;= 0) ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** %s occurred ***\n"</font>, error_codes[err_ind].name);
+<a name="line375">375: </a>  <font color="#4169E1">else</font> ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error 0x%x occurred ***\n"</font>, flt_context.trap);
+
+<a name="line377">377: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line378">378: </a>  (void)ierr;
+<a name="line379">379: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line380">380: </a>}
+
+<a name="line382">382: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line383">383: </a>{
+<a name="line384">384: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line385">385: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line386">386: </a>    signal(SIGFPE, (void (*)(int))PetscDefaultFPTrap);
+<a name="line387">387: </a>    fp_trap(FP_TRAP_SYNC);
+<a name="line388">388: </a>    <font color="#B22222">/* fp_enable(TRP_INVALID | TRP_DIV_BY_ZERO | TRP_OVERFLOW | TRP_UNDERFLOW); */</font>
+<a name="line389">389: </a>    fp_enable(TRP_INVALID | TRP_DIV_BY_ZERO | TRP_OVERFLOW);
+<a name="line390">390: </a>  } <font color="#4169E1">else</font> {
+<a name="line391">391: </a>    signal(SIGFPE, SIG_DFL);
+<a name="line392">392: </a>    fp_disable(TRP_INVALID | TRP_DIV_BY_ZERO | TRP_OVERFLOW | TRP_UNDERFLOW);
+<a name="line393">393: </a>    fp_trap(FP_TRAP_OFF);
+<a name="line394">394: </a>  }
+<a name="line395">395: </a>  _trapmode = flag;
+<a name="line396">396: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_RS6000_STYLE_FPTRAP\n"</font>));
+<a name="line397">397: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line398">398: </a>}
+
+<a name="line400">400: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line401">401: </a>{
+<a name="line402">402: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line403">403: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line404">404: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line405">405: </a>}
+
+<a name="line407">407: </a><font color="#B22222">/* ------------------------------------------------------------*/</font>
+<a name="line408">408: </a><font color="#A020F0">#elif defined(PETSC_HAVE_WINDOWS_COMPILERS)</font>
+<a name="line409">409: </a><font color="#A020F0">  #include &lt;float.h&gt;</font>
+<a name="line410">410: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(int sig)</font></strong>
+<a name="line411">411: </a>{
+<a name="line412">412: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line414">414: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line415">415: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error occurred ***\n"</font>);
+<a name="line416">416: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line417">417: </a>  (void)ierr;
+<a name="line418">418: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line419">419: </a>}
+
+<a name="line421">421: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line422">422: </a>{
+<a name="line423">423: </a>  unsigned int cw;
+
+<a name="line425">425: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line426">426: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line427">427: </a>    <font color="#B22222">/* cw = _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW | _EM_UNDERFLOW; */</font>
+<a name="line428">428: </a>    cw = _EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW;
+<a name="line429">429: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(SIG_ERR != signal(SIGFPE, PetscDefaultFPTrap), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Can't set floating point handler"</font>);
+<a name="line430">430: </a>  } <font color="#4169E1">else</font> {
+<a name="line431">431: </a>    cw = 0;
+<a name="line432">432: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(SIG_ERR != signal(SIGFPE, SIG_DFL), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Can't clear floating point handler"</font>);
+<a name="line433">433: </a>  }
+<a name="line434">434: </a>  (void)_controlfp(0, cw);
+<a name="line435">435: </a>  _trapmode = flag;
+<a name="line436">436: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_WINDOWS_COMPILERS FPTRAP\n"</font>));
+<a name="line437">437: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line438">438: </a>}
+
+<a name="line440">440: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line441">441: </a>{
+<a name="line442">442: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line443">443: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line444">444: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line445">445: </a>}
+
+<a name="line447">447: </a><font color="#B22222">/* ------------------------------------------------------------*/</font>
+<a name="line448">448: </a><font color="#A020F0">#elif defined(PETSC_HAVE_FENV_H) &amp;&amp; !defined(__cplusplus)</font>
+<a name="line449">449: </a>  <font color="#B22222">/*</font>
+<a name="line450">450: </a><font color="#B22222">   C99 style floating point environment.</font>
+
+<a name="line452">452: </a><font color="#B22222">   Note that C99 merely specifies how to save, restore, and clear the floating</font>
+<a name="line453">453: </a><font color="#B22222">   point environment as well as defining an enumeration of exception codes.  In</font>
+<a name="line454">454: </a><font color="#B22222">   particular, C99 does not specify how to make floating point exceptions raise</font>
+<a name="line455">455: </a><font color="#B22222">   a signal.  Glibc offers this capability through FE_NOMASK_ENV (or with finer</font>
+<a name="line456">456: </a><font color="#B22222">   granularity, feenableexcept()), xmmintrin.h offers _MM_SET_EXCEPTION_MASK().</font>
+<a name="line457">457: </a><font color="#B22222">*/</font>
+<a name="line458">458: </a><font color="#A020F0">  #include &lt;fenv.h&gt;</font>
+<a name="line459">459: </a><font color="#A020F0">  #if defined(PETSC_HAVE_FE_VALUES)</font>
+<a name="line460">460: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line461">461: </a>  int         code;
+<a name="line462">462: </a>  const char *name;
+<a name="line463">463: </a>} FPNode;
+<a name="line464">464: </a>static const FPNode error_codes[] = {
+<a name="line465">465: </a>  {FE_DIVBYZERO, <font color="#666666">"divide by zero"</font>                                 },
+<a name="line466">466: </a>  {FE_INEXACT,   <font color="#666666">"inexact floating point result"</font>                  },
+<a name="line467">467: </a>  {FE_INVALID,   <font color="#666666">"invalid floating point arguments (domain error)"</font>},
+<a name="line468">468: </a>  {FE_OVERFLOW,  <font color="#666666">"floating point overflow"</font>                        },
+<a name="line469">469: </a>  {FE_UNDERFLOW, <font color="#666666">"floating point underflow"</font>                       },
+<a name="line470">470: </a>  {0,            <font color="#666666">"unknown error"</font>                                  }
+<a name="line471">471: </a>};
+<a name="line472">472: </a><font color="#A020F0">  #endif</font>
+
+<a name="line474">474: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(int sig)</font></strong>
+<a name="line475">475: </a>{
+<a name="line476">476: </a><font color="#A020F0">  #if defined(PETSC_HAVE_FE_VALUES)</font>
+<a name="line477">477: </a>  const FPNode  *node;
+<a name="line478">478: </a>  int            code;
+<a name="line479">479: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a>      matched = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line480">480: </a><font color="#A020F0">  #endif</font>
+<a name="line481">481: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line483">483: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line484">484: </a>  <font color="#B22222">/* Note: While it is possible for the exception state to be preserved by the</font>
+<a name="line485">485: </a><font color="#B22222">   * kernel, this seems to be rare which makes the following flag testing almost</font>
+<a name="line486">486: </a><font color="#B22222">   * useless.  But on a system where the flags can be preserved, it would provide</font>
+<a name="line487">487: </a><font color="#B22222">   * more detail.</font>
+<a name="line488">488: </a><font color="#B22222">   */</font>
+<a name="line489">489: </a><font color="#A020F0">  #if defined(PETSC_HAVE_FE_VALUES)</font>
+<a name="line490">490: </a>  code = fetestexcept(FE_ALL_EXCEPT);
+<a name="line491">491: </a>  <font color="#4169E1">for</font> (node = &amp;error_codes[0]; node-&gt;code; node++) {
+<a name="line492">492: </a>    <font color="#4169E1">if</font> (code &amp; node-&gt;code) {
+<a name="line493">493: </a>      matched = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line494">494: </a>      ierr    = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error \"%s\" occurred ***\n"</font>, node-&gt;name);
+<a name="line495">495: </a>      code &amp;= ~node-&gt;code; <font color="#B22222">/* Unset this flag since it has been processed */</font>
+<a name="line496">496: </a>    }
+<a name="line497">497: </a>  }
+<a name="line498">498: </a>  <font color="#4169E1">if</font> (!matched || code) { <font color="#B22222">/* If any remaining flags are set, or we didn't process any flags */</font>
+<a name="line499">499: </a>    ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** unknown floating point error occurred ***\n"</font>);
+<a name="line500">500: </a>    ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"The specific exception can be determined by running in a debugger.  When the\n"</font>);
+<a name="line501">501: </a>    ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"debugger traps the signal, the exception can be found with fetestexcept(0x%x)\n"</font>, FE_ALL_EXCEPT);
+<a name="line502">502: </a>    ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"where the result is a bitwise OR of the following flags:\n"</font>);
+<a name="line503">503: </a>    ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"FE_INVALID=0x%x FE_DIVBYZERO=0x%x FE_OVERFLOW=0x%x FE_UNDERFLOW=0x%x FE_INEXACT=0x%x\n"</font>, FE_INVALID, FE_DIVBYZERO, FE_OVERFLOW, FE_UNDERFLOW, FE_INEXACT);
+<a name="line504">504: </a>  }
+<a name="line505">505: </a><font color="#A020F0">  #else</font>
+<a name="line506">506: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** unknown floating point error occurred ***\n"</font>);
+<a name="line507">507: </a><font color="#A020F0">  #endif</font>
+
+<a name="line509">509: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Try option -start_in_debugger\n"</font>);
+<a name="line510">510: </a><font color="#A020F0">  #if <a href="../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)</font>
+<a name="line511">511: </a><font color="#A020F0">    #if !<a href="../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(HAVE_THREADSAFETY)</font>
+<a name="line512">512: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"likely location of problem given in stack below\n"</font>);
+<a name="line513">513: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"---------------------  Stack Frames ------------------------------------\n"</font>);
+<a name="line514">514: </a>  ierr = <a href="../../../manualpages/Sys/PetscStackView.html">PetscStackView</a>(PETSC_STDOUT);
+<a name="line515">515: </a><font color="#A020F0">    #endif</font>
+<a name="line516">516: </a><font color="#A020F0">  #else</font>
+<a name="line517">517: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"configure using --with-debugging=yes, recompile, link, and run \n"</font>);
+<a name="line518">518: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"with -start_in_debugger to get more information on the crash.\n"</font>);
+<a name="line519">519: </a><font color="#A020F0">  #endif</font>
+<a name="line520">520: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_INITIAL</a>, <font color="#666666">"trapped floating point error"</font>);
+<a name="line521">521: </a>  (void)ierr;
+<a name="line522">522: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line523">523: </a>}
+
+<a name="line525">525: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line526">526: </a>{
+<a name="line527">527: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line528">528: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line529">529: </a>    <font color="#B22222">/* Clear any flags that are currently set so that activating trapping will not immediately call the signal handler. */</font>
+<a name="line530">530: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!feclearexcept(FE_ALL_EXCEPT), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Cannot clear floating point exception flags"</font>);
+<a name="line531">531: </a><font color="#A020F0">  #if defined(FE_NOMASK_ENV) &amp;&amp; defined(PETSC_HAVE_FE_VALUES)</font>
+<a name="line532">532: </a>    <font color="#B22222">/* Could use fesetenv(FE_NOMASK_ENV), but that causes spurious exceptions (like gettimeofday() -&gt; PetscLogDouble). */</font>
+<a name="line533">533: </a>    <font color="#B22222">/* <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(feenableexcept(FE_DIVBYZERO | FE_INVALID | FE_OVERFLOW | FE_UNDERFLOW) != -1,<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>,<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>,"Cannot activate floating point exceptions"); */</font>
+<a name="line534">534: </a>    <font color="#B22222">/* Doesn't work on AArch64 targets. There's a known hardware limitation. Need to detect hardware at configure time? */</font>
+<a name="line535">535: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(feenableexcept(FE_DIVBYZERO | FE_INVALID | FE_OVERFLOW) != -1, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Cannot activate floating point exceptions"</font>);
+<a name="line536">536: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_FENV_H FPTRAP with FE_NOMASK_ENV\n"</font>));
+<a name="line537">537: </a><font color="#A020F0">  #elif defined PETSC_HAVE_XMMINTRIN_H</font>
+<a name="line538">538: </a>    _MM_SET_EXCEPTION_MASK(_MM_GET_EXCEPTION_MASK() &amp; ~_MM_MASK_DIV_ZERO);
+<a name="line539">539: </a>    <font color="#B22222">/* _MM_SET_EXCEPTION_MASK(_MM_GET_EXCEPTION_MASK() &amp; ~_MM_MASK_UNDERFLOW); */</font>
+<a name="line540">540: </a>    _MM_SET_EXCEPTION_MASK(_MM_GET_EXCEPTION_MASK() &amp; ~_MM_MASK_OVERFLOW);
+<a name="line541">541: </a>    _MM_SET_EXCEPTION_MASK(_MM_GET_EXCEPTION_MASK() &amp; ~_MM_MASK_INVALID);
+<a name="line542">542: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_FENV_H FPTRAP with PETSC_HAVE_XMMINTRIN_H\n"</font>));
+<a name="line543">543: </a><font color="#A020F0">  #else</font>
+<a name="line544">544: </a>    <font color="#B22222">/* C99 does not provide a way to modify the environment so there is no portable way to activate trapping. */</font>
+<a name="line545">545: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_FENV_H FPTRAP\n"</font>));
+<a name="line546">546: </a><font color="#A020F0">  #endif</font>
+<a name="line547">547: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(SIG_ERR != signal(SIGFPE, PetscDefaultFPTrap), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Can't set floating point handler"</font>);
+<a name="line548">548: </a>  } <font color="#4169E1">else</font> {
+<a name="line549">549: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!fesetenv(FE_DFL_ENV), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Cannot disable floating point exceptions"</font>);
+<a name="line550">550: </a>    <font color="#B22222">/* can use _MM_SET_EXCEPTION_MASK(_MM_GET_EXCEPTION_MASK() | _MM_MASK_UNDERFLOW); if PETSC_HAVE_XMMINTRIN_H exists */</font>
+<a name="line551">551: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(SIG_ERR != signal(SIGFPE, SIG_DFL), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Can't clear floating point handler"</font>);
+<a name="line552">552: </a>  }
+<a name="line553">553: </a>  _trapmode = flag;
+<a name="line554">554: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line555">555: </a>}
+
+<a name="line557">557: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line558">558: </a>{
+<a name="line559">559: </a><font color="#A020F0">  #if defined(FE_NOMASK_ENV) || defined PETSC_HAVE_XMMINTRIN_H</font>
+<a name="line560">560: </a>  unsigned int flags;
+<a name="line561">561: </a><font color="#A020F0">  #endif</font>
+
+<a name="line563">563: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line564">564: </a><font color="#A020F0">  #if defined(FE_NOMASK_ENV)</font>
+<a name="line565">565: </a>  flags = fegetexcept();
+<a name="line566">566: </a>  <font color="#4169E1">if</font> (flags &amp; FE_DIVBYZERO) {
+<a name="line567">567: </a><font color="#A020F0">  #elif defined PETSC_HAVE_XMMINTRIN_H</font>
+<a name="line568">568: </a>  flags = _MM_GET_EXCEPTION_MASK();
+<a name="line569">569: </a>  <font color="#4169E1">if</font> (!(flags &amp; _MM_MASK_DIV_ZERO)) {
+<a name="line570">570: </a><font color="#A020F0">  #else</font>
+<a name="line571">571: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Floating point trapping unknown, assuming off\n"</font>));
+<a name="line572">572: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line573">573: </a><font color="#A020F0">  #endif</font>
+<a name="line574">574: </a><font color="#A020F0">  #if defined(FE_NOMASK_ENV) || defined PETSC_HAVE_XMMINTRIN_H</font>
+<a name="line575">575: </a>    _trapmode = PETSC_FP_TRAP_ON;
+<a name="line576">576: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Floating point trapping is on by default %d\n"</font>, flags));
+<a name="line577">577: </a>  } <font color="#4169E1">else</font> {
+<a name="line578">578: </a>    _trapmode = <a href="../../../manualpages/Sys/PetscFPTrap.html">PETSC_FP_TRAP_OFF</a>;
+<a name="line579">579: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Floating point trapping is off by default %d\n"</font>, flags));
+<a name="line580">580: </a>  }
+<a name="line581">581: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line582">582: </a><font color="#A020F0">  #endif</font>
+<a name="line583">583: </a>}
+
+<a name="line585">585: </a><font color="#B22222">/* ------------------------------------------------------------*/</font>
+<a name="line586">586: </a><font color="#A020F0">#elif defined(PETSC_HAVE_IEEEFP_H)</font>
+<a name="line587">587: </a><font color="#A020F0">  #include &lt;ieeefp.h&gt;</font>
+<a name="line588">588: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(int sig)</font></strong>
+<a name="line589">589: </a>{
+<a name="line590">590: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line592">592: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line593">593: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error occurred ***\n"</font>);
+<a name="line594">594: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line595">595: </a>  (void)ierr;
+<a name="line596">596: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line597">597: </a>}
+
+<a name="line599">599: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line600">600: </a>{
+<a name="line601">601: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line602">602: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line603">603: </a><font color="#A020F0">  #if defined(PETSC_HAVE_FPRESETSTICKY)</font>
+<a name="line604">604: </a>    fpresetsticky(fpgetsticky());
+<a name="line605">605: </a><font color="#A020F0">  #elif defined(PETSC_HAVE_FPSETSTICKY)</font>
+<a name="line606">606: </a>    fpsetsticky(fpgetsticky());
+<a name="line607">607: </a><font color="#A020F0">  #endif</font>
+<a name="line608">608: </a>    fpsetmask(FP_X_INV | FP_X_DZ | FP_X_OFL | FP_X_OFL);
+<a name="line609">609: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(SIG_ERR != signal(SIGFPE, PetscDefaultFPTrap), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Can't set floating point handler"</font>);
+<a name="line610">610: </a>  } <font color="#4169E1">else</font> {
+<a name="line611">611: </a><font color="#A020F0">  #if defined(PETSC_HAVE_FPRESETSTICKY)</font>
+<a name="line612">612: </a>    fpresetsticky(fpgetsticky());
+<a name="line613">613: </a><font color="#A020F0">  #elif defined(PETSC_HAVE_FPSETSTICKY)</font>
+<a name="line614">614: </a>    fpsetsticky(fpgetsticky());
+<a name="line615">615: </a><font color="#A020F0">  #endif</font>
+<a name="line616">616: </a>    fpsetmask(0);
+<a name="line617">617: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(SIG_ERR != signal(SIGFPE, SIG_DFL), <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Can't clear floating point handler"</font>);
+<a name="line618">618: </a>  }
+<a name="line619">619: </a>  _trapmode = flag;
+<a name="line620">620: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using PETSC_HAVE_IEEEFP_H FPTRAP\n"</font>));
+<a name="line621">621: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line622">622: </a>}
+
+<a name="line624">624: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line625">625: </a>{
+<a name="line626">626: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line627">627: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line628">628: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line629">629: </a>}
+
+<a name="line631">631: </a><font color="#B22222">/* -------------------------Default -----------------------------------*/</font>
+<a name="line632">632: </a><font color="#A020F0">#else</font>
+
+<a name="line634">634: </a><strong><font color="#4169E1"><a name="PetscDefaultFPTrap"></a>void PetscDefaultFPTrap(int sig)</font></strong>
+<a name="line635">635: </a>{
+<a name="line636">636: </a>  <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> ierr;
+
+<a name="line638">638: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line639">639: </a>  ierr = (*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"*** floating point error occurred ***\n"</font>);
+<a name="line640">640: </a>  ierr = <a href="../../../manualpages/Sys/PetscError.html">PetscError</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, 0, NULL, NULL, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>, <a href="../../../manualpages/Sys/PetscErrorType.html">PETSC_ERROR_REPEAT</a>, <font color="#666666">"floating point error"</font>);
+<a name="line641">641: </a>  (void)ierr;
+<a name="line642">642: </a>  <a href="../../../manualpages/Sys/PETSCABORT.html">PETSCABORT</a>(MPI_COMM_WORLD, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_FP</a>);
+<a name="line643">643: </a>}
+
+<a name="line645">645: </a><strong><font color="#4169E1"><a name="PetscSetFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscSetFPTrap.html">PetscSetFPTrap</a>(<a href="../../../manualpages/Sys/PetscFPTrap.html">PetscFPTrap</a> flag)</font></strong>
+<a name="line646">646: </a>{
+<a name="line647">647: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line648">648: </a>  <font color="#4169E1">if</font> (flag == PETSC_FP_TRAP_ON) {
+<a name="line649">649: </a>    <font color="#4169E1">if</font> (SIG_ERR == signal(SIGFPE, PetscDefaultFPTrap)) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can't set floatingpoint handler\n"</font>));
+<a name="line650">650: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (SIG_ERR == signal(SIGFPE, SIG_DFL)) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>((*<a href="../../../manualpages/Sys/PetscErrorPrintf.html">PetscErrorPrintf</a>)(<font color="#666666">"Can't clear floatingpoint handler\n"</font>));
+
+<a name="line652">652: </a>  _trapmode = flag;
+<a name="line653">653: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Using default FPTRAP\n"</font>));
+<a name="line654">654: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line655">655: </a>}
+
+<a name="line657">657: </a><strong><font color="#4169E1"><a name="PetscDetermineInitialFPTrap"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscDetermineInitialFPTrap.html">PetscDetermineInitialFPTrap</a>(void)</font></strong>
+<a name="line658">658: </a>{
+<a name="line659">659: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line660">660: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Unable to determine initial floating point trapping. Assuming it is off\n"</font>));
+<a name="line661">661: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line662">662: </a>}
+<a name="line663">663: </a><font color="#A020F0">#endif</font>
+</pre>
+</body>
+
+</html>

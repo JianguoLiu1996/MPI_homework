@@ -1,0 +1,639 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/dm/impls/da/kokkos/dagetov.kokkos.cxx">Actual source code: dagetov.kokkos.cxx</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:28+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../../include/petsc/private/vecimpl_kokkos.hpp.html">&lt;petsc/private/vecimpl_kokkos.hpp&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../../../include/petsc/private/dmdaimpl.h.html">&lt;petsc/private/dmdaimpl.h&gt;</A>
+<a name="line3">  3: </a>#include <A href="../../../../../include/petscdmda_kokkos.hpp.html">&lt;petscdmda_kokkos.hpp&gt;</A>
+
+<a name="line5">  5: </a><font color="#B22222">/* SUBMANSEC = <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> */</font>
+
+<a name="line7">  7: </a><font color="#B22222">/* Use macro instead of inlined function to avoid annoying warnings like: 'dof' may be used uninitialized in this function [-Wmaybe-uninitialized] */</font>
+<a name="line8">  8: </a><strong><font color="#228B22">#define DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof) \</font></strong>
+<a name="line9">  9: </a><strong><font color="#228B22">  do { \</font></strong>
+<a name="line10"> 10: </a><strong><font color="#228B22">    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DMDA/DMDAGetCorners.html">DMDAGetCorners</a>(da, &amp;xs, &amp;ys, &amp;zs, &amp;xm, &amp;ym, &amp;zm)); \</font></strong>
+<a name="line11"> 11: </a><strong><font color="#228B22">    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DMDA/DMDAGetGhostCorners.html">DMDAGetGhostCorners</a>(da, &amp;gxs, &amp;gys, &amp;gzs, &amp;gxm, &amp;gym, &amp;gzm)); \</font></strong>
+<a name="line12"> 12: </a><strong><font color="#228B22">    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/DMDA/DMDAGetInfo.html">DMDAGetInfo</a>(da, &amp;dim, NULL, NULL, NULL, NULL, NULL, NULL, &amp;dof, NULL, NULL, NULL, NULL, NULL)); \</font></strong>
+<a name="line13"> 13: </a><strong><font color="#228B22">    </font><font color="#B22222">/* Handle case where user passes in global vector as opposed to local */</font><font color="#228B22"> \</font></strong>
+<a name="line14"> 14: </a><strong><font color="#228B22">    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(vec, &amp;N)); \</font></strong>
+<a name="line15"> 15: </a><strong><font color="#228B22">    if (N == xm * ym * zm * dof) { \</font></strong>
+<a name="line16"> 16: </a><strong><font color="#228B22">      gxm = xm; \</font></strong>
+<a name="line17"> 17: </a><strong><font color="#228B22">      gym = ym; \</font></strong>
+<a name="line18"> 18: </a><strong><font color="#228B22">      gzm = zm; \</font></strong>
+<a name="line19"> 19: </a><strong><font color="#228B22">      gxs = xs; \</font></strong>
+<a name="line20"> 20: </a><strong><font color="#228B22">      gys = ys; \</font></strong>
+<a name="line21"> 21: </a><strong><font color="#228B22">      gzs = zs; \</font></strong>
+<a name="line22"> 22: </a><strong><font color="#228B22">    } else <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(N == gxm * gym * gzm * dof, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_INCOMP</a>, </font><font color="#666666">"Vector local size %"</font><font color="#228B22"> PetscInt_FMT </font><font color="#666666">" is not compatible with <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> local sizes %"</font><font color="#228B22"> PetscInt_FMT </font><font color="#666666">" %"</font><font color="#228B22"> PetscInt_FMT, N, xm * ym * zm * dof, gxm * gym * gzm * dof); \</font></strong>
+<a name="line23"> 23: </a><strong><font color="#228B22">  } while (0)</font></strong>
+
+<a name="line25"> 25: </a><font color="#B22222">/* -------------------- 1D ---------------- */</font>
+<a name="line26"> 26: </a>template &lt;class MemorySpace&gt;
+<a name="line27"> 27: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetView_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line28"> 28: </a>{
+<a name="line29"> 29: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                               xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line30"> 30: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line32"> 32: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line36"> 36: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line37"> 37: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 1D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line38"> 38: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line39"> 39: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line40"> 40: </a>  <font color="#B22222">/* Construct the unmanaged OffsetView with {begin0,begin1,begins2},{end0,end1,end2} */</font>
+<a name="line41"> 41: </a>  *ov = PetscScalarKokkosOffsetView1DType&lt;MemorySpace&gt;(kv.data(), {gxs * dof}, {(gxs + gxm) * dof});
+<a name="line42"> 42: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line43"> 43: </a>}
+
+<a name="line45"> 45: </a>template &lt;class MemorySpace&gt;
+<a name="line46"> 46: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetView_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line47"> 47: </a>{
+<a name="line48"> 48: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line50"> 50: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line54"> 54: </a>  kv = ov-&gt;view(); <font color="#B22222">/* OffsetView to View */</font>
+<a name="line55"> 55: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line56"> 56: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line57"> 57: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line58"> 58: </a>}
+
+<a name="line60"> 60: </a>template &lt;class MemorySpace&gt;
+<a name="line61"> 61: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView1DType&lt;MemorySpace&gt; *ov)
+<a name="line62"> 62: </a>{
+<a name="line63"> 63: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                                    xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line64"> 64: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line66"> 66: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line70"> 70: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line71"> 71: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 1D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line72"> 72: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line73"> 73: </a>  *ov = ConstPetscScalarKokkosOffsetView1DType&lt;MemorySpace&gt;(kv.data(), {gxs * dof}, {(gxs + gxm) * dof});
+<a name="line74"> 74: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line75"> 75: </a>}
+
+<a name="line77"> 77: </a>template &lt;class MemorySpace&gt;
+<a name="line78"> 78: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView1DType&lt;MemorySpace&gt; *ov)
+<a name="line79"> 79: </a>{
+<a name="line80"> 80: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line82"> 82: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line86"> 86: </a>  kv = ov-&gt;view();
+<a name="line87"> 87: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line88"> 88: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line89"> 89: </a>}
+
+<a name="line91"> 91: </a><font color="#B22222">/* ============================== 2D ================================= */</font>
+<a name="line92"> 92: </a>template &lt;class MemorySpace&gt;
+<a name="line93"> 93: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetView_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line94"> 94: </a>{
+<a name="line95"> 95: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                               xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line96"> 96: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line98"> 98: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line102">102: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line103">103: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 2, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 2D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line104">104: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line105">105: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line106">106: </a>  *ov = PetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt;(kv.data(), {gys * dof, gxs * dof}, {(gys + gym) * dof, (gxs + gxm) * dof});
+<a name="line107">107: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line108">108: </a>}
+
+<a name="line110">110: </a>template &lt;class MemorySpace&gt;
+<a name="line111">111: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetView_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line112">112: </a>{
+<a name="line113">113: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line115">115: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line119">119: </a>  // kv   = ov-&gt;view(); <font color="#B22222">/* 2D OffsetView =&gt; 2D View =&gt; 1D View. Why does it not work? */</font>
+<a name="line120">120: </a>  kv = PetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1));
+<a name="line121">121: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line122">122: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line123">123: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line124">124: </a>}
+
+<a name="line126">126: </a>template &lt;class MemorySpace&gt;
+<a name="line127">127: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov)
+<a name="line128">128: </a>{
+<a name="line129">129: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                                    xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line130">130: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line132">132: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line136">136: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line137">137: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 2, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 2D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line138">138: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line139">139: </a>  *ov = ConstPetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt;(kv.data(), {gys * dof, gxs * dof}, {(gys + gym) * dof, (gxs + gxm) * dof});
+<a name="line140">140: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line141">141: </a>}
+
+<a name="line143">143: </a>template &lt;class MemorySpace&gt;
+<a name="line144">144: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov)
+<a name="line145">145: </a>{
+<a name="line146">146: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line148">148: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line152">152: </a>  kv = ConstPetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1));
+<a name="line153">153: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line154">154: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line155">155: </a>}
+
+<a name="line157">157: </a><font color="#B22222">/* ============================== 3D ================================= */</font>
+<a name="line158">158: </a>template &lt;class MemorySpace&gt;
+<a name="line159">159: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetView_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line160">160: </a>{
+<a name="line161">161: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                               xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line162">162: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line164">164: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line168">168: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line169">169: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 3, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 3D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line170">170: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line171">171: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line172">172: </a>  *ov = PetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt;(kv.data(), {gzs * dof, gys * dof, gxs * dof}, {(gzs + gzm) * dof, (gys + gym) * dof, (gxs + gxm) * dof});
+<a name="line173">173: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line174">174: </a>}
+
+<a name="line176">176: </a>template &lt;class MemorySpace&gt;
+<a name="line177">177: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetView_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line178">178: </a>{
+<a name="line179">179: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line181">181: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line185">185: </a>  kv = PetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1) * ov-&gt;extent(2));
+<a name="line186">186: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line187">187: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line188">188: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line189">189: </a>}
+
+<a name="line191">191: </a>template &lt;class MemorySpace&gt;
+<a name="line192">192: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov)
+<a name="line193">193: </a>{
+<a name="line194">194: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                                    xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line195">195: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line197">197: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line201">201: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line202">202: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 3, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 3D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line203">203: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line204">204: </a>  *ov = ConstPetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt;(kv.data(), {gzs * dof, gys * dof, gxs * dof}, {(gzs + gzm) * dof, (gys + gym) * dof, (gxs + gxm) * dof});
+<a name="line205">205: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line206">206: </a>}
+
+<a name="line208">208: </a>template &lt;class MemorySpace&gt;
+<a name="line209">209: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov)
+<a name="line210">210: </a>{
+<a name="line211">211: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line213">213: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line217">217: </a>  kv = ConstPetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1) * ov-&gt;extent(2));
+<a name="line218">218: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line219">219: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line220">220: </a>}
+
+<a name="line222">222: </a><font color="#B22222">/* Function template explicit instantiation */</font>
+<a name="line223">223: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView1D *)</font></strong>;
+<a name="line224">224: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView1D *)</font></strong>;
+<a name="line225">225: </a>template &lt;&gt;
+<a name="line226">226: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1D *ov)</font></strong>
+<a name="line227">227: </a>{
+<a name="line228">228: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line229">229: </a>}
+<a name="line230">230: </a>template &lt;&gt;
+<a name="line231">231: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1D *ov)</font></strong>
+<a name="line232">232: </a>{
+<a name="line233">233: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line234">234: </a>}
+<a name="line235">235: </a>template &lt;&gt;
+<a name="line236">236: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1D *ov)</font></strong>
+<a name="line237">237: </a>{
+<a name="line238">238: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line239">239: </a>}
+<a name="line240">240: </a>template &lt;&gt;
+<a name="line241">241: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1D *ov)</font></strong>
+<a name="line242">242: </a>{
+<a name="line243">243: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line244">244: </a>}
+
+<a name="line246">246: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2D *)</font></strong>;
+<a name="line247">247: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2D *)</font></strong>;
+<a name="line248">248: </a>template &lt;&gt;
+<a name="line249">249: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line250">250: </a>{
+<a name="line251">251: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line252">252: </a>}
+<a name="line253">253: </a>template &lt;&gt;
+<a name="line254">254: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line255">255: </a>{
+<a name="line256">256: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line257">257: </a>}
+<a name="line258">258: </a>template &lt;&gt;
+<a name="line259">259: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line260">260: </a>{
+<a name="line261">261: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line262">262: </a>}
+<a name="line263">263: </a>template &lt;&gt;
+<a name="line264">264: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line265">265: </a>{
+<a name="line266">266: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line267">267: </a>}
+
+<a name="line269">269: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3D *)</font></strong>;
+<a name="line270">270: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3D *)</font></strong>;
+<a name="line271">271: </a>template &lt;&gt;
+<a name="line272">272: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line273">273: </a>{
+<a name="line274">274: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line275">275: </a>}
+<a name="line276">276: </a>template &lt;&gt;
+<a name="line277">277: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line278">278: </a>{
+<a name="line279">279: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line280">280: </a>}
+<a name="line281">281: </a>template &lt;&gt;
+<a name="line282">282: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line283">283: </a>{
+<a name="line284">284: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line285">285: </a>}
+<a name="line286">286: </a>template &lt;&gt;
+<a name="line287">287: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line288">288: </a>{
+<a name="line289">289: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line290">290: </a>}
+
+<a name="line292">292: </a><font color="#A020F0">#if !defined(KOKKOS_ENABLE_DEFAULT_DEVICE_TYPE_HOST) </font><font color="#B22222">/* Get host views if the default memory space is not host space */</font><font color="#A020F0"></font>
+<a name="line293">293: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView1DHost *)</font></strong>;
+<a name="line294">294: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView1DHost *)</font></strong>;
+<a name="line295">295: </a>template &lt;&gt;
+<a name="line296">296: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1DHost *ov)</font></strong>
+<a name="line297">297: </a>{
+<a name="line298">298: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line299">299: </a>}
+<a name="line300">300: </a>template &lt;&gt;
+<a name="line301">301: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1DHost *ov)</font></strong>
+<a name="line302">302: </a>{
+<a name="line303">303: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line304">304: </a>}
+<a name="line305">305: </a>template &lt;&gt;
+<a name="line306">306: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1DHost *ov)</font></strong>
+<a name="line307">307: </a>{
+<a name="line308">308: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line309">309: </a>}
+<a name="line310">310: </a>template &lt;&gt;
+<a name="line311">311: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView1DHost *ov)</font></strong>
+<a name="line312">312: </a>{
+<a name="line313">313: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line314">314: </a>}
+
+<a name="line316">316: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2DHost *)</font></strong>;
+<a name="line317">317: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2DHost *)</font></strong>;
+<a name="line318">318: </a>template &lt;&gt;
+<a name="line319">319: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line320">320: </a>{
+<a name="line321">321: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line322">322: </a>}
+<a name="line323">323: </a>template &lt;&gt;
+<a name="line324">324: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line325">325: </a>{
+<a name="line326">326: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line327">327: </a>}
+<a name="line328">328: </a>template &lt;&gt;
+<a name="line329">329: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line330">330: </a>{
+<a name="line331">331: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line332">332: </a>}
+<a name="line333">333: </a>template &lt;&gt;
+<a name="line334">334: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line335">335: </a>{
+<a name="line336">336: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line337">337: </a>}
+
+<a name="line339">339: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3DHost *)</font></strong>;
+<a name="line340">340: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3DHost *)</font></strong>;
+<a name="line341">341: </a>template &lt;&gt;
+<a name="line342">342: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetView.html">DMDAVecGetKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line343">343: </a>{
+<a name="line344">344: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line345">345: </a>}
+<a name="line346">346: </a>template &lt;&gt;
+<a name="line347">347: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetView"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetView.html">DMDAVecRestoreKokkosOffsetView</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line348">348: </a>{
+<a name="line349">349: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line350">350: </a>}
+<a name="line351">351: </a>template &lt;&gt;
+<a name="line352">352: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line353">353: </a>{
+<a name="line354">354: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line355">355: </a>}
+<a name="line356">356: </a>template &lt;&gt;
+<a name="line357">357: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line358">358: </a>{
+<a name="line359">359: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetView_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line360">360: </a>}
+<a name="line361">361: </a><font color="#A020F0">#endif</font>
+
+<a name="line363">363: </a><font color="#B22222">/* ============================== 2D including DOF ================================= */</font>
+<a name="line364">364: </a>template &lt;class MemorySpace&gt;
+<a name="line365">365: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOF_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line366">366: </a>{
+<a name="line367">367: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                               xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line368">368: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line370">370: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line374">374: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line375">375: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 2D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line376">376: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line377">377: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line378">378: </a>  *ov = PetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt;(kv.data(), {gxs, 0}, {gxs + gxm, dof});
+<a name="line379">379: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line380">380: </a>}
+
+<a name="line382">382: </a>template &lt;class MemorySpace&gt;
+<a name="line383">383: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOF_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line384">384: </a>{
+<a name="line385">385: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line387">387: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line391">391: </a>  kv = PetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1));
+<a name="line392">392: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line393">393: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line394">394: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line395">395: </a>}
+
+<a name="line397">397: </a>template &lt;class MemorySpace&gt;
+<a name="line398">398: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov)
+<a name="line399">399: </a>{
+<a name="line400">400: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                                    xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line401">401: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line403">403: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line407">407: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line408">408: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 1, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 2D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line409">409: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line410">410: </a>  *ov = ConstPetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt;(kv.data(), {gxs, 0}, {gxs + gxm, dof});
+<a name="line411">411: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line412">412: </a>}
+
+<a name="line414">414: </a>template &lt;class MemorySpace&gt;
+<a name="line415">415: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView2DType&lt;MemorySpace&gt; *ov)
+<a name="line416">416: </a>{
+<a name="line417">417: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line419">419: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line423">423: </a>  kv = ConstPetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1));
+<a name="line424">424: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line425">425: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line426">426: </a>}
+
+<a name="line428">428: </a><font color="#B22222">/* ============================== 3D including DOF ================================= */</font>
+<a name="line429">429: </a>template &lt;class MemorySpace&gt;
+<a name="line430">430: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOF_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line431">431: </a>{
+<a name="line432">432: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                               xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line433">433: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line435">435: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line439">439: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line440">440: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 2, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 3D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line441">441: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line442">442: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line443">443: </a>  *ov = PetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt;(kv.data(), {gys, gxs, 0}, {gys + gym, gxs + gxm, dof});
+<a name="line444">444: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line445">445: </a>}
+
+<a name="line447">447: </a>template &lt;class MemorySpace&gt;
+<a name="line448">448: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOF_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line449">449: </a>{
+<a name="line450">450: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line452">452: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line456">456: </a>  kv = PetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1) * ov-&gt;extent(2));
+<a name="line457">457: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line458">458: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line459">459: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line460">460: </a>}
+
+<a name="line462">462: </a>template &lt;class MemorySpace&gt;
+<a name="line463">463: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov)
+<a name="line464">464: </a>{
+<a name="line465">465: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                                    xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line466">466: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line468">468: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line472">472: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line473">473: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 2, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 3D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line474">474: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line475">475: </a>  *ov = ConstPetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt;(kv.data(), {gys, gxs, 0}, {gys + gym, gxs + gxm, dof});
+<a name="line476">476: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line477">477: </a>}
+
+<a name="line479">479: </a>template &lt;class MemorySpace&gt;
+<a name="line480">480: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView3DType&lt;MemorySpace&gt; *ov)
+<a name="line481">481: </a>{
+<a name="line482">482: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line484">484: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line488">488: </a>  kv = ConstPetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1) * ov-&gt;extent(2));
+<a name="line489">489: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line490">490: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line491">491: </a>}
+
+<a name="line493">493: </a><font color="#B22222">/* ============================== 4D including DOF ================================= */</font>
+<a name="line494">494: </a>template &lt;class MemorySpace&gt;
+<a name="line495">495: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOF_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line496">496: </a>{
+<a name="line497">497: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                               xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line498">498: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line500">500: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line504">504: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line505">505: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 3, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 4D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line506">506: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosViewWrite.html">VecGetKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line507">507: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line508">508: </a>  *ov = PetscScalarKokkosOffsetView4DType&lt;MemorySpace&gt;(kv.data(), {gzs, gys, gxs, 0}, {gzs + gzm, gys + gym, gxs + gxm, dof});
+<a name="line509">509: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line510">510: </a>}
+
+<a name="line512">512: </a>template &lt;class MemorySpace&gt;
+<a name="line513">513: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOF_Private(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4DType&lt;MemorySpace&gt; *ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> overwrite)
+<a name="line514">514: </a>{
+<a name="line515">515: </a>  PetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line517">517: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line521">521: </a>  kv = PetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1) * ov-&gt;extent(2) * ov-&gt;extent(3));
+<a name="line522">522: </a>  <font color="#4169E1">if</font> (overwrite) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosViewWrite.html">VecRestoreKokkosViewWrite</a>(vec, &amp;kv));
+<a name="line523">523: </a>  <font color="#4169E1">else</font> <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line524">524: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line525">525: </a>}
+
+<a name="line527">527: </a>template &lt;class MemorySpace&gt;
+<a name="line528">528: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView4DType&lt;MemorySpace&gt; *ov)
+<a name="line529">529: </a>{
+<a name="line530">530: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>                                    xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof;
+<a name="line531">531: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line533">533: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line537">537: </a>  DMDA_VEC_GET_SHAPE(da, vec, xs, ys, zs, xm, ym, zm, gxs, gys, gzs, gxm, gym, gzm, N, dim, dof);
+<a name="line538">538: </a>  <a href="../../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(dim == 3, <a href="../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_CORRUPT</a>, <font color="#666666">"KokkosOffsetView is 4D but <a href="../../../../../manualpages/DMDA/DMDA.html">DMDA</a> is %dD"</font>, (int)dim);
+<a name="line539">539: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetKokkosView.html">VecGetKokkosView</a>(vec, &amp;kv));
+<a name="line540">540: </a>  *ov = ConstPetscScalarKokkosOffsetView4DType&lt;MemorySpace&gt;(kv.data(), {gzs, gys, gxs, 0}, {gzs + gzm, gys + gym, gxs + gxm, dof});
+<a name="line541">541: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line542">542: </a>}
+
+<a name="line544">544: </a>template &lt;class MemorySpace&gt;
+<a name="line545">545: </a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, ConstPetscScalarKokkosOffsetView4DType&lt;MemorySpace&gt; *ov)
+<a name="line546">546: </a>{
+<a name="line547">547: </a>  ConstPetscScalarKokkosViewType&lt;MemorySpace&gt; kv;
+
+<a name="line549">549: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line553">553: </a>  kv = ConstPetscScalarKokkosViewType&lt;MemorySpace&gt;(ov-&gt;data(), ov-&gt;extent(0) * ov-&gt;extent(1) * ov-&gt;extent(2) * ov-&gt;extent(3));
+<a name="line554">554: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreKokkosView.html">VecRestoreKokkosView</a>(vec, &amp;kv));
+<a name="line555">555: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line556">556: </a>}
+
+<a name="line558">558: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2D *)</font></strong>;
+<a name="line559">559: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2D *)</font></strong>;
+<a name="line560">560: </a>template &lt;&gt;
+<a name="line561">561: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line562">562: </a>{
+<a name="line563">563: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line564">564: </a>}
+<a name="line565">565: </a>template &lt;&gt;
+<a name="line566">566: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line567">567: </a>{
+<a name="line568">568: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line569">569: </a>}
+<a name="line570">570: </a>template &lt;&gt;
+<a name="line571">571: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line572">572: </a>{
+<a name="line573">573: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line574">574: </a>}
+<a name="line575">575: </a>template &lt;&gt;
+<a name="line576">576: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2D *ov)</font></strong>
+<a name="line577">577: </a>{
+<a name="line578">578: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line579">579: </a>}
+
+<a name="line581">581: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3D *)</font></strong>;
+<a name="line582">582: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3D *)</font></strong>;
+<a name="line583">583: </a>template &lt;&gt;
+<a name="line584">584: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line585">585: </a>{
+<a name="line586">586: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line587">587: </a>}
+<a name="line588">588: </a>template &lt;&gt;
+<a name="line589">589: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line590">590: </a>{
+<a name="line591">591: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line592">592: </a>}
+<a name="line593">593: </a>template &lt;&gt;
+<a name="line594">594: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line595">595: </a>{
+<a name="line596">596: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line597">597: </a>}
+<a name="line598">598: </a>template &lt;&gt;
+<a name="line599">599: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3D *ov)</font></strong>
+<a name="line600">600: </a>{
+<a name="line601">601: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line602">602: </a>}
+
+<a name="line604">604: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView4D *)</font></strong>;
+<a name="line605">605: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView4D *)</font></strong>;
+<a name="line606">606: </a>template &lt;&gt;
+<a name="line607">607: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4D *ov)</font></strong>
+<a name="line608">608: </a>{
+<a name="line609">609: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line610">610: </a>}
+<a name="line611">611: </a>template &lt;&gt;
+<a name="line612">612: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4D *ov)</font></strong>
+<a name="line613">613: </a>{
+<a name="line614">614: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line615">615: </a>}
+<a name="line616">616: </a>template &lt;&gt;
+<a name="line617">617: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4D *ov)</font></strong>
+<a name="line618">618: </a>{
+<a name="line619">619: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line620">620: </a>}
+<a name="line621">621: </a>template &lt;&gt;
+<a name="line622">622: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4D *ov)</font></strong>
+<a name="line623">623: </a>{
+<a name="line624">624: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line625">625: </a>}
+
+<a name="line627">627: </a><font color="#A020F0">#if !defined(KOKKOS_ENABLE_DEFAULT_DEVICE_TYPE_HOST) </font><font color="#B22222">/* Get host views if the default memory space is not host space */</font><font color="#A020F0"></font>
+<a name="line628">628: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2DHost *)</font></strong>;
+<a name="line629">629: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView2DHost *)</font></strong>;
+<a name="line630">630: </a>template &lt;&gt;
+<a name="line631">631: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line632">632: </a>{
+<a name="line633">633: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line634">634: </a>}
+<a name="line635">635: </a>template &lt;&gt;
+<a name="line636">636: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line637">637: </a>{
+<a name="line638">638: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line639">639: </a>}
+<a name="line640">640: </a>template &lt;&gt;
+<a name="line641">641: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line642">642: </a>{
+<a name="line643">643: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line644">644: </a>}
+<a name="line645">645: </a>template &lt;&gt;
+<a name="line646">646: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView2DHost *ov)</font></strong>
+<a name="line647">647: </a>{
+<a name="line648">648: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line649">649: </a>}
+
+<a name="line651">651: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3DHost *)</font></strong>;
+<a name="line652">652: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView3DHost *)</font></strong>;
+<a name="line653">653: </a>template &lt;&gt;
+<a name="line654">654: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line655">655: </a>{
+<a name="line656">656: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line657">657: </a>}
+<a name="line658">658: </a>template &lt;&gt;
+<a name="line659">659: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line660">660: </a>{
+<a name="line661">661: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line662">662: </a>}
+<a name="line663">663: </a>template &lt;&gt;
+<a name="line664">664: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line665">665: </a>{
+<a name="line666">666: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line667">667: </a>}
+<a name="line668">668: </a>template &lt;&gt;
+<a name="line669">669: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView3DHost *ov)</font></strong>
+<a name="line670">670: </a>{
+<a name="line671">671: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line672">672: </a>}
+
+<a name="line674">674: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView4DHost *)</font></strong>;
+<a name="line675">675: </a><strong><font color="#4169E1">template PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a>, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>, ConstPetscScalarKokkosOffsetView4DHost *)</font></strong>;
+<a name="line676">676: </a>template &lt;&gt;
+<a name="line677">677: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecGetKokkosOffsetViewDOF.html">DMDAVecGetKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4DHost *ov)</font></strong>
+<a name="line678">678: </a>{
+<a name="line679">679: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line680">680: </a>}
+<a name="line681">681: </a>template &lt;&gt;
+<a name="line682">682: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOF"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/DMDA/DMDAVecRestoreKokkosOffsetViewDOF.html">DMDAVecRestoreKokkosOffsetViewDOF</a>(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4DHost *ov)</font></strong>
+<a name="line683">683: </a>{
+<a name="line684">684: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>);
+<a name="line685">685: </a>}
+<a name="line686">686: </a>template &lt;&gt;
+<a name="line687">687: </a><strong><font color="#4169E1"><a name="DMDAVecGetKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecGetKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4DHost *ov)</font></strong>
+<a name="line688">688: </a>{
+<a name="line689">689: </a>  <font color="#4169E1">return</font> DMDAVecGetKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line690">690: </a>}
+<a name="line691">691: </a>template &lt;&gt;
+<a name="line692">692: </a><strong><font color="#4169E1"><a name="DMDAVecRestoreKokkosOffsetViewDOFWrite"></a>PETSC_VISIBILITY_PUBLIC <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMDAVecRestoreKokkosOffsetViewDOFWrite(<a href="../../../../../manualpages/DM/DM.html">DM</a> da, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> vec, PetscScalarKokkosOffsetView4DHost *ov)</font></strong>
+<a name="line693">693: </a>{
+<a name="line694">694: </a>  <font color="#4169E1">return</font> DMDAVecRestoreKokkosOffsetViewDOF_Private(da, vec, ov, <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>);
+<a name="line695">695: </a>}
+<a name="line696">696: </a><font color="#A020F0">#endif</font>
+</pre>
+</body>
+
+</html>

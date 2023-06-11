@@ -1,0 +1,130 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/dm/impls/plex/plexhpddm.c">Actual source code: plexhpddm.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:39+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../include/petsc/private/dmpleximpl.h.html">&lt;petsc/private/dmpleximpl.h&gt;</A>
+
+<a name="line3">  3: </a><font color="#B22222">/*@C</font>
+<a name="line4">  4: </a><font color="#B22222">     <a href="../../../../manualpages/DMPlex/DMCreateNeumannOverlap.html">DMCreateNeumannOverlap</a> - Generates an <a href="../../../../manualpages/IS/IS.html">IS</a>, an unassembled (Neumann) <a href="../../../../manualpages/Mat/Mat.html">Mat</a>, a setup function, and the corresponding context to be used by <a href="../../../../manualpages/PC/PCHPDDM.html">PCHPDDM</a>.</font>
+
+<a name="line6">  6: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line7">  7: </a><font color="#B22222">.     dm - preconditioner context</font>
+
+<a name="line9">  9: </a><font color="#B22222">   Output Parameters:</font>
+<a name="line10"> 10: </a><font color="#B22222">+     ovl - index set of overlapping subdomains</font>
+<a name="line11"> 11: </a><font color="#B22222">.     J - unassembled (Neumann) local matrix</font>
+<a name="line12"> 12: </a><font color="#B22222">.     setup - function for generating the matrix</font>
+<a name="line13"> 13: </a><font color="#B22222">-     setup_ctx - context for setup</font>
+
+<a name="line15"> 15: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line16"> 16: </a><font color="#B22222">+   -dm_plex_view_neumann_original - view the <a href="../../../../manualpages/DM/DM.html">DM</a> without overlap</font>
+<a name="line17"> 17: </a><font color="#B22222">-   -dm_plex_view_neumann_overlap - view the <a href="../../../../manualpages/DM/DM.html">DM</a> with overlap as needed by <a href="../../../../manualpages/PC/PCHPDDM.html">PCHPDDM</a></font>
+
+<a name="line19"> 19: </a><font color="#B22222">   Level: advanced</font>
+
+<a name="line21"> 21: </a><font color="#B22222">.seealso: `<a href="../../../../manualpages/DM/DMCreate.html">DMCreate</a>()`, `<a href="../../../../manualpages/DM/DM.html">DM</a>`, `<a href="../../../../manualpages/Mat/MATIS.html">MATIS</a>`, `<a href="../../../../manualpages/PC/PCHPDDM.html">PCHPDDM</a>`, `<a href="../../../../manualpages/PC/PCHPDDMSetAuxiliaryMat.html">PCHPDDMSetAuxiliaryMat</a>()`</font>
+<a name="line22"> 22: </a><font color="#B22222">@*/</font>
+<a name="line23"> 23: </a><strong><font color="#4169E1"><a name="DMCreateNeumannOverlap_Plex"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DMCreateNeumannOverlap_Plex(<a href="../../../../manualpages/DM/DM.html">DM</a> dm, <a href="../../../../manualpages/IS/IS.html">IS</a> *ovl, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> *J, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> (**setup)(<a href="../../../../manualpages/Mat/Mat.html">Mat</a>, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, <a href="../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../manualpages/Vec/Vec.html">Vec</a>, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>, <a href="../../../../manualpages/IS/IS.html">IS</a>, void *), void **setup_ctx)</font></strong>
+<a name="line24"> 24: </a>{
+<a name="line25"> 25: </a>  <a href="../../../../manualpages/DM/DM.html">DM</a>                     odm;
+<a name="line26"> 26: </a>  <a href="../../../../manualpages/Mat/Mat.html">Mat</a>                    pJ;
+<a name="line27"> 27: </a>  <a href="../../../../manualpages/PetscSF/PetscSF.html">PetscSF</a>                sf = NULL;
+<a name="line28"> 28: </a>  <a href="../../../../manualpages/PetscSection/PetscSection.html">PetscSection</a>           sec, osec;
+<a name="line29"> 29: </a>  <a href="../../../../manualpages/IS/ISLocalToGlobalMapping.html">ISLocalToGlobalMapping</a> l2g;
+<a name="line30"> 30: </a>  const <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        *idxs;
+<a name="line31"> 31: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>               n, mh;
+
+<a name="line33"> 33: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line34"> 34: </a>  *setup     = NULL;
+<a name="line35"> 35: </a>  *setup_ctx = NULL;
+<a name="line36"> 36: </a>  *ovl       = NULL;
+<a name="line37"> 37: </a>  *J         = NULL;
+
+<a name="line39"> 39: </a>  <font color="#B22222">/* Overlapped mesh</font>
+<a name="line40"> 40: </a><font color="#B22222">     overlap is a little more generous, since it is not computed starting from the owned (Dirichlet) points, but from the locally owned cells */</font>
+<a name="line41"> 41: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DMPlex/DMPlexDistributeOverlap.html">DMPlexDistributeOverlap</a>(dm, 1, &amp;sf, &amp;odm));
+<a name="line42"> 42: </a>  <font color="#4169E1">if</font> (!odm) {
+<a name="line43"> 43: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSF/PetscSFDestroy.html">PetscSFDestroy</a>(&amp;sf));
+<a name="line44"> 44: </a>    <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line45"> 45: </a>  }
+
+<a name="line47"> 47: </a>  <font color="#B22222">/* share discretization */</font>
+<a name="line48"> 48: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMGetLocalSection.html">DMGetLocalSection</a>(dm, &amp;sec));
+<a name="line49"> 49: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSection/PetscSectionCreate.html">PetscSectionCreate</a>(<a href="../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sec), &amp;osec));
+<a name="line50"> 50: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSF/PetscSFDistributeSection.html">PetscSFDistributeSection</a>(sf, sec, NULL, osec));
+<a name="line51"> 51: </a>  <font color="#B22222">/* what to do here? using both is fine? */</font>
+<a name="line52"> 52: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMSetLocalSection.html">DMSetLocalSection</a>(odm, osec));
+<a name="line53"> 53: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMCopyDisc.html">DMCopyDisc</a>(dm, odm));
+<a name="line54"> 54: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DMPlex/DMPlexGetMaxProjectionHeight.html">DMPlexGetMaxProjectionHeight</a>(dm, &amp;mh));
+<a name="line55"> 55: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DMPlex/DMPlexSetMaxProjectionHeight.html">DMPlexSetMaxProjectionHeight</a>(odm, mh));
+<a name="line56"> 56: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSection/PetscSectionDestroy.html">PetscSectionDestroy</a>(&amp;osec));
+
+<a name="line58"> 58: </a>  <font color="#B22222">/* material parameters */</font>
+<a name="line59"> 59: </a>  {
+<a name="line60"> 60: </a>    <a href="../../../../manualpages/Vec/Vec.html">Vec</a> A;
+
+<a name="line62"> 62: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMGetAuxiliaryVec.html">DMGetAuxiliaryVec</a>(dm, NULL, 0, 0, &amp;A));
+<a name="line63"> 63: </a>    <font color="#4169E1">if</font> (A) {
+<a name="line64"> 64: </a>      <a href="../../../../manualpages/DM/DM.html">DM</a>  dmAux, ocdm, odmAux;
+<a name="line65"> 65: </a>      <a href="../../../../manualpages/Vec/Vec.html">Vec</a> oA;
+
+<a name="line67"> 67: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/VecGetDM.html">VecGetDM</a>(A, &amp;dmAux));
+<a name="line68"> 68: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMClone.html">DMClone</a>(odm, &amp;odmAux));
+<a name="line69"> 69: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMGetCoordinateDM.html">DMGetCoordinateDM</a>(odm, &amp;ocdm));
+<a name="line70"> 70: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMSetCoordinateDM.html">DMSetCoordinateDM</a>(odmAux, ocdm));
+<a name="line71"> 71: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMCopyDisc.html">DMCopyDisc</a>(dmAux, odmAux));
+
+<a name="line73"> 73: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMGetLocalSection.html">DMGetLocalSection</a>(dmAux, &amp;sec));
+<a name="line74"> 74: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSection/PetscSectionCreate.html">PetscSectionCreate</a>(<a href="../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)sec), &amp;osec));
+<a name="line75"> 75: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A), &amp;oA));
+<a name="line76"> 76: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/VecSetDM.html">VecSetDM</a>(oA, odmAux));
+<a name="line77"> 77: </a>      <font color="#B22222">/* TODO: what if these values changes? */</font>
+<a name="line78"> 78: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DMPlex/DMPlexDistributeField.html">DMPlexDistributeField</a>(dmAux, sf, sec, A, osec, oA));
+<a name="line79"> 79: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMSetLocalSection.html">DMSetLocalSection</a>(odmAux, osec));
+<a name="line80"> 80: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSection/PetscSectionDestroy.html">PetscSectionDestroy</a>(&amp;osec));
+<a name="line81"> 81: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMSetAuxiliaryVec.html">DMSetAuxiliaryVec</a>(odm, NULL, 0, 0, oA));
+<a name="line82"> 82: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;oA));
+<a name="line83"> 83: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMDestroy.html">DMDestroy</a>(&amp;odmAux));
+<a name="line84"> 84: </a>    }
+<a name="line85"> 85: </a>  }
+<a name="line86"> 86: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/PetscSF/PetscSFDestroy.html">PetscSFDestroy</a>(&amp;sf));
+
+<a name="line88"> 88: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMViewFromOptions.html">DMViewFromOptions</a>(dm, NULL, <font color="#666666">"-dm_plex_view_neumann_original"</font>));
+<a name="line89"> 89: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectSetName.html">PetscObjectSetName</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)odm, <font color="#666666">"OVL"</font>));
+<a name="line90"> 90: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMViewFromOptions.html">DMViewFromOptions</a>(odm, NULL, <font color="#666666">"-dm_plex_view_neumann_overlap"</font>));
+
+<a name="line92"> 92: </a>  <font color="#B22222">/* <a href="../../../../manualpages/Mat/MATIS.html">MATIS</a> for the overlap region</font>
+<a name="line93"> 93: </a><font color="#B22222">     the HPDDM interface wants local matrices,</font>
+<a name="line94"> 94: </a><font color="#B22222">     we attach the global <a href="../../../../manualpages/Mat/MATIS.html">MATIS</a> to the overlap <a href="../../../../manualpages/IS/IS.html">IS</a>,</font>
+<a name="line95"> 95: </a><font color="#B22222">     since we need it to do assembly */</font>
+<a name="line96"> 96: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMSetMatType.html">DMSetMatType</a>(odm, <a href="../../../../manualpages/Mat/MATIS.html">MATIS</a>));
+<a name="line97"> 97: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMCreateMatrix.html">DMCreateMatrix</a>(odm, &amp;pJ));
+<a name="line98"> 98: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatISGetLocalMat.html">MatISGetLocalMat</a>(pJ, J));
+<a name="line99"> 99: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectReference.html">PetscObjectReference</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)*J));
+
+<a name="line101">101: </a>  <font color="#B22222">/* overlap <a href="../../../../manualpages/IS/IS.html">IS</a> */</font>
+<a name="line102">102: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatISGetLocalToGlobalMapping.html">MatISGetLocalToGlobalMapping</a>(pJ, &amp;l2g, NULL));
+<a name="line103">103: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/IS/ISLocalToGlobalMappingGetSize.html">ISLocalToGlobalMappingGetSize</a>(l2g, &amp;n));
+<a name="line104">104: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/IS/ISLocalToGlobalMappingGetIndices.html">ISLocalToGlobalMappingGetIndices</a>(l2g, &amp;idxs));
+<a name="line105">105: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/IS/ISCreateGeneral.html">ISCreateGeneral</a>(<a href="../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)odm), n, idxs, <a href="../../../../manualpages/Sys/PetscCopyMode.html">PETSC_COPY_VALUES</a>, ovl));
+<a name="line106">106: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/IS/ISLocalToGlobalMappingRestoreIndices.html">ISLocalToGlobalMappingRestoreIndices</a>(l2g, &amp;idxs));
+<a name="line107">107: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)*ovl, <font color="#666666">"_DM_Overlap_HPDDM_MATIS"</font>, (<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pJ));
+<a name="line108">108: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/DM/DMDestroy.html">DMDestroy</a>(&amp;odm));
+<a name="line109">109: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;pJ));
+
+<a name="line111">111: </a>  <font color="#B22222">/* special purpose setup function (composed in <a href="../../../../manualpages/SNES/DMPlexSetSNESLocalFEM.html">DMPlexSetSNESLocalFEM</a>) */</font>
+<a name="line112">112: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectQueryFunction.html">PetscObjectQueryFunction</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm, <font color="#666666">"MatComputeNeumannOverlap_C"</font>, setup));
+<a name="line113">113: </a>  <font color="#4169E1">if</font> (*setup) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectCompose.html">PetscObjectCompose</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)*ovl, <font color="#666666">"_DM_Original_HPDDM"</font>, (<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)dm));
+<a name="line114">114: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line115">115: </a>}
+</pre>
+</body>
+
+</html>

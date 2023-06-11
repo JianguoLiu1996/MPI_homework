@@ -1,0 +1,618 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/sys/utils/mpishm.c">Actual source code: mpishm.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:59+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../include/petscsys.h.html">&lt;petscsys.h&gt;</A>
+<a name="line2">  2: </a>#include <A href="../../../include/petsc/private/petscimpl.h.html">&lt;petsc/private/petscimpl.h&gt;</A>
+
+<a name="line4">  4: </a><font color="#4169E1"><a name="_n_PetscShmComm"></a>struct _n_PetscShmComm </font>{
+<a name="line5">  5: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *globranks;         <font color="#B22222">/* global ranks of each rank in the shared memory communicator */</font>
+<a name="line6">  6: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>  shmsize;           <font color="#B22222">/* size of the shared memory communicator */</font>
+<a name="line7">  7: </a>  <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>     globcomm, shmcomm; <font color="#B22222">/* global communicator and shared memory communicator (a sub-communicator of the former) */</font>
+<a name="line8">  8: </a>};
+
+<a name="line10"> 10: </a><font color="#B22222">/*</font>
+<a name="line11"> 11: </a><font color="#B22222">   Private routine to delete internal shared memory communicator when a communicator is freed.</font>
+
+<a name="line13"> 13: </a><font color="#B22222">   This is called by MPI, not by users. This is called by <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>() when the communicator that has this  data as an attribute is freed.</font>
+
+<a name="line15"> 15: </a><font color="#B22222">   Note: this is declared extern "C" because it is passed to <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_create_keyval.html#MPI_Comm_create_keyval">MPI_Comm_create_keyval</a>()</font>
+
+<a name="line17"> 17: </a><font color="#B22222">*/</font>
+<a name="line18"> 18: </a><strong><font color="#4169E1"><a name="Petsc_ShmComm_Attr_Delete_Fn"></a>PETSC_EXTERN <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> MPIAPI Petsc_ShmComm_Attr_Delete_Fn(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> keyval, void *val, void *extra_state)</font></strong>
+<a name="line19"> 19: </a>{
+<a name="line20"> 20: </a>  PetscShmComm p = (PetscShmComm)val;
+
+<a name="line22"> 22: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line23"> 23: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Deleting shared memory subcommunicator in a <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> %ld\n"</font>, (long)comm));
+<a name="line24"> 24: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;p-&gt;shmcomm));
+<a name="line25"> 25: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="../../../manualpages/Sys/PetscFree.html">PetscFree</a>(p-&gt;globranks));
+<a name="line26"> 26: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="../../../manualpages/Sys/PetscFree.html">PetscFree</a>(val));
+<a name="line27"> 27: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(MPI_SUCCESS);
+<a name="line28"> 28: </a>}
+
+<a name="line30"> 30: </a><font color="#A020F0">#ifdef PETSC_HAVE_MPI_PROCESS_SHARED_MEMORY</font>
+<a name="line31"> 31: </a>  <font color="#B22222">/* Data structures to support freeing comms created in <a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>().</font>
+<a name="line32"> 32: </a><font color="#B22222">  Since we predict communicators passed to <a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>() are very likely</font>
+<a name="line33"> 33: </a><font color="#B22222">  either a petsc inner communicator or an MPI communicator with a linked petsc</font>
+<a name="line34"> 34: </a><font color="#B22222">  inner communicator, we use a simple static array to store dupped communicators</font>
+<a name="line35"> 35: </a><font color="#B22222">  on rare cases otherwise.</font>
+<a name="line36"> 36: </a><font color="#B22222"> */</font>
+<a name="line37"> 37: </a><strong><font color="#228B22">  #define MAX_SHMCOMM_DUPPED_COMMS 16</font></strong>
+<a name="line38"> 38: </a>static <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       num_dupped_comms = 0;
+<a name="line39"> 39: </a>static <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>       shmcomm_dupped_comms[MAX_SHMCOMM_DUPPED_COMMS];
+<a name="line40"> 40: </a><strong><font color="#4169E1"><a name="PetscShmCommDestroyDuppedComms"></a>static <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscShmCommDestroyDuppedComms(void)</font></strong>
+<a name="line41"> 41: </a>{
+<a name="line42"> 42: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> i;
+<a name="line43"> 43: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line44"> 44: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; num_dupped_comms; i++) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscCommDestroy.html">PetscCommDestroy</a>(&amp;shmcomm_dupped_comms[i]));
+<a name="line45"> 45: </a>  num_dupped_comms = 0; <font color="#B22222">/* reset so that PETSc can be reinitialized */</font>
+<a name="line46"> 46: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line47"> 47: </a>}
+<a name="line48"> 48: </a><font color="#A020F0">#endif</font>
+
+<a name="line50"> 50: </a><font color="#B22222">/*@C</font>
+<a name="line51"> 51: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a> - Returns a sub-communicator of all ranks that share a common memory</font>
+
+<a name="line53"> 53: </a><font color="#B22222">    Collective.</font>
+
+<a name="line55"> 55: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line56"> 56: </a><font color="#B22222">.   globcomm - `<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>`, which can be a user <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> or a PETSc inner <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a></font>
+
+<a name="line58"> 58: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line59"> 59: </a><font color="#B22222">.   pshmcomm - the PETSc shared memory communicator object</font>
+
+<a name="line61"> 61: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line63"> 63: </a><font color="#B22222">    Note:</font>
+<a name="line64"> 64: </a><font color="#B22222">       When used with MPICH, MPICH must be configured with --download-mpich-device=ch3:nemesis</font>
+
+<a name="line66"> 66: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscShmCommGlobalToLocal.html">PetscShmCommGlobalToLocal</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommLocalToGlobal.html">PetscShmCommLocalToGlobal</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommGetMpiShmComm.html">PetscShmCommGetMpiShmComm</a>()`</font>
+<a name="line67"> 67: </a><font color="#B22222">@*/</font>
+<a name="line68"> 68: </a><strong><font color="#4169E1"><a name="PetscShmCommGet"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> globcomm, PetscShmComm *pshmcomm)</font></strong>
+<a name="line69"> 69: </a>{
+<a name="line70"> 70: </a><font color="#A020F0">#ifdef PETSC_HAVE_MPI_PROCESS_SHARED_MEMORY</font>
+<a name="line71"> 71: </a>  MPI_Group         globgroup, shmgroup;
+<a name="line72"> 72: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>      *shmranks, i, flg;
+<a name="line73"> 73: </a>  PetscCommCounter *counter;
+
+<a name="line75"> 75: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line77"> 77: </a>  <font color="#B22222">/* Get a petsc inner comm, since we always want to stash pshmcomm on petsc inner comms */</font>
+<a name="line78"> 78: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_get_attr.html#MPI_Comm_get_attr">MPI_Comm_get_attr</a>(globcomm, Petsc_Counter_keyval, &amp;counter, &amp;flg));
+<a name="line79"> 79: </a>  <font color="#4169E1">if</font> (!flg) { <font color="#B22222">/* globcomm is not a petsc comm */</font>
+<a name="line80"> 80: </a>    <font color="#4169E1">union</font>
+<a name="line81"> 81: </a>    {
+<a name="line82"> 82: </a>      <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm;
+<a name="line83"> 83: </a>      void    *ptr;
+<a name="line84"> 84: </a>    } ucomm;
+<a name="line85"> 85: </a>    <font color="#B22222">/* check if globcomm already has a linked petsc inner comm */</font>
+<a name="line86"> 86: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_get_attr.html#MPI_Comm_get_attr">MPI_Comm_get_attr</a>(globcomm, Petsc_InnerComm_keyval, &amp;ucomm, &amp;flg));
+<a name="line87"> 87: </a>    <font color="#4169E1">if</font> (!flg) {
+<a name="line88"> 88: </a>      <font color="#B22222">/* globcomm does not have a linked petsc inner comm, so we create one and replace globcomm with it */</font>
+<a name="line89"> 89: </a>      <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(num_dupped_comms &lt; MAX_SHMCOMM_DUPPED_COMMS, globcomm, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_PLIB</a>, <font color="#666666">"<a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>() is trying to dup more than %d MPI_Comms"</font>, MAX_SHMCOMM_DUPPED_COMMS);
+<a name="line90"> 90: </a>      <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscCommDuplicate.html">PetscCommDuplicate</a>(globcomm, &amp;globcomm, NULL));
+<a name="line91"> 91: </a>      <font color="#B22222">/* Register a function to free the dupped petsc comms at <a href="../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a> at the first time */</font>
+<a name="line92"> 92: </a>      <font color="#4169E1">if</font> (num_dupped_comms == 0) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscRegisterFinalize.html">PetscRegisterFinalize</a>(PetscShmCommDestroyDuppedComms));
+<a name="line93"> 93: </a>      shmcomm_dupped_comms[num_dupped_comms] = globcomm;
+<a name="line94"> 94: </a>      num_dupped_comms++;
+<a name="line95"> 95: </a>    } <font color="#4169E1">else</font> {
+<a name="line96"> 96: </a>      <font color="#B22222">/* otherwise, we pull out the inner comm and use it as globcomm */</font>
+<a name="line97"> 97: </a>      globcomm = ucomm.comm;
+<a name="line98"> 98: </a>    }
+<a name="line99"> 99: </a>  }
+
+<a name="line101">101: </a>  <font color="#B22222">/* Check if globcomm already has an attached pshmcomm. If no, create one */</font>
+<a name="line102">102: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_get_attr.html#MPI_Comm_get_attr">MPI_Comm_get_attr</a>(globcomm, Petsc_ShmComm_keyval, pshmcomm, &amp;flg));
+<a name="line103">103: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+
+<a name="line105">105: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscNew.html">PetscNew</a>(pshmcomm));
+<a name="line106">106: </a>  (*pshmcomm)-&gt;globcomm = globcomm;
+
+<a name="line108">108: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_split_type.html#MPI_Comm_split_type">MPI_Comm_split_type</a>(globcomm, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &amp;(*pshmcomm)-&gt;shmcomm));
+
+<a name="line110">110: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>((*pshmcomm)-&gt;shmcomm, &amp;(*pshmcomm)-&gt;shmsize));
+<a name="line111">111: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_group.html#MPI_Comm_group">MPI_Comm_group</a>(globcomm, &amp;globgroup));
+<a name="line112">112: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_group.html#MPI_Comm_group">MPI_Comm_group</a>((*pshmcomm)-&gt;shmcomm, &amp;shmgroup));
+<a name="line113">113: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>((*pshmcomm)-&gt;shmsize, &amp;shmranks));
+<a name="line114">114: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>((*pshmcomm)-&gt;shmsize, &amp;(*pshmcomm)-&gt;globranks));
+<a name="line115">115: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; (*pshmcomm)-&gt;shmsize; i++) shmranks[i] = i;
+<a name="line116">116: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_translate_ranks.html#MPI_Group_translate_ranks">MPI_Group_translate_ranks</a>(shmgroup, (*pshmcomm)-&gt;shmsize, shmranks, globgroup, (*pshmcomm)-&gt;globranks));
+<a name="line117">117: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscFree.html">PetscFree</a>(shmranks));
+<a name="line118">118: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_free.html#MPI_Group_free">MPI_Group_free</a>(&amp;globgroup));
+<a name="line119">119: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Group_free.html#MPI_Group_free">MPI_Group_free</a>(&amp;shmgroup));
+
+<a name="line121">121: </a>  <font color="#4169E1">for</font> (i = 0; i &lt; (*pshmcomm)-&gt;shmsize; i++) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(NULL, <font color="#666666">"Shared memory rank %d global rank %d\n"</font>, i, (*pshmcomm)-&gt;globranks[i]));
+<a name="line122">122: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_set_attr.html#MPI_Comm_set_attr">MPI_Comm_set_attr</a>(globcomm, Petsc_ShmComm_keyval, *pshmcomm));
+<a name="line123">123: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line124">124: </a><font color="#A020F0">#else</font>
+<a name="line125">125: </a>  <a href="../../../manualpages/Sys/SETERRQ.html">SETERRQ</a>(globcomm, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_SUP</a>, <font color="#666666">"Shared memory communicators need MPI-3 package support.\nPlease upgrade your MPI or reconfigure with --download-mpich."</font>);
+<a name="line126">126: </a><font color="#A020F0">#endif</font>
+<a name="line127">127: </a>}
+
+<a name="line129">129: </a><font color="#B22222">/*@C</font>
+<a name="line130">130: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscShmCommGlobalToLocal.html">PetscShmCommGlobalToLocal</a> - Given a global rank returns the local rank in the shared memory communicator</font>
+
+<a name="line132">132: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line133">133: </a><font color="#B22222">+   pshmcomm - the shared memory communicator object</font>
+<a name="line134">134: </a><font color="#B22222">-   grank    - the global rank</font>
+
+<a name="line136">136: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line137">137: </a><font color="#B22222">.   lrank - the local rank, or `MPI_PROC_NULL` if it does not exist</font>
+
+<a name="line139">139: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line141">141: </a><font color="#B22222">    Developer Notes:</font>
+<a name="line142">142: </a><font color="#B22222">    Assumes the pshmcomm-&gt;globranks[] is sorted</font>
+
+<a name="line144">144: </a><font color="#B22222">    It may be better to rewrite this to map multiple global ranks to local in the same function call</font>
+
+<a name="line146">146: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommLocalToGlobal.html">PetscShmCommLocalToGlobal</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommGetMpiShmComm.html">PetscShmCommGetMpiShmComm</a>()`</font>
+<a name="line147">147: </a><font color="#B22222">@*/</font>
+<a name="line148">148: </a><strong><font color="#4169E1"><a name="PetscShmCommGlobalToLocal"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscShmCommGlobalToLocal.html">PetscShmCommGlobalToLocal</a>(PetscShmComm pshmcomm, <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> grank, <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *lrank)</font></strong>
+<a name="line149">149: </a>{
+<a name="line150">150: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> low, high, t, i;
+<a name="line151">151: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a>   flg = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line153">153: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line156">156: </a>  *lrank = MPI_PROC_NULL;
+<a name="line157">157: </a>  <font color="#4169E1">if</font> (grank &lt; pshmcomm-&gt;globranks[0]) <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line158">158: </a>  <font color="#4169E1">if</font> (grank &gt; pshmcomm-&gt;globranks[pshmcomm-&gt;shmsize - 1]) <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line159">159: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-noshared"</font>, &amp;flg, NULL));
+<a name="line160">160: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line161">161: </a>  low  = 0;
+<a name="line162">162: </a>  high = pshmcomm-&gt;shmsize;
+<a name="line163">163: </a>  <font color="#4169E1">while</font> (high - low &gt; 5) {
+<a name="line164">164: </a>    t = (low + high) / 2;
+<a name="line165">165: </a>    <font color="#4169E1">if</font> (pshmcomm-&gt;globranks[t] &gt; grank) high = t;
+<a name="line166">166: </a>    <font color="#4169E1">else</font> low = t;
+<a name="line167">167: </a>  }
+<a name="line168">168: </a>  <font color="#4169E1">for</font> (i = low; i &lt; high; i++) {
+<a name="line169">169: </a>    <font color="#4169E1">if</font> (pshmcomm-&gt;globranks[i] &gt; grank) <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line170">170: </a>    <font color="#4169E1">if</font> (pshmcomm-&gt;globranks[i] == grank) {
+<a name="line171">171: </a>      *lrank = i;
+<a name="line172">172: </a>      <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line173">173: </a>    }
+<a name="line174">174: </a>  }
+<a name="line175">175: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line176">176: </a>}
+
+<a name="line178">178: </a><font color="#B22222">/*@C</font>
+<a name="line179">179: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscShmCommLocalToGlobal.html">PetscShmCommLocalToGlobal</a> - Given a local rank in the shared memory communicator returns the global rank</font>
+
+<a name="line181">181: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line182">182: </a><font color="#B22222">+   pshmcomm - the shared memory communicator object</font>
+<a name="line183">183: </a><font color="#B22222">-   lrank    - the local rank in the shared memory communicator</font>
+
+<a name="line185">185: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line186">186: </a><font color="#B22222">.   grank - the global rank in the global communicator where the shared memory communicator is built</font>
+
+<a name="line188">188: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line190">190: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscShmCommGlobalToLocal.html">PetscShmCommGlobalToLocal</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommGetMpiShmComm.html">PetscShmCommGetMpiShmComm</a>()`</font>
+<a name="line191">191: </a><font color="#B22222">@*/</font>
+<a name="line192">192: </a><strong><font color="#4169E1"><a name="PetscShmCommLocalToGlobal"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscShmCommLocalToGlobal.html">PetscShmCommLocalToGlobal</a>(PetscShmComm pshmcomm, <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> lrank, <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> *grank)</font></strong>
+<a name="line193">193: </a>{
+<a name="line194">194: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line197">197: </a>  <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(lrank &gt;= 0 &amp;&amp; lrank &lt; pshmcomm-&gt;shmsize, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"No rank %d in the shared memory communicator"</font>, lrank);
+<a name="line198">198: </a>  *grank = pshmcomm-&gt;globranks[lrank];
+<a name="line199">199: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line200">200: </a>}
+
+<a name="line202">202: </a><font color="#B22222">/*@C</font>
+<a name="line203">203: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscShmCommGetMpiShmComm.html">PetscShmCommGetMpiShmComm</a> - Returns the MPI communicator that represents all processes with common shared memory</font>
+
+<a name="line205">205: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line206">206: </a><font color="#B22222">.   pshmcomm - PetscShmComm object obtained with <a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>()</font>
+
+<a name="line208">208: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line209">209: </a><font color="#B22222">.   comm     - the MPI communicator</font>
+
+<a name="line211">211: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line213">213: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscShmCommGlobalToLocal.html">PetscShmCommGlobalToLocal</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>()`, `<a href="../../../manualpages/Sys/PetscShmCommLocalToGlobal.html">PetscShmCommLocalToGlobal</a>()`</font>
+<a name="line214">214: </a><font color="#B22222">@*/</font>
+<a name="line215">215: </a><strong><font color="#4169E1"><a name="PetscShmCommGetMpiShmComm"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscShmCommGetMpiShmComm.html">PetscShmCommGetMpiShmComm</a>(PetscShmComm pshmcomm, <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm)</font></strong>
+<a name="line216">216: </a>{
+<a name="line217">217: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line220">220: </a>  *comm = pshmcomm-&gt;shmcomm;
+<a name="line221">221: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line222">222: </a>}
+
+<a name="line224">224: </a><font color="#A020F0">#if defined(PETSC_HAVE_OPENMP_SUPPORT)</font>
+<a name="line225">225: </a><font color="#A020F0">  #include &lt;pthread.h&gt;</font>
+<a name="line226">226: </a><font color="#A020F0">  #include &lt;hwloc.h&gt;</font>
+<a name="line227">227: </a><font color="#A020F0">  #include &lt;omp.h&gt;</font>
+
+<a name="line229">229: </a>  <font color="#B22222">/* Use mmap() to allocate shared mmeory (for the pthread_barrier_t object) if it is available,</font>
+<a name="line230">230: </a><font color="#B22222">   otherwise use <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_allocate_shared.html#MPI_Win_allocate_shared">MPI_Win_allocate_shared</a>. They should have the same effect except MPI-3 is much</font>
+<a name="line231">231: </a><font color="#B22222">   simpler to use. However, on a Cori Haswell node with Cray MPI, MPI-3 worsened a test's performance</font>
+<a name="line232">232: </a><font color="#B22222">   by 50%. Until the reason is found out, we use mmap() instead.</font>
+<a name="line233">233: </a><font color="#B22222">*/</font>
+<a name="line234">234: </a><strong><font color="#228B22">  #define USE_MMAP_ALLOCATE_SHARED_MEMORY</font></strong>
+
+<a name="line236">236: </a><font color="#A020F0">  #if defined(USE_MMAP_ALLOCATE_SHARED_MEMORY) &amp;&amp; defined(PETSC_HAVE_MMAP)</font>
+<a name="line237">237: </a><font color="#A020F0">    #include &lt;sys/mman.h&gt;</font>
+<a name="line238">238: </a><font color="#A020F0">    #include &lt;sys/types.h&gt;</font>
+<a name="line239">239: </a><font color="#A020F0">    #include &lt;sys/stat.h&gt;</font>
+<a name="line240">240: </a><font color="#A020F0">    #include &lt;fcntl.h&gt;</font>
+<a name="line241">241: </a><font color="#A020F0">  #endif</font>
+
+<a name="line243">243: </a><font color="#4169E1"><a name="_n_PetscOmpCtrl"></a>struct _n_PetscOmpCtrl </font>{
+<a name="line244">244: </a>  <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>           omp_comm;        <font color="#B22222">/* a shared memory communicator to spawn omp threads */</font>
+<a name="line245">245: </a>  <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>           omp_master_comm; <font color="#B22222">/* a communicator to give to third party libraries */</font>
+<a name="line246">246: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>        omp_comm_size;   <font color="#B22222">/* size of omp_comm, a kind of OMP_NUM_THREADS */</font>
+<a name="line247">247: </a>  <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a>          is_omp_master;   <font color="#B22222">/* rank 0's in omp_comm */</font>
+<a name="line248">248: </a>  MPI_Win            omp_win;         <font color="#B22222">/* a shared memory window containing a barrier */</font>
+<a name="line249">249: </a>  pthread_barrier_t *barrier;         <font color="#B22222">/* pointer to the barrier */</font>
+<a name="line250">250: </a>  hwloc_topology_t   topology;
+<a name="line251">251: </a>  hwloc_cpuset_t     cpuset;     <font color="#B22222">/* cpu bindings of omp master */</font>
+<a name="line252">252: </a>  hwloc_cpuset_t     omp_cpuset; <font color="#B22222">/* union of cpu bindings of ranks in omp_comm */</font>
+<a name="line253">253: </a>};
+
+<a name="line255">255: </a><font color="#B22222">/* Allocate and initialize a pthread_barrier_t object in memory shared by processes in omp_comm</font>
+<a name="line256">256: </a><font color="#B22222">   contained by the controller.</font>
+
+<a name="line258">258: </a><font color="#B22222">   PETSc OpenMP controller users do not call this function directly. This function exists</font>
+<a name="line259">259: </a><font color="#B22222">   only because we want to separate shared memory allocation methods from other code.</font>
+<a name="line260">260: </a><font color="#B22222"> */</font>
+<a name="line261">261: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlCreateBarrier"></a>static inline <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscOmpCtrlCreateBarrier(PetscOmpCtrl ctrl)</font></strong>
+<a name="line262">262: </a>{
+<a name="line263">263: </a>  MPI_Aint              size;
+<a name="line264">264: </a>  void                 *baseptr;
+<a name="line265">265: </a>  pthread_barrierattr_t attr;
+
+<a name="line267">267: </a><font color="#A020F0">  #if defined(USE_MMAP_ALLOCATE_SHARED_MEMORY) &amp;&amp; defined(PETSC_HAVE_MMAP)</font>
+<a name="line268">268: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>  fd;
+<a name="line269">269: </a>  PetscChar pathname[PETSC_MAX_PATH_LEN];
+<a name="line270">270: </a><font color="#A020F0">  #else</font>
+<a name="line271">271: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> disp_unit;
+<a name="line272">272: </a><font color="#A020F0">  #endif</font>
+
+<a name="line274">274: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line275">275: </a><font color="#A020F0">  #if defined(USE_MMAP_ALLOCATE_SHARED_MEMORY) &amp;&amp; defined(PETSC_HAVE_MMAP)</font>
+<a name="line276">276: </a>  size = <font color="#4169E1">sizeof</font>(pthread_barrier_t);
+<a name="line277">277: </a>  <font color="#4169E1">if</font> (ctrl-&gt;is_omp_master) {
+<a name="line278">278: </a>    <font color="#B22222">/* use <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a> in <a href="../../../manualpages/Sys/PetscGetTmp.html">PetscGetTmp</a>, since it is a collective call. Using omp_comm would otherwise bcast the partially populated pathname to slaves */</font>
+<a name="line279">279: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscGetTmp.html">PetscGetTmp</a>(<a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, pathname, PETSC_MAX_PATH_LEN));
+<a name="line280">280: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscStrlcat.html">PetscStrlcat</a>(pathname, <font color="#666666">"/petsc-shm-XXXXXX"</font>, PETSC_MAX_PATH_LEN));
+<a name="line281">281: </a>    <font color="#B22222">/* mkstemp replaces XXXXXX with a unique file name and opens the file for us */</font>
+<a name="line282">282: </a>    fd = mkstemp(pathname);
+<a name="line283">283: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(fd != -1, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Could not create tmp file %s with mkstemp"</font>, pathname);
+<a name="line284">284: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(ftruncate(fd, size));
+<a name="line285">285: </a>    baseptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+<a name="line286">286: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(baseptr != MAP_FAILED, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"mmap() failed"</font>);
+<a name="line287">287: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(close(fd));
+<a name="line288">288: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Bcast.html#MPI_Bcast">MPI_Bcast</a>(pathname, PETSC_MAX_PATH_LEN, MPI_CHAR, 0, ctrl-&gt;omp_comm));
+<a name="line289">289: </a>    <font color="#B22222">/* this <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a> is to wait slaves to open the file before master unlinks it */</font>
+<a name="line290">290: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>(ctrl-&gt;omp_comm));
+<a name="line291">291: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(unlink(pathname));
+<a name="line292">292: </a>  } <font color="#4169E1">else</font> {
+<a name="line293">293: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Bcast.html#MPI_Bcast">MPI_Bcast</a>(pathname, PETSC_MAX_PATH_LEN, MPI_CHAR, 0, ctrl-&gt;omp_comm));
+<a name="line294">294: </a>    fd = open(pathname, O_RDWR);
+<a name="line295">295: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(fd != -1, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"Could not open tmp file %s"</font>, pathname);
+<a name="line296">296: </a>    baseptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+<a name="line297">297: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(baseptr != MAP_FAILED, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"mmap() failed"</font>);
+<a name="line298">298: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(close(fd));
+<a name="line299">299: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>(ctrl-&gt;omp_comm));
+<a name="line300">300: </a>  }
+<a name="line301">301: </a><font color="#A020F0">  #else</font>
+<a name="line302">302: </a>  size = ctrl-&gt;is_omp_master ? <font color="#4169E1">sizeof</font>(pthread_barrier_t) : 0;
+<a name="line303">303: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_allocate_shared.html#MPI_Win_allocate_shared">MPI_Win_allocate_shared</a>(size, 1, MPI_INFO_NULL, ctrl-&gt;omp_comm, &amp;baseptr, &amp;ctrl-&gt;omp_win));
+<a name="line304">304: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_shared_query.html#MPI_Win_shared_query">MPI_Win_shared_query</a>(ctrl-&gt;omp_win, 0, &amp;size, &amp;disp_unit, &amp;baseptr));
+<a name="line305">305: </a><font color="#A020F0">  #endif</font>
+<a name="line306">306: </a>  ctrl-&gt;barrier = (pthread_barrier_t *)baseptr;
+
+<a name="line308">308: </a>  <font color="#B22222">/* omp master initializes the barrier */</font>
+<a name="line309">309: </a>  <font color="#4169E1">if</font> (ctrl-&gt;is_omp_master) {
+<a name="line310">310: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(ctrl-&gt;omp_comm, &amp;ctrl-&gt;omp_comm_size));
+<a name="line311">311: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(pthread_barrierattr_init(&amp;attr));
+<a name="line312">312: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(pthread_barrierattr_setpshared(&amp;attr, PTHREAD_PROCESS_SHARED)); <font color="#B22222">/* make the barrier also work for processes */</font>
+<a name="line313">313: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(pthread_barrier_init(ctrl-&gt;barrier, &amp;attr, (unsigned int)ctrl-&gt;omp_comm_size));
+<a name="line314">314: </a>    <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(pthread_barrierattr_destroy(&amp;attr));
+<a name="line315">315: </a>  }
+
+<a name="line317">317: </a>  <font color="#B22222">/* this <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a> is to make sure the omp barrier is initialized before slaves use it */</font>
+<a name="line318">318: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>(ctrl-&gt;omp_comm));
+<a name="line319">319: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line320">320: </a>}
+
+<a name="line322">322: </a><font color="#B22222">/* Destroy the pthread barrier in the PETSc OpenMP controller */</font>
+<a name="line323">323: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlDestroyBarrier"></a>static inline <a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PetscOmpCtrlDestroyBarrier(PetscOmpCtrl ctrl)</font></strong>
+<a name="line324">324: </a>{
+<a name="line325">325: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line326">326: </a>  <font color="#B22222">/* this <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a> is to make sure slaves have finished using the omp barrier before master destroys it */</font>
+<a name="line327">327: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>(ctrl-&gt;omp_comm));
+<a name="line328">328: </a>  <font color="#4169E1">if</font> (ctrl-&gt;is_omp_master) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(pthread_barrier_destroy(ctrl-&gt;barrier));
+
+<a name="line330">330: </a><font color="#A020F0">  #if defined(USE_MMAP_ALLOCATE_SHARED_MEMORY) &amp;&amp; defined(PETSC_HAVE_MMAP)</font>
+<a name="line331">331: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(munmap(ctrl-&gt;barrier, <font color="#4169E1">sizeof</font>(pthread_barrier_t)));
+<a name="line332">332: </a><font color="#A020F0">  #else</font>
+<a name="line333">333: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Win_free.html#MPI_Win_free">MPI_Win_free</a>(&amp;ctrl-&gt;omp_win));
+<a name="line334">334: </a><font color="#A020F0">  #endif</font>
+<a name="line335">335: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line336">336: </a>}
+
+<a name="line338">338: </a><font color="#B22222">/*@C</font>
+<a name="line339">339: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a> - create a PETSc OpenMP controller, which manages PETSc's interaction with third party libraries that use OpenMP</font>
+
+<a name="line341">341: </a><font color="#B22222">    Input Parameters:</font>
+<a name="line342">342: </a><font color="#B22222">+   petsc_comm - a communicator some PETSc object (for example, a matrix) lives in</font>
+<a name="line343">343: </a><font color="#B22222">-   nthreads   - number of threads per MPI rank to spawn in a library using OpenMP. If nthreads = -1, let PETSc decide a suitable value</font>
+
+<a name="line345">345: </a><font color="#B22222">    Output Parameter:</font>
+<a name="line346">346: </a><font color="#B22222">.   pctrl      - a PETSc OpenMP controller</font>
+
+<a name="line348">348: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line350">350: </a><font color="#B22222">    Developer Note:</font>
+<a name="line351">351: </a><font color="#B22222">    Possibly use the variable `PetscNumOMPThreads` to determine the number for threads to use</font>
+
+<a name="line353">353: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlGetOmpComms.html">PetscOmpCtrlGetOmpComms</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>()`,</font>
+<a name="line354">354: </a><font color="#B22222">@*/</font>
+<a name="line355">355: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlCreate"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> petsc_comm, <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a> nthreads, PetscOmpCtrl *pctrl)</font></strong>
+<a name="line356">356: </a>{
+<a name="line357">357: </a>  PetscOmpCtrl   ctrl;
+<a name="line358">358: </a>  unsigned long *cpu_ulongs = NULL;
+<a name="line359">359: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       i, nr_cpu_ulongs;
+<a name="line360">360: </a>  PetscShmComm   pshmcomm;
+<a name="line361">361: </a>  <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a>       shm_comm;
+<a name="line362">362: </a>  <a href="../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a>    shm_rank, shm_comm_size, omp_rank, color;
+<a name="line363">363: </a>  <a href="../../../manualpages/Sys/PetscInt.html">PetscInt</a>       num_packages, num_cores;
+
+<a name="line365">365: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line366">366: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;ctrl));
+
+<a name="line368">368: </a>  <font color="#B22222">/*=================================================================================</font>
+<a name="line369">369: </a><font color="#B22222">    Init hwloc</font>
+<a name="line370">370: </a><font color="#B22222">   ==================================================================================*/</font>
+<a name="line371">371: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_topology_init(&amp;ctrl-&gt;topology));
+<a name="line372">372: </a><font color="#A020F0">  #if HWLOC_API_VERSION &gt;= 0x00020000</font>
+<a name="line373">373: </a>  <font color="#B22222">/* to filter out unneeded info and have faster hwloc_topology_load */</font>
+<a name="line374">374: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_topology_set_all_types_filter(ctrl-&gt;topology, HWLOC_TYPE_FILTER_KEEP_NONE));
+<a name="line375">375: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_topology_set_type_filter(ctrl-&gt;topology, HWLOC_OBJ_CORE, HWLOC_TYPE_FILTER_KEEP_ALL));
+<a name="line376">376: </a><font color="#A020F0">  #endif</font>
+<a name="line377">377: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_topology_load(ctrl-&gt;topology));
+
+<a name="line379">379: </a>  <font color="#B22222">/*=================================================================================</font>
+<a name="line380">380: </a><font color="#B22222">    Split petsc_comm into multiple omp_comms. Ranks in an omp_comm have access to</font>
+<a name="line381">381: </a><font color="#B22222">    physically shared memory. Rank 0 of each omp_comm is called an OMP master, and</font>
+<a name="line382">382: </a><font color="#B22222">    others are called slaves. OMP Masters make up a new comm called omp_master_comm,</font>
+<a name="line383">383: </a><font color="#B22222">    which is usually passed to third party libraries.</font>
+<a name="line384">384: </a><font color="#B22222">   ==================================================================================*/</font>
+
+<a name="line386">386: </a>  <font color="#B22222">/* fetch the stored shared memory communicator */</font>
+<a name="line387">387: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscShmCommGet.html">PetscShmCommGet</a>(petsc_comm, &amp;pshmcomm));
+<a name="line388">388: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscShmCommGetMpiShmComm.html">PetscShmCommGetMpiShmComm</a>(pshmcomm, &amp;shm_comm));
+
+<a name="line390">390: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(shm_comm, &amp;shm_rank));
+<a name="line391">391: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(shm_comm, &amp;shm_comm_size));
+
+<a name="line393">393: </a>  <font color="#B22222">/* PETSc decides nthreads, which is the smaller of shm_comm_size or cores per package(socket) */</font>
+<a name="line394">394: </a>  <font color="#4169E1">if</font> (nthreads == -1) {
+<a name="line395">395: </a>    num_packages = hwloc_get_nbobjs_by_type(ctrl-&gt;topology, HWLOC_OBJ_PACKAGE) &lt;= 0 ? 1 : hwloc_get_nbobjs_by_type(ctrl-&gt;topology, HWLOC_OBJ_PACKAGE);
+<a name="line396">396: </a>    num_cores    = hwloc_get_nbobjs_by_type(ctrl-&gt;topology, HWLOC_OBJ_CORE) &lt;= 0 ? 1 : hwloc_get_nbobjs_by_type(ctrl-&gt;topology, HWLOC_OBJ_CORE);
+<a name="line397">397: </a>    nthreads     = num_cores / num_packages;
+<a name="line398">398: </a>    <font color="#4169E1">if</font> (nthreads &gt; shm_comm_size) nthreads = shm_comm_size;
+<a name="line399">399: </a>  }
+
+<a name="line401">401: </a>  <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(nthreads &gt;= 1 &amp;&amp; nthreads &lt;= shm_comm_size, petsc_comm, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_OUTOFRANGE</a>, <font color="#666666">"number of OpenMP threads %"</font> PetscInt_FMT <font color="#666666">" can not be &lt; 1 or &gt; the MPI shared memory communicator size %d"</font>, nthreads, shm_comm_size);
+<a name="line402">402: </a>  <font color="#4169E1">if</font> (shm_comm_size % nthreads) <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(petsc_comm, <font color="#666666">"Warning: number of OpenMP threads %"</font> PetscInt_FMT <font color="#666666">" is not a factor of the MPI shared memory communicator size %d, which may cause load-imbalance!\n"</font>, nthreads, shm_comm_size));
+
+<a name="line404">404: </a>  <font color="#B22222">/* split shm_comm into a set of omp_comms with each of size nthreads. Ex., if</font>
+<a name="line405">405: </a><font color="#B22222">     shm_comm_size=16, nthreads=8, then ranks 0~7 get color 0 and ranks 8~15 get</font>
+<a name="line406">406: </a><font color="#B22222">     color 1. They are put in two omp_comms. Note that petsc_ranks may or may not</font>
+<a name="line407">407: </a><font color="#B22222">     be consecutive in a shm_comm, but shm_ranks always run from 0 to shm_comm_size-1.</font>
+<a name="line408">408: </a><font color="#B22222">     Use 0 as key so that rank ordering wont change in new comm.</font>
+<a name="line409">409: </a><font color="#B22222">   */</font>
+<a name="line410">410: </a>  color = shm_rank / nthreads;
+<a name="line411">411: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_split.html#MPI_Comm_split">MPI_Comm_split</a>(shm_comm, color, 0 <font color="#B22222">/*key*/</font>, &amp;ctrl-&gt;omp_comm));
+
+<a name="line413">413: </a>  <font color="#B22222">/* put rank 0's in omp_comms (i.e., master ranks) into a new comm - omp_master_comm */</font>
+<a name="line414">414: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(ctrl-&gt;omp_comm, &amp;omp_rank));
+<a name="line415">415: </a>  <font color="#4169E1">if</font> (!omp_rank) {
+<a name="line416">416: </a>    ctrl-&gt;is_omp_master = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>; <font color="#B22222">/* master */</font>
+<a name="line417">417: </a>    color               = 0;
+<a name="line418">418: </a>  } <font color="#4169E1">else</font> {
+<a name="line419">419: </a>    ctrl-&gt;is_omp_master = <a href="../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;   <font color="#B22222">/* slave */</font>
+<a name="line420">420: </a>    color               = MPI_UNDEFINED; <font color="#B22222">/* to make slaves get omp_master_comm = MPI_COMM_NULL in <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_split.html#MPI_Comm_split">MPI_Comm_split</a> */</font>
+<a name="line421">421: </a>  }
+<a name="line422">422: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_split.html#MPI_Comm_split">MPI_Comm_split</a>(petsc_comm, color, 0 <font color="#B22222">/*key*/</font>, &amp;ctrl-&gt;omp_master_comm));
+
+<a name="line424">424: </a>  <font color="#B22222">/*=================================================================================</font>
+<a name="line425">425: </a><font color="#B22222">    Each omp_comm has a pthread_barrier_t in its shared memory, which is used to put</font>
+<a name="line426">426: </a><font color="#B22222">    slave ranks in sleep and idle their CPU, so that the master can fork OMP threads</font>
+<a name="line427">427: </a><font color="#B22222">    and run them on the idle CPUs.</font>
+<a name="line428">428: </a><font color="#B22222">   ==================================================================================*/</font>
+<a name="line429">429: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscOmpCtrlCreateBarrier(ctrl));
+
+<a name="line431">431: </a>  <font color="#B22222">/*=================================================================================</font>
+<a name="line432">432: </a><font color="#B22222">    omp master logs its cpu binding (i.e., cpu set) and computes a new binding that</font>
+<a name="line433">433: </a><font color="#B22222">    is the union of the bindings of all ranks in the omp_comm</font>
+<a name="line434">434: </a><font color="#B22222">    =================================================================================*/</font>
+
+<a name="line436">436: </a>  ctrl-&gt;cpuset = hwloc_bitmap_alloc();
+<a name="line437">437: </a>  <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(ctrl-&gt;cpuset, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"hwloc_bitmap_alloc() failed"</font>);
+<a name="line438">438: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_get_cpubind(ctrl-&gt;topology, ctrl-&gt;cpuset, HWLOC_CPUBIND_PROCESS));
+
+<a name="line440">440: </a>  <font color="#B22222">/* hwloc main developer said they will add new APIs hwloc_bitmap_{nr,to,from}_ulongs in 2.1 to help us simplify the following bitmap pack/unpack code */</font>
+<a name="line441">441: </a>  nr_cpu_ulongs = (hwloc_bitmap_last(hwloc_topology_get_topology_cpuset(ctrl-&gt;topology)) + <font color="#4169E1">sizeof</font>(unsigned long) * 8) / <font color="#4169E1">sizeof</font>(unsigned long) / 8;
+<a name="line442">442: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nr_cpu_ulongs, &amp;cpu_ulongs));
+<a name="line443">443: </a>  <font color="#4169E1">if</font> (nr_cpu_ulongs == 1) {
+<a name="line444">444: </a>    cpu_ulongs[0] = hwloc_bitmap_to_ulong(ctrl-&gt;cpuset);
+<a name="line445">445: </a>  } <font color="#4169E1">else</font> {
+<a name="line446">446: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; nr_cpu_ulongs; i++) cpu_ulongs[i] = hwloc_bitmap_to_ith_ulong(ctrl-&gt;cpuset, (unsigned)i);
+<a name="line447">447: </a>  }
+
+<a name="line449">449: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Reduce.html#MPI_Reduce">MPI_Reduce</a>(ctrl-&gt;is_omp_master ? MPI_IN_PLACE : cpu_ulongs, cpu_ulongs, nr_cpu_ulongs, MPI_UNSIGNED_LONG, MPI_BOR, 0, ctrl-&gt;omp_comm));
+
+<a name="line451">451: </a>  <font color="#4169E1">if</font> (ctrl-&gt;is_omp_master) {
+<a name="line452">452: </a>    ctrl-&gt;omp_cpuset = hwloc_bitmap_alloc();
+<a name="line453">453: </a>    <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(ctrl-&gt;omp_cpuset, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"hwloc_bitmap_alloc() failed"</font>);
+<a name="line454">454: </a>    <font color="#4169E1">if</font> (nr_cpu_ulongs == 1) {
+<a name="line455">455: </a><font color="#A020F0">  #if HWLOC_API_VERSION &gt;= 0x00020000</font>
+<a name="line456">456: </a>      <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_bitmap_from_ulong(ctrl-&gt;omp_cpuset, cpu_ulongs[0]));
+<a name="line457">457: </a><font color="#A020F0">  #else</font>
+<a name="line458">458: </a>      hwloc_bitmap_from_ulong(ctrl-&gt;omp_cpuset, cpu_ulongs[0]);
+<a name="line459">459: </a><font color="#A020F0">  #endif</font>
+<a name="line460">460: </a>    } <font color="#4169E1">else</font> {
+<a name="line461">461: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; nr_cpu_ulongs; i++) {
+<a name="line462">462: </a><font color="#A020F0">  #if HWLOC_API_VERSION &gt;= 0x00020000</font>
+<a name="line463">463: </a>        <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_bitmap_set_ith_ulong(ctrl-&gt;omp_cpuset, (unsigned)i, cpu_ulongs[i]));
+<a name="line464">464: </a><font color="#A020F0">  #else</font>
+<a name="line465">465: </a>        hwloc_bitmap_set_ith_ulong(ctrl-&gt;omp_cpuset, (unsigned)i, cpu_ulongs[i]);
+<a name="line466">466: </a><font color="#A020F0">  #endif</font>
+<a name="line467">467: </a>      }
+<a name="line468">468: </a>    }
+<a name="line469">469: </a>  }
+<a name="line470">470: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscFree.html">PetscFree</a>(cpu_ulongs));
+<a name="line471">471: </a>  *pctrl = ctrl;
+<a name="line472">472: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line473">473: </a>}
+
+<a name="line475">475: </a><font color="#B22222">/*@C</font>
+<a name="line476">476: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a> - destroy the PETSc OpenMP controller</font>
+
+<a name="line478">478: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line479">479: </a><font color="#B22222">.   pctrl  - a PETSc OpenMP controller</font>
+
+<a name="line481">481: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line483">483: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlGetOmpComms.html">PetscOmpCtrlGetOmpComms</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>()`,</font>
+<a name="line484">484: </a><font color="#B22222">@*/</font>
+<a name="line485">485: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlDestroy"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a>(PetscOmpCtrl *pctrl)</font></strong>
+<a name="line486">486: </a>{
+<a name="line487">487: </a>  PetscOmpCtrl ctrl = *pctrl;
+
+<a name="line489">489: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line490">490: </a>  hwloc_bitmap_free(ctrl-&gt;cpuset);
+<a name="line491">491: </a>  hwloc_topology_destroy(ctrl-&gt;topology);
+<a name="line492">492: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscOmpCtrlDestroyBarrier(ctrl));
+<a name="line493">493: </a>  <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;ctrl-&gt;omp_comm));
+<a name="line494">494: </a>  <font color="#4169E1">if</font> (ctrl-&gt;is_omp_master) {
+<a name="line495">495: </a>    hwloc_bitmap_free(ctrl-&gt;omp_cpuset);
+<a name="line496">496: </a>    <a href="../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;ctrl-&gt;omp_master_comm));
+<a name="line497">497: </a>  }
+<a name="line498">498: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../manualpages/Sys/PetscFree.html">PetscFree</a>(ctrl));
+<a name="line499">499: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line500">500: </a>}
+
+<a name="line502">502: </a><font color="#B22222">/*@C</font>
+<a name="line503">503: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscOmpCtrlGetOmpComms.html">PetscOmpCtrlGetOmpComms</a> - Get MPI communicators from a PETSc OMP controller</font>
+
+<a name="line505">505: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line506">506: </a><font color="#B22222">.   ctrl - a PETSc OMP controller</font>
+
+<a name="line508">508: </a><font color="#B22222">    Output Parameters:</font>
+<a name="line509">509: </a><font color="#B22222">+   omp_comm         - a communicator that includes a master rank and slave ranks where master spawns threads</font>
+<a name="line510">510: </a><font color="#B22222">.   omp_master_comm  - on master ranks, return a communicator that include master ranks of each omp_comm;</font>
+<a name="line511">511: </a><font color="#B22222">                       on slave ranks, `MPI_COMM_NULL` will be return in reality.</font>
+<a name="line512">512: </a><font color="#B22222">-   is_omp_master    - true if the calling process is an OMP master rank.</font>
+
+<a name="line514">514: </a><font color="#B22222">    Note:</font>
+<a name="line515">515: </a><font color="#B22222">    Any output parameter can be NULL. The parameter is just ignored.</font>
+
+<a name="line517">517: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line519">519: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>()`,</font>
+<a name="line520">520: </a><font color="#B22222">@*/</font>
+<a name="line521">521: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlGetOmpComms"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscOmpCtrlGetOmpComms.html">PetscOmpCtrlGetOmpComms</a>(PetscOmpCtrl ctrl, <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *omp_comm, <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *omp_master_comm, <a href="../../../manualpages/Sys/PetscBool.html">PetscBool</a> *is_omp_master)</font></strong>
+<a name="line522">522: </a>{
+<a name="line523">523: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line524">524: </a>  <font color="#4169E1">if</font> (omp_comm) *omp_comm = ctrl-&gt;omp_comm;
+<a name="line525">525: </a>  <font color="#4169E1">if</font> (omp_master_comm) *omp_master_comm = ctrl-&gt;omp_master_comm;
+<a name="line526">526: </a>  <font color="#4169E1">if</font> (is_omp_master) *is_omp_master = ctrl-&gt;is_omp_master;
+<a name="line527">527: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line528">528: </a>}
+
+<a name="line530">530: </a><font color="#B22222">/*@C</font>
+<a name="line531">531: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a> - Do barrier on MPI ranks in omp_comm contained by the PETSc OMP controller (to let slave ranks free their CPU)</font>
+
+<a name="line533">533: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line534">534: </a><font color="#B22222">.   ctrl - a PETSc OMP controller</font>
+
+<a name="line536">536: </a><font color="#B22222">    Notes:</font>
+<a name="line537">537: </a><font color="#B22222">    this is a pthread barrier on MPI ranks. Using `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>()` instead is conceptually correct. But MPI standard does not</font>
+<a name="line538">538: </a><font color="#B22222">    require processes blocked by `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>()` free their CPUs to let other processes progress. In practice, to minilize latency,</font>
+<a name="line539">539: </a><font color="#B22222">    MPI ranks stuck in `<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Barrier.html#MPI_Barrier">MPI_Barrier</a>()` keep polling and do not free CPUs. In contrast, pthread_barrier has this requirement.</font>
+
+<a name="line541">541: </a><font color="#B22222">    A code using `<a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>()` would be like this,</font>
+<a name="line542">542: </a><font color="#B22222">.vb</font>
+<a name="line543">543: </a><font color="#B22222">    if (is_omp_master) {</font>
+<a name="line544">544: </a><font color="#B22222">      <a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>(ctrl);</font>
+<a name="line545">545: </a><font color="#B22222">      Call the library using OpenMP</font>
+<a name="line546">546: </a><font color="#B22222">      <a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>(ctrl);</font>
+<a name="line547">547: </a><font color="#B22222">    }</font>
+<a name="line548">548: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>(ctrl);</font>
+<a name="line549">549: </a><font color="#B22222">.ve</font>
+
+<a name="line551">551: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line553">553: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a>()`,</font>
+<a name="line554">554: </a><font color="#B22222">@*/</font>
+<a name="line555">555: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlBarrier"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>(PetscOmpCtrl ctrl)</font></strong>
+<a name="line556">556: </a>{
+<a name="line557">557: </a>  int err;
+
+<a name="line559">559: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line560">560: </a>  err = pthread_barrier_wait(ctrl-&gt;barrier);
+<a name="line561">561: </a>  <a href="../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(!err || err == PTHREAD_BARRIER_SERIAL_THREAD, <a href="../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>, <a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_LIB</a>, <font color="#666666">"pthread_barrier_wait failed within <a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a> with return code %d"</font>, err);
+<a name="line562">562: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line563">563: </a>}
+
+<a name="line565">565: </a><font color="#B22222">/*@C</font>
+<a name="line566">566: </a><font color="#B22222">    <a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a> - Mark the beginning of an OpenMP library call on master ranks</font>
+
+<a name="line568">568: </a><font color="#B22222">    Input Parameter:</font>
+<a name="line569">569: </a><font color="#B22222">.   ctrl - a PETSc OMP controller</font>
+
+<a name="line571">571: </a><font color="#B22222">    Note:</font>
+<a name="line572">572: </a><font color="#B22222">    Only master ranks can call this function. Call `<a href="../../../manualpages/Sys/PetscOmpCtrlGetOmpComms.html">PetscOmpCtrlGetOmpComms</a>()` to know if this is a master rank.</font>
+<a name="line573">573: </a><font color="#B22222">    This function changes CPU binding of master ranks and nthreads-var of OpenMP runtime</font>
+
+<a name="line575">575: </a><font color="#B22222">    Level: developer</font>
+
+<a name="line577">577: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>()`</font>
+<a name="line578">578: </a><font color="#B22222">@*/</font>
+<a name="line579">579: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlOmpRegionOnMasterBegin"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>(PetscOmpCtrl ctrl)</font></strong>
+<a name="line580">580: </a>{
+<a name="line581">581: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line582">582: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_set_cpubind(ctrl-&gt;topology, ctrl-&gt;omp_cpuset, HWLOC_CPUBIND_PROCESS));
+<a name="line583">583: </a>  omp_set_num_threads(ctrl-&gt;omp_comm_size); <font color="#B22222">/* may override the OMP_NUM_THREAD env var */</font>
+<a name="line584">584: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line585">585: </a>}
+
+<a name="line587">587: </a><font color="#B22222">/*@C</font>
+<a name="line588">588: </a><font color="#B22222">   <a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a> - Mark the end of an OpenMP library call on master ranks</font>
+
+<a name="line590">590: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line591">591: </a><font color="#B22222">.  ctrl - a PETSc OMP controller</font>
+
+<a name="line593">593: </a><font color="#B22222">   Note:</font>
+<a name="line594">594: </a><font color="#B22222">   Only master ranks can call this function. Call `<a href="../../../manualpages/Sys/PetscOmpCtrlGetOmpComms.html">PetscOmpCtrlGetOmpComms</a>()` to know if this is a master rank.</font>
+<a name="line595">595: </a><font color="#B22222">   This function restores the CPU binding of master ranks and set and nthreads-var of OpenMP runtime to 1.</font>
+
+<a name="line597">597: </a><font color="#B22222">   Level: developer</font>
+
+<a name="line599">599: </a><font color="#B22222">.seealso: `<a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterBegin.html">PetscOmpCtrlOmpRegionOnMasterBegin</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlCreate.html">PetscOmpCtrlCreate</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlDestroy.html">PetscOmpCtrlDestroy</a>()`, `<a href="../../../manualpages/Sys/PetscOmpCtrlBarrier.html">PetscOmpCtrlBarrier</a>()`</font>
+<a name="line600">600: </a><font color="#B22222">@*/</font>
+<a name="line601">601: </a><strong><font color="#4169E1"><a name="PetscOmpCtrlOmpRegionOnMasterEnd"></a><a href="../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../manualpages/Sys/PetscOmpCtrlOmpRegionOnMasterEnd.html">PetscOmpCtrlOmpRegionOnMasterEnd</a>(PetscOmpCtrl ctrl)</font></strong>
+<a name="line602">602: </a>{
+<a name="line603">603: </a>  <a href="../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line604">604: </a>  <a href="../../../manualpages/Sys/PetscCall.html">PetscCall</a>(hwloc_set_cpubind(ctrl-&gt;topology, ctrl-&gt;cpuset, HWLOC_CPUBIND_PROCESS));
+<a name="line605">605: </a>  omp_set_num_threads(1);
+<a name="line606">606: </a>  <a href="../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line607">607: </a>}
+
+<a name="line609">609: </a><strong><font color="#228B22">  #undef USE_MMAP_ALLOCATE_SHARED_MEMORY</font></strong>
+<a name="line610">610: </a><font color="#A020F0">#endif </font><font color="#B22222">/* defined(PETSC_HAVE_OPENMP_SUPPORT) */</font><font color="#A020F0"></font>
+</pre>
+</body>
+
+</html>

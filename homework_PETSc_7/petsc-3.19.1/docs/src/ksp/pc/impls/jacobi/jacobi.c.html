@@ -1,0 +1,639 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/pc/impls/jacobi/jacobi.c">Actual source code: jacobi.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:56+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+
+<a name="line2">  2: </a><font color="#B22222">/*  --------------------------------------------------------------------</font>
+
+<a name="line4">  4: </a><font color="#B22222">     This file implements a Jacobi preconditioner in PETSc as part of <a href="../../../../../manualpages/PC/PC.html">PC</a>.</font>
+<a name="line5">  5: </a><font color="#B22222">     You can use this as a starting point for implementing your own</font>
+<a name="line6">  6: </a><font color="#B22222">     preconditioner that is not provided with PETSc. (You might also consider</font>
+<a name="line7">  7: </a><font color="#B22222">     just using <a href="../../../../../manualpages/PC/PCSHELL.html">PCSHELL</a>)</font>
+
+<a name="line9">  9: </a><font color="#B22222">     The following basic routines are required for each preconditioner.</font>
+<a name="line10"> 10: </a><font color="#B22222">          PCCreate_XXX()          - Creates a preconditioner context</font>
+<a name="line11"> 11: </a><font color="#B22222">          PCSetFromOptions_XXX()  - Sets runtime options</font>
+<a name="line12"> 12: </a><font color="#B22222">          PCApply_XXX()           - Applies the preconditioner</font>
+<a name="line13"> 13: </a><font color="#B22222">          PCDestroy_XXX()         - Destroys the preconditioner context</font>
+<a name="line14"> 14: </a><font color="#B22222">     where the suffix "_XXX" denotes a particular implementation, in</font>
+<a name="line15"> 15: </a><font color="#B22222">     this case we use _Jacobi (e.g., PCCreate_Jacobi, PCApply_Jacobi).</font>
+<a name="line16"> 16: </a><font color="#B22222">     These routines are actually called via the common user interface</font>
+<a name="line17"> 17: </a><font color="#B22222">     routines <a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>(), <a href="../../../../../manualpages/PC/PCSetFromOptions.html">PCSetFromOptions</a>(), <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>(), and <a href="../../../../../manualpages/PC/PCDestroy.html">PCDestroy</a>(),</font>
+<a name="line18"> 18: </a><font color="#B22222">     so the application code interface remains identical for all</font>
+<a name="line19"> 19: </a><font color="#B22222">     preconditioners.</font>
+
+<a name="line21"> 21: </a><font color="#B22222">     Another key routine is:</font>
+<a name="line22"> 22: </a><font color="#B22222">          PCSetUp_XXX()           - Prepares for the use of a preconditioner</font>
+<a name="line23"> 23: </a><font color="#B22222">     by setting data structures and options.   The interface routine <a href="../../../../../manualpages/PC/PCSetUp.html">PCSetUp</a>()</font>
+<a name="line24"> 24: </a><font color="#B22222">     is not usually called directly by the user, but instead is called by</font>
+<a name="line25"> 25: </a><font color="#B22222">     <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>() if necessary.</font>
+
+<a name="line27"> 27: </a><font color="#B22222">     Additional basic routines are:</font>
+<a name="line28"> 28: </a><font color="#B22222">          PCView_XXX()            - Prints details of runtime options that</font>
+<a name="line29"> 29: </a><font color="#B22222">                                    have actually been used.</font>
+<a name="line30"> 30: </a><font color="#B22222">     These are called by application codes via the interface routines</font>
+<a name="line31"> 31: </a><font color="#B22222">     <a href="../../../../../manualpages/PC/PCView.html">PCView</a>().</font>
+
+<a name="line33"> 33: </a><font color="#B22222">     The various types of solvers (preconditioners, Krylov subspace methods,</font>
+<a name="line34"> 34: </a><font color="#B22222">     nonlinear solvers, timesteppers) are all organized similarly, so the</font>
+<a name="line35"> 35: </a><font color="#B22222">     above description applies to these categories also.  One exception is</font>
+<a name="line36"> 36: </a><font color="#B22222">     that the analogues of <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>() for these components are <a href="../../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(),</font>
+<a name="line37"> 37: </a><font color="#B22222">     <a href="../../../../../manualpages/SNES/SNESSolve.html">SNESSolve</a>(), and <a href="../../../../../manualpages/TS/TSSolve.html">TSSolve</a>().</font>
+
+<a name="line39"> 39: </a><font color="#B22222">     Additional optional functionality unique to preconditioners is left and</font>
+<a name="line40"> 40: </a><font color="#B22222">     right symmetric preconditioner application via <a href="../../../../../manualpages/PC/PCApplySymmetricLeft.html">PCApplySymmetricLeft</a>()</font>
+<a name="line41"> 41: </a><font color="#B22222">     and <a href="../../../../../manualpages/PC/PCApplySymmetricRight.html">PCApplySymmetricRight</a>().  The Jacobi implementation is</font>
+<a name="line42"> 42: </a><font color="#B22222">     PCApplySymmetricLeftOrRight_Jacobi().</font>
+
+<a name="line44"> 44: </a><font color="#B22222">    -------------------------------------------------------------------- */</font>
+
+<a name="line46"> 46: </a><font color="#B22222">/*</font>
+<a name="line47"> 47: </a><font color="#B22222">   Include files needed for the Jacobi preconditioner:</font>
+<a name="line48"> 48: </a><font color="#B22222">     pcimpl.h - private include file intended for use by all preconditioners</font>
+<a name="line49"> 49: </a><font color="#B22222">*/</font>
+
+<a name="line51"> 51: </a>#include <A href="../../../../../include/petsc/private/pcimpl.h.html">&lt;petsc/private/pcimpl.h&gt;</A>
+
+<a name="line53"> 53: </a>const char *const PCJacobiTypes[] = {<font color="#666666">"DIAGONAL"</font>, <font color="#666666">"ROWMAX"</font>, <font color="#666666">"ROWSUM"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a>"</font>, <font color="#666666">"PC_JACOBI_"</font>, NULL};
+
+<a name="line55"> 55: </a><font color="#B22222">/*</font>
+<a name="line56"> 56: </a><font color="#B22222">   Private context (data structure) for the Jacobi preconditioner.</font>
+<a name="line57"> 57: </a><font color="#B22222">*/</font>
+<a name="line58"> 58: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line59"> 59: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       diag;      <font color="#B22222">/* vector containing the reciprocals of the diagonal elements of the preconditioner matrix */</font>
+<a name="line60"> 60: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>       diagsqrt;  <font color="#B22222">/* vector containing the reciprocals of the square roots of</font>
+<a name="line61"> 61: </a><font color="#B22222">                                    the diagonal elements of the preconditioner matrix (used</font>
+<a name="line62"> 62: </a><font color="#B22222">                                    only for symmetric preconditioner application) */</font>
+<a name="line63"> 63: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> userowmax; <font color="#B22222">/* set with <a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>() */</font>
+<a name="line64"> 64: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> userowsum;
+<a name="line65"> 65: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> useabs;  <font color="#B22222">/* use the absolute values of the diagonal entries */</font>
+<a name="line66"> 66: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> fixdiag; <font color="#B22222">/* fix zero diagonal terms */</font>
+<a name="line67"> 67: </a>} PC_Jacobi;
+
+<a name="line69"> 69: </a><strong><font color="#4169E1">static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCReset_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a>)</font></strong>;
+
+<a name="line71"> 71: </a><strong><font color="#4169E1"><a name="PCJacobiSetType_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCJacobiSetType_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> type)</font></strong>
+<a name="line72"> 72: </a>{
+<a name="line73"> 73: </a>  PC_Jacobi   *j = (PC_Jacobi *)pc-&gt;data;
+<a name="line74"> 74: </a>  <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> old_type;
+
+<a name="line76"> 76: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line77"> 77: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a>(pc, &amp;old_type));
+<a name="line78"> 78: </a>  <font color="#4169E1">if</font> (old_type == type) <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line79"> 79: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCReset_Jacobi(pc));
+<a name="line80"> 80: </a>  j-&gt;userowmax = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line81"> 81: </a>  j-&gt;userowsum = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line82"> 82: </a>  <font color="#4169E1">if</font> (type == <a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWMAX</a>) {
+<a name="line83"> 83: </a>    j-&gt;userowmax = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line84"> 84: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (type == <a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWSUM</a>) {
+<a name="line85"> 85: </a>    j-&gt;userowsum = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line86"> 86: </a>  }
+<a name="line87"> 87: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line88"> 88: </a>}
+
+<a name="line90"> 90: </a><strong><font color="#4169E1"><a name="PCJacobiGetType_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCJacobiGetType_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> *type)</font></strong>
+<a name="line91"> 91: </a>{
+<a name="line92"> 92: </a>  PC_Jacobi *j = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line94"> 94: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line95"> 95: </a>  <font color="#4169E1">if</font> (j-&gt;userowmax) {
+<a name="line96"> 96: </a>    *type = <a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWMAX</a>;
+<a name="line97"> 97: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (j-&gt;userowsum) {
+<a name="line98"> 98: </a>    *type = <a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWSUM</a>;
+<a name="line99"> 99: </a>  } <font color="#4169E1">else</font> {
+<a name="line100">100: </a>    *type = <a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_DIAGONAL</a>;
+<a name="line101">101: </a>  }
+<a name="line102">102: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line103">103: </a>}
+
+<a name="line105">105: </a><strong><font color="#4169E1"><a name="PCJacobiSetUseAbs_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCJacobiSetUseAbs_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> flg)</font></strong>
+<a name="line106">106: </a>{
+<a name="line107">107: </a>  PC_Jacobi *j = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line109">109: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line110">110: </a>  j-&gt;useabs = flg;
+<a name="line111">111: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line112">112: </a>}
+
+<a name="line114">114: </a><strong><font color="#4169E1"><a name="PCJacobiGetUseAbs_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCJacobiGetUseAbs_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *flg)</font></strong>
+<a name="line115">115: </a>{
+<a name="line116">116: </a>  PC_Jacobi *j = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line118">118: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line119">119: </a>  *flg = j-&gt;useabs;
+<a name="line120">120: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line121">121: </a>}
+
+<a name="line123">123: </a><strong><font color="#4169E1"><a name="PCJacobiSetFixDiagonal_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCJacobiSetFixDiagonal_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> flg)</font></strong>
+<a name="line124">124: </a>{
+<a name="line125">125: </a>  PC_Jacobi *j = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line127">127: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line128">128: </a>  j-&gt;fixdiag = flg;
+<a name="line129">129: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line130">130: </a>}
+
+<a name="line132">132: </a><strong><font color="#4169E1"><a name="PCJacobiGetFixDiagonal_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCJacobiGetFixDiagonal_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *flg)</font></strong>
+<a name="line133">133: </a>{
+<a name="line134">134: </a>  PC_Jacobi *j = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line136">136: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line137">137: </a>  *flg = j-&gt;fixdiag;
+<a name="line138">138: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line139">139: </a>}
+
+<a name="line141">141: </a><font color="#B22222">/*</font>
+<a name="line142">142: </a><font color="#B22222">   PCSetUp_Jacobi - Prepares for the use of the Jacobi preconditioner</font>
+<a name="line143">143: </a><font color="#B22222">                    by setting data structures and options.</font>
+
+<a name="line145">145: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line146">146: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line148">148: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCSetUp.html">PCSetUp</a>()</font>
+
+<a name="line150">150: </a><font color="#B22222">   Note:</font>
+<a name="line151">151: </a><font color="#B22222">   The interface routine <a href="../../../../../manualpages/PC/PCSetUp.html">PCSetUp</a>() is not usually called directly by</font>
+<a name="line152">152: </a><font color="#B22222">   the user, but instead is called by <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>() if necessary.</font>
+<a name="line153">153: </a><font color="#B22222">*/</font>
+<a name="line154">154: </a><strong><font color="#4169E1"><a name="PCSetUp_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line155">155: </a>{
+<a name="line156">156: </a>  PC_Jacobi   *jac = (PC_Jacobi *)pc-&gt;data;
+<a name="line157">157: </a>  <a href="../../../../../manualpages/Vec/Vec.html">Vec</a>          diag, diagsqrt;
+<a name="line158">158: </a>  <a href="../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     n, i;
+<a name="line159">159: </a>  <a href="../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x;
+<a name="line160">160: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>    zeroflag = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line162">162: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line163">163: </a>  <font color="#B22222">/*</font>
+<a name="line164">164: </a><font color="#B22222">       For most preconditioners the code would begin here something like</font>
+
+<a name="line166">166: </a><font color="#B22222">  if (pc-&gt;setupcalled == 0) { allocate space the first time this is ever called</font>
+<a name="line167">167: </a><font color="#B22222">    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(pc-&gt;mat,&amp;jac-&gt;diag));</font>
+<a name="line168">168: </a><font color="#B22222">  }</font>
+
+<a name="line170">170: </a><font color="#B22222">    But for this preconditioner we want to support use of both the matrix' diagonal</font>
+<a name="line171">171: </a><font color="#B22222">    elements (for left or right preconditioning) and square root of diagonal elements</font>
+<a name="line172">172: </a><font color="#B22222">    (for symmetric preconditioning).  Hence we do not allocate space here, since we</font>
+<a name="line173">173: </a><font color="#B22222">    don't know at this point which will be needed (diag and/or diagsqrt) until the user</font>
+<a name="line174">174: </a><font color="#B22222">    applies the preconditioner, and we don't want to allocate BOTH unless we need</font>
+<a name="line175">175: </a><font color="#B22222">    them both.  Thus, the diag and diagsqrt are allocated in PCSetUp_Jacobi_NonSymmetric()</font>
+<a name="line176">176: </a><font color="#B22222">    and PCSetUp_Jacobi_Symmetric(), respectively.</font>
+<a name="line177">177: </a><font color="#B22222">  */</font>
+
+<a name="line179">179: </a>  <font color="#B22222">/*</font>
+<a name="line180">180: </a><font color="#B22222">    Here we set up the preconditioner; that is, we copy the diagonal values from</font>
+<a name="line181">181: </a><font color="#B22222">    the matrix and put them into a format to make them quick to apply as a preconditioner.</font>
+<a name="line182">182: </a><font color="#B22222">  */</font>
+<a name="line183">183: </a>  diag     = jac-&gt;diag;
+<a name="line184">184: </a>  diagsqrt = jac-&gt;diagsqrt;
+
+<a name="line186">186: </a>  <font color="#4169E1">if</font> (diag) {
+<a name="line187">187: </a>    <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> isset, isspd;
+
+<a name="line189">189: </a>    <font color="#4169E1">if</font> (jac-&gt;userowmax) {
+<a name="line190">190: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRowMaxAbs.html">MatGetRowMaxAbs</a>(pc-&gt;pmat, diag, NULL));
+<a name="line191">191: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (jac-&gt;userowsum) {
+<a name="line192">192: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRowSum.html">MatGetRowSum</a>(pc-&gt;pmat, diag));
+<a name="line193">193: </a>    } <font color="#4169E1">else</font> {
+<a name="line194">194: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetDiagonal.html">MatGetDiagonal</a>(pc-&gt;pmat, diag));
+<a name="line195">195: </a>    }
+<a name="line196">196: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecReciprocal.html">VecReciprocal</a>(diag));
+<a name="line197">197: </a>    <font color="#4169E1">if</font> (jac-&gt;useabs) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecAbs.html">VecAbs</a>(diag));
+<a name="line198">198: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatIsSPDKnown.html">MatIsSPDKnown</a>(pc-&gt;pmat, &amp;isset, &amp;isspd));
+<a name="line199">199: </a>    <font color="#4169E1">if</font> (jac-&gt;fixdiag &amp;&amp; (!isset || !isspd)) {
+<a name="line200">200: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(diag, &amp;n));
+<a name="line201">201: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(diag, &amp;x));
+<a name="line202">202: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; n; i++) {
+<a name="line203">203: </a>        <font color="#4169E1">if</font> (x[i] == 0.0) {
+<a name="line204">204: </a>          x[i]     = 1.0;
+<a name="line205">205: </a>          zeroflag = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line206">206: </a>        }
+<a name="line207">207: </a>      }
+<a name="line208">208: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(diag, &amp;x));
+<a name="line209">209: </a>    }
+<a name="line210">210: </a>  }
+<a name="line211">211: </a>  <font color="#4169E1">if</font> (diagsqrt) {
+<a name="line212">212: </a>    <font color="#4169E1">if</font> (jac-&gt;userowmax) {
+<a name="line213">213: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRowMaxAbs.html">MatGetRowMaxAbs</a>(pc-&gt;pmat, diagsqrt, NULL));
+<a name="line214">214: </a>    } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (jac-&gt;userowsum) {
+<a name="line215">215: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetRowSum.html">MatGetRowSum</a>(pc-&gt;pmat, diagsqrt));
+<a name="line216">216: </a>    } <font color="#4169E1">else</font> {
+<a name="line217">217: </a>      <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatGetDiagonal.html">MatGetDiagonal</a>(pc-&gt;pmat, diagsqrt));
+<a name="line218">218: </a>    }
+<a name="line219">219: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(diagsqrt, &amp;n));
+<a name="line220">220: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(diagsqrt, &amp;x));
+<a name="line221">221: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; n; i++) {
+<a name="line222">222: </a>      <font color="#4169E1">if</font> (x[i] != 0.0) x[i] = 1.0 / PetscSqrtReal(PetscAbsScalar(x[i]));
+<a name="line223">223: </a>      <font color="#4169E1">else</font> {
+<a name="line224">224: </a>        x[i]     = 1.0;
+<a name="line225">225: </a>        zeroflag = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line226">226: </a>      }
+<a name="line227">227: </a>    }
+<a name="line228">228: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(diagsqrt, &amp;x));
+<a name="line229">229: </a>  }
+<a name="line230">230: </a>  <font color="#4169E1">if</font> (zeroflag) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(pc, <font color="#666666">"Zero detected in diagonal of matrix, using 1 at those locations\n"</font>));
+<a name="line231">231: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line232">232: </a>}
+
+<a name="line234">234: </a><font color="#B22222">/*</font>
+<a name="line235">235: </a><font color="#B22222">   PCSetUp_Jacobi_Symmetric - Allocates the vector needed to store the</font>
+<a name="line236">236: </a><font color="#B22222">   inverse of the square root of the diagonal entries of the matrix.  This</font>
+<a name="line237">237: </a><font color="#B22222">   is used for symmetric application of the Jacobi preconditioner.</font>
+
+<a name="line239">239: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line240">240: </a><font color="#B22222">.  pc - the preconditioner context</font>
+<a name="line241">241: </a><font color="#B22222">*/</font>
+<a name="line242">242: </a><strong><font color="#4169E1"><a name="PCSetUp_Jacobi_Symmetric"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_Jacobi_Symmetric(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line243">243: </a>{
+<a name="line244">244: </a>  PC_Jacobi *jac = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line246">246: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line247">247: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(pc-&gt;pmat, &amp;jac-&gt;diagsqrt, NULL));
+<a name="line248">248: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_Jacobi(pc));
+<a name="line249">249: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line250">250: </a>}
+
+<a name="line252">252: </a><font color="#B22222">/*</font>
+<a name="line253">253: </a><font color="#B22222">   PCSetUp_Jacobi_NonSymmetric - Allocates the vector needed to store the</font>
+<a name="line254">254: </a><font color="#B22222">   inverse of the diagonal entries of the matrix.  This is used for left of</font>
+<a name="line255">255: </a><font color="#B22222">   right application of the Jacobi preconditioner.</font>
+
+<a name="line257">257: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line258">258: </a><font color="#B22222">.  pc - the preconditioner context</font>
+<a name="line259">259: </a><font color="#B22222">*/</font>
+<a name="line260">260: </a><strong><font color="#4169E1"><a name="PCSetUp_Jacobi_NonSymmetric"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetUp_Jacobi_NonSymmetric(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line261">261: </a>{
+<a name="line262">262: </a>  PC_Jacobi *jac = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line264">264: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line265">265: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(pc-&gt;pmat, &amp;jac-&gt;diag, NULL));
+<a name="line266">266: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_Jacobi(pc));
+<a name="line267">267: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line268">268: </a>}
+
+<a name="line270">270: </a><font color="#B22222">/*</font>
+<a name="line271">271: </a><font color="#B22222">   PCApply_Jacobi - Applies the Jacobi preconditioner to a vector.</font>
+
+<a name="line273">273: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line274">274: </a><font color="#B22222">.  pc - the preconditioner context</font>
+<a name="line275">275: </a><font color="#B22222">.  x - input vector</font>
+
+<a name="line277">277: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line278">278: </a><font color="#B22222">.  y - output vector</font>
+
+<a name="line280">280: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>()</font>
+<a name="line281">281: </a><font color="#B22222"> */</font>
+<a name="line282">282: </a><strong><font color="#4169E1"><a name="PCApply_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCApply_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line283">283: </a>{
+<a name="line284">284: </a>  PC_Jacobi *jac = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line286">286: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line287">287: </a>  <font color="#4169E1">if</font> (!jac-&gt;diag) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_Jacobi_NonSymmetric(pc));
+<a name="line288">288: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecPointwiseMult.html">VecPointwiseMult</a>(y, x, jac-&gt;diag));
+<a name="line289">289: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line290">290: </a>}
+
+<a name="line292">292: </a><font color="#B22222">/*</font>
+<a name="line293">293: </a><font color="#B22222">   PCApplySymmetricLeftOrRight_Jacobi - Applies the left or right part of a</font>
+<a name="line294">294: </a><font color="#B22222">   symmetric preconditioner to a vector.</font>
+
+<a name="line296">296: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line297">297: </a><font color="#B22222">.  pc - the preconditioner context</font>
+<a name="line298">298: </a><font color="#B22222">.  x - input vector</font>
+
+<a name="line300">300: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line301">301: </a><font color="#B22222">.  y - output vector</font>
+
+<a name="line303">303: </a><font color="#B22222">   Application Interface Routines: <a href="../../../../../manualpages/PC/PCApplySymmetricLeft.html">PCApplySymmetricLeft</a>(), <a href="../../../../../manualpages/PC/PCApplySymmetricRight.html">PCApplySymmetricRight</a>()</font>
+<a name="line304">304: </a><font color="#B22222">*/</font>
+<a name="line305">305: </a><strong><font color="#4169E1"><a name="PCApplySymmetricLeftOrRight_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCApplySymmetricLeftOrRight_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../../manualpages/Vec/Vec.html">Vec</a> y)</font></strong>
+<a name="line306">306: </a>{
+<a name="line307">307: </a>  PC_Jacobi *jac = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line309">309: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line310">310: </a>  <font color="#4169E1">if</font> (!jac-&gt;diagsqrt) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCSetUp_Jacobi_Symmetric(pc));
+<a name="line311">311: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecPointwiseMult.html">VecPointwiseMult</a>(y, x, jac-&gt;diagsqrt));
+<a name="line312">312: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line313">313: </a>}
+
+<a name="line315">315: </a><strong><font color="#4169E1"><a name="PCReset_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCReset_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line316">316: </a>{
+<a name="line317">317: </a>  PC_Jacobi *jac = (PC_Jacobi *)pc-&gt;data;
+
+<a name="line319">319: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line320">320: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;jac-&gt;diag));
+<a name="line321">321: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;jac-&gt;diagsqrt));
+<a name="line322">322: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line323">323: </a>}
+
+<a name="line325">325: </a><font color="#B22222">/*</font>
+<a name="line326">326: </a><font color="#B22222">   PCDestroy_Jacobi - Destroys the private context for the Jacobi preconditioner</font>
+<a name="line327">327: </a><font color="#B22222">   that was created with PCCreate_Jacobi().</font>
+
+<a name="line329">329: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line330">330: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line332">332: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCDestroy.html">PCDestroy</a>()</font>
+<a name="line333">333: </a><font color="#B22222">*/</font>
+<a name="line334">334: </a><strong><font color="#4169E1"><a name="PCDestroy_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCDestroy_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line335">335: </a>{
+<a name="line336">336: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line337">337: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PCReset_Jacobi(pc));
+<a name="line338">338: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiSetType_C"</font>, NULL));
+<a name="line339">339: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiGetType_C"</font>, NULL));
+<a name="line340">340: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiSetUseAbs_C"</font>, NULL));
+<a name="line341">341: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiGetUseAbs_C"</font>, NULL));
+<a name="line342">342: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiSetFixDiagonal_C"</font>, NULL));
+<a name="line343">343: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiGetFixDiagonal_C"</font>, NULL));
+
+<a name="line345">345: </a>  <font color="#B22222">/*</font>
+<a name="line346">346: </a><font color="#B22222">      Free the private data structure that was hanging off the <a href="../../../../../manualpages/PC/PC.html">PC</a></font>
+<a name="line347">347: </a><font color="#B22222">  */</font>
+<a name="line348">348: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(pc-&gt;data));
+<a name="line349">349: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line350">350: </a>}
+
+<a name="line352">352: </a><strong><font color="#4169E1"><a name="PCSetFromOptions_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCSetFromOptions_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, PetscOptionItems *PetscOptionsObject)</font></strong>
+<a name="line353">353: </a>{
+<a name="line354">354: </a>  PC_Jacobi   *jac = (PC_Jacobi *)pc-&gt;data;
+<a name="line355">355: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>    flg;
+<a name="line356">356: </a>  <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> deflt, type;
+
+<a name="line358">358: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line359">359: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a>(pc, &amp;deflt));
+<a name="line360">360: </a>  <a href="../../../../../manualpages/Sys/PetscOptionsHeadBegin.html">PetscOptionsHeadBegin</a>(PetscOptionsObject, <font color="#666666">"Jacobi options"</font>);
+<a name="line361">361: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsEnum.html">PetscOptionsEnum</a>(<font color="#666666">"-pc_jacobi_type"</font>, <font color="#666666">"How to construct diagonal matrix"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>"</font>, PCJacobiTypes, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a>)deflt, (<a href="../../../../../manualpages/Sys/PetscEnum.html">PetscEnum</a> *)&amp;type, &amp;flg));
+<a name="line362">362: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>(pc, type));
+<a name="line363">363: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_jacobi_abs"</font>, <font color="#666666">"Use absolute values of diagonal entries"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>"</font>, jac-&gt;useabs, &amp;jac-&gt;useabs, NULL));
+<a name="line364">364: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscOptionsBool.html">PetscOptionsBool</a>(<font color="#666666">"-pc_jacobi_fixdiagonal"</font>, <font color="#666666">"Fix null terms on diagonal"</font>, <font color="#666666">"<a href="../../../../../manualpages/PC/PCJacobiSetFixDiagonal.html">PCJacobiSetFixDiagonal</a>"</font>, jac-&gt;fixdiag, &amp;jac-&gt;fixdiag, NULL));
+<a name="line365">365: </a>  PetscOptionsHeadEnd();
+<a name="line366">366: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line367">367: </a>}
+
+<a name="line369">369: </a><strong><font color="#4169E1"><a name="PCView_Jacobi"></a>static <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCView_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer)</font></strong>
+<a name="line370">370: </a>{
+<a name="line371">371: </a>  PC_Jacobi *jac = (PC_Jacobi *)pc-&gt;data;
+<a name="line372">372: </a>  <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>  iascii;
+
+<a name="line374">374: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line375">375: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)viewer, <a href="../../../../../manualpages/Viewer/PETSCVIEWERASCII.html">PETSCVIEWERASCII</a>, &amp;iascii));
+<a name="line376">376: </a>  <font color="#4169E1">if</font> (iascii) {
+<a name="line377">377: </a>    <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a>      type;
+<a name="line378">378: </a>    <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>         useAbs, fixdiag;
+<a name="line379">379: </a>    <a href="../../../../../manualpages/Viewer/PetscViewerFormat.html">PetscViewerFormat</a> format;
+
+<a name="line381">381: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a>(pc, &amp;type));
+<a name="line382">382: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiGetUseAbs.html">PCJacobiGetUseAbs</a>(pc, &amp;useAbs));
+<a name="line383">383: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/PC/PCJacobiGetFixDiagonal.html">PCJacobiGetFixDiagonal</a>(pc, &amp;fixdiag));
+<a name="line384">384: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerASCIIPrintf.html">PetscViewerASCIIPrintf</a>(viewer, <font color="#666666">"  type %s%s%s\n"</font>, PCJacobiTypes[type], useAbs ? <font color="#666666">", using absolute value of entries"</font> : <font color="#666666">""</font>, !fixdiag ? <font color="#666666">", not checking null diagonal entries"</font> : <font color="#666666">""</font>));
+<a name="line385">385: </a>    <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Viewer/PetscViewerGetFormat.html">PetscViewerGetFormat</a>(viewer, &amp;format));
+<a name="line386">386: </a>    <font color="#4169E1">if</font> (format == <a href="../../../../../manualpages/Viewer/PetscViewerFormat.html">PETSC_VIEWER_ASCII_INFO_DETAIL</a> &amp;&amp; jac-&gt;diag) <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Vec/VecView.html">VecView</a>(jac-&gt;diag, viewer));
+<a name="line387">387: </a>  }
+<a name="line388">388: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line389">389: </a>}
+
+<a name="line391">391: </a><font color="#B22222">/*</font>
+<a name="line392">392: </a><font color="#B22222">   PCCreate_Jacobi - Creates a Jacobi preconditioner context, PC_Jacobi,</font>
+<a name="line393">393: </a><font color="#B22222">   and sets this as the private data within the generic preconditioning</font>
+<a name="line394">394: </a><font color="#B22222">   context, <a href="../../../../../manualpages/PC/PC.html">PC</a>, that was created within <a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>().</font>
+
+<a name="line396">396: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line397">397: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line399">399: </a><font color="#B22222">   Application Interface Routine: <a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>()</font>
+<a name="line400">400: </a><font color="#B22222">*/</font>
+
+<a name="line402">402: </a><font color="#B22222">/*MC</font>
+<a name="line403">403: </a><font color="#B22222">     <a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a> - Jacobi (i.e. diagonal scaling preconditioning)</font>
+
+<a name="line405">405: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line406">406: </a><font color="#B22222">+    -pc_jacobi_type &lt;diagonal,rowmax,rowsum&gt; - approach for forming the preconditioner</font>
+<a name="line407">407: </a><font color="#B22222">.    -pc_jacobi_abs - use the absolute value of the diagonal entry</font>
+<a name="line408">408: </a><font color="#B22222">-    -pc_jacobi_fixdiag - fix for zero diagonal terms by placing 1.0 in those locations</font>
+
+<a name="line410">410: </a><font color="#B22222">   Level: beginner</font>
+
+<a name="line412">412: </a><font color="#B22222">  Notes:</font>
+<a name="line413">413: </a><font color="#B22222">    By using `<a href="../../../../../manualpages/KSP/KSPSetPCSide.html">KSPSetPCSide</a>`(ksp,`<a href="../../../../../manualpages/PC/PCSide.html">PC_SYMMETRIC</a>`) or -ksp_pc_side symmetric</font>
+<a name="line414">414: </a><font color="#B22222">    can scale each side of the matrix by the square root of the diagonal entries.</font>
+
+<a name="line416">416: </a><font color="#B22222">    Zero entries along the diagonal are replaced with the value 1.0</font>
+
+<a name="line418">418: </a><font color="#B22222">    See `<a href="../../../../../manualpages/PC/PCPBJACOBI.html">PCPBJACOBI</a>` for fixed-size point block, `<a href="../../../../../manualpages/PC/PCVPBJACOBI.html">PCVPBJACOBI</a>` for variable-sized point block, and `<a href="../../../../../manualpages/PC/PCBJACOBI.html">PCBJACOBI</a>` for large size blocks</font>
+
+<a name="line420">420: </a><font color="#B22222">.seealso:  `<a href="../../../../../manualpages/PC/PCCreate.html">PCCreate</a>()`, `<a href="../../../../../manualpages/PC/PCSetType.html">PCSetType</a>()`, `<a href="../../../../../manualpages/PC/PCType.html">PCType</a>`, `<a href="../../../../../manualpages/PC/PC.html">PC</a>`,</font>
+<a name="line421">421: </a><font color="#B22222">           `<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiGetUseAbs.html">PCJacobiGetUseAbs</a>()`, `<a href="../../../../../manualpages/PC/PCASM.html">PCASM</a>`,</font>
+<a name="line422">422: </a><font color="#B22222">           `<a href="../../../../../manualpages/PC/PCJacobiSetFixDiagonal.html">PCJacobiSetFixDiagonal</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiGetFixDiagonal.html">PCJacobiGetFixDiagonal</a>()`</font>
+<a name="line423">423: </a><font color="#B22222">           `<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiGetUseAbs.html">PCJacobiGetUseAbs</a>()`, `<a href="../../../../../manualpages/PC/PCPBJACOBI.html">PCPBJACOBI</a>`, `<a href="../../../../../manualpages/PC/PCBJACOBI.html">PCBJACOBI</a>`, `<a href="../../../../../manualpages/PC/PCVPBJACOBI.html">PCVPBJACOBI</a>`</font>
+<a name="line424">424: </a><font color="#B22222">M*/</font>
+
+<a name="line426">426: </a><strong><font color="#4169E1"><a name="PCCreate_Jacobi"></a>PETSC_EXTERN <a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> PCCreate_Jacobi(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc)</font></strong>
+<a name="line427">427: </a>{
+<a name="line428">428: </a>  PC_Jacobi *jac;
+
+<a name="line430">430: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line431">431: </a>  <font color="#B22222">/*</font>
+<a name="line432">432: </a><font color="#B22222">     Creates the private data structure for this preconditioner and</font>
+<a name="line433">433: </a><font color="#B22222">     attach it to the <a href="../../../../../manualpages/PC/PC.html">PC</a> object.</font>
+<a name="line434">434: </a><font color="#B22222">  */</font>
+<a name="line435">435: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;jac));
+<a name="line436">436: </a>  pc-&gt;data = (void *)jac;
+
+<a name="line438">438: </a>  <font color="#B22222">/*</font>
+<a name="line439">439: </a><font color="#B22222">     Initialize the pointers to vectors to ZERO; these will be used to store</font>
+<a name="line440">440: </a><font color="#B22222">     diagonal entries of the matrix for fast preconditioner application.</font>
+<a name="line441">441: </a><font color="#B22222">  */</font>
+<a name="line442">442: </a>  jac-&gt;diag      = NULL;
+<a name="line443">443: </a>  jac-&gt;diagsqrt  = NULL;
+<a name="line444">444: </a>  jac-&gt;userowmax = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line445">445: </a>  jac-&gt;userowsum = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line446">446: </a>  jac-&gt;useabs    = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line447">447: </a>  jac-&gt;fixdiag   = <a href="../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+
+<a name="line449">449: </a>  <font color="#B22222">/*</font>
+<a name="line450">450: </a><font color="#B22222">      Set the pointers for the functions that are provided above.</font>
+<a name="line451">451: </a><font color="#B22222">      Now when the user-level routines (such as <a href="../../../../../manualpages/PC/PCApply.html">PCApply</a>(), <a href="../../../../../manualpages/PC/PCDestroy.html">PCDestroy</a>(), etc.)</font>
+<a name="line452">452: </a><font color="#B22222">      are called, they will automatically call these functions.  Note we</font>
+<a name="line453">453: </a><font color="#B22222">      choose not to provide a couple of these functions since they are</font>
+<a name="line454">454: </a><font color="#B22222">      not needed.</font>
+<a name="line455">455: </a><font color="#B22222">  */</font>
+<a name="line456">456: </a>  pc-&gt;ops-&gt;apply               = PCApply_Jacobi;
+<a name="line457">457: </a>  pc-&gt;ops-&gt;applytranspose      = PCApply_Jacobi;
+<a name="line458">458: </a>  pc-&gt;ops-&gt;setup               = PCSetUp_Jacobi;
+<a name="line459">459: </a>  pc-&gt;ops-&gt;reset               = PCReset_Jacobi;
+<a name="line460">460: </a>  pc-&gt;ops-&gt;destroy             = PCDestroy_Jacobi;
+<a name="line461">461: </a>  pc-&gt;ops-&gt;setfromoptions      = PCSetFromOptions_Jacobi;
+<a name="line462">462: </a>  pc-&gt;ops-&gt;view                = PCView_Jacobi;
+<a name="line463">463: </a>  pc-&gt;ops-&gt;applyrichardson     = NULL;
+<a name="line464">464: </a>  pc-&gt;ops-&gt;applysymmetricleft  = PCApplySymmetricLeftOrRight_Jacobi;
+<a name="line465">465: </a>  pc-&gt;ops-&gt;applysymmetricright = PCApplySymmetricLeftOrRight_Jacobi;
+
+<a name="line467">467: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiSetType_C"</font>, PCJacobiSetType_Jacobi));
+<a name="line468">468: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiGetType_C"</font>, PCJacobiGetType_Jacobi));
+<a name="line469">469: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiSetUseAbs_C"</font>, PCJacobiSetUseAbs_Jacobi));
+<a name="line470">470: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiGetUseAbs_C"</font>, PCJacobiGetUseAbs_Jacobi));
+<a name="line471">471: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiSetFixDiagonal_C"</font>, PCJacobiSetFixDiagonal_Jacobi));
+<a name="line472">472: </a>  <a href="../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <font color="#666666">"PCJacobiGetFixDiagonal_C"</font>, PCJacobiGetFixDiagonal_Jacobi));
+<a name="line473">473: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line474">474: </a>}
+
+<a name="line476">476: </a><font color="#B22222">/*@</font>
+<a name="line477">477: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a> - Causes the Jacobi preconditioner `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>` to use the</font>
+<a name="line478">478: </a><font color="#B22222">      absolute values of the diagonal divisors in the preconditioner</font>
+
+<a name="line480">480: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line482">482: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line483">483: </a><font color="#B22222">+  pc - the preconditioner context</font>
+<a name="line484">484: </a><font color="#B22222">-  flg - whether to use absolute values or not</font>
+
+<a name="line486">486: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line487">487: </a><font color="#B22222">.  -pc_jacobi_abs &lt;bool&gt; - use absolute values</font>
+
+<a name="line489">489: </a><font color="#B22222">   Note:</font>
+<a name="line490">490: </a><font color="#B22222">    This takes affect at the next construction of the preconditioner</font>
+
+<a name="line492">492: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line494">494: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>`, `PCJacobiaSetType()`, `<a href="../../../../../manualpages/PC/PCJacobiGetUseAbs.html">PCJacobiGetUseAbs</a>()`</font>
+<a name="line495">495: </a><font color="#B22222">@*/</font>
+<a name="line496">496: </a><strong><font color="#4169E1"><a name="PCJacobiSetUseAbs"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> flg)</font></strong>
+<a name="line497">497: </a>{
+<a name="line498">498: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line500">500: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCJacobiSetUseAbs_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, flg));
+<a name="line501">501: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line502">502: </a>}
+
+<a name="line504">504: </a><font color="#B22222">/*@</font>
+<a name="line505">505: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCJacobiGetUseAbs.html">PCJacobiGetUseAbs</a> - Determines if the Jacobi preconditioner `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>` uses the</font>
+<a name="line506">506: </a><font color="#B22222">      absolute values of the diagonal divisors in the preconditioner</font>
+
+<a name="line508">508: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line510">510: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line511">511: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line513">513: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line514">514: </a><font color="#B22222">.  flg - whether to use absolute values or not</font>
+
+<a name="line516">516: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line518">518: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>`, `PCJacobiaSetType()`, `<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a>()`</font>
+<a name="line519">519: </a><font color="#B22222">@*/</font>
+<a name="line520">520: </a><strong><font color="#4169E1"><a name="PCJacobiGetUseAbs"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCJacobiGetUseAbs.html">PCJacobiGetUseAbs</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *flg)</font></strong>
+<a name="line521">521: </a>{
+<a name="line522">522: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line524">524: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCJacobiGetUseAbs_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *), (pc, flg));
+<a name="line525">525: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line526">526: </a>}
+
+<a name="line528">528: </a><font color="#B22222">/*@</font>
+<a name="line529">529: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCJacobiSetFixDiagonal.html">PCJacobiSetFixDiagonal</a> - Check for zero values on the diagonal and replace them with 1.0</font>
+
+<a name="line531">531: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line533">533: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line534">534: </a><font color="#B22222">+  pc - the preconditioner context</font>
+<a name="line535">535: </a><font color="#B22222">-  flg - the boolean flag</font>
+
+<a name="line537">537: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line538">538: </a><font color="#B22222">.  -pc_jacobi_fixdiagonal &lt;bool&gt; - check for zero values on the diagonal</font>
+
+<a name="line540">540: </a><font color="#B22222">   Note:</font>
+<a name="line541">541: </a><font color="#B22222">   This takes affect at the next construction of the preconditioner</font>
+
+<a name="line543">543: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line545">545: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>`, `<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiGetFixDiagonal.html">PCJacobiGetFixDiagonal</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>()`</font>
+<a name="line546">546: </a><font color="#B22222">@*/</font>
+<a name="line547">547: </a><strong><font color="#4169E1"><a name="PCJacobiSetFixDiagonal"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCJacobiSetFixDiagonal.html">PCJacobiSetFixDiagonal</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> flg)</font></strong>
+<a name="line548">548: </a>{
+<a name="line549">549: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line551">551: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCJacobiSetFixDiagonal_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>), (pc, flg));
+<a name="line552">552: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line553">553: </a>}
+
+<a name="line555">555: </a><font color="#B22222">/*@</font>
+<a name="line556">556: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCJacobiGetFixDiagonal.html">PCJacobiGetFixDiagonal</a> - Determines if the Jacobi preconditioner `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>` checks for zero diagonal terms</font>
+
+<a name="line558">558: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line560">560: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line561">561: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line563">563: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line564">564: </a><font color="#B22222">.  flg - the boolean flag</font>
+
+<a name="line566">566: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line567">567: </a><font color="#B22222">.  -pc_jacobi_fixdiagonal &lt;bool&gt; - Fix 0 terms on diagonal by using 1</font>
+
+<a name="line569">569: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line571">571: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>`, `<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiSetFixDiagonal.html">PCJacobiSetFixDiagonal</a>()`</font>
+<a name="line572">572: </a><font color="#B22222">@*/</font>
+<a name="line573">573: </a><strong><font color="#4169E1"><a name="PCJacobiGetFixDiagonal"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCJacobiGetFixDiagonal.html">PCJacobiGetFixDiagonal</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *flg)</font></strong>
+<a name="line574">574: </a>{
+<a name="line575">575: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line577">577: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCJacobiGetFixDiagonal_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> *), (pc, flg));
+<a name="line578">578: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line579">579: </a>}
+
+<a name="line581">581: </a><font color="#B22222">/*@</font>
+<a name="line582">582: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a> - Causes the Jacobi preconditioner to use either the diagonal, the maximum entry in each row,</font>
+<a name="line583">583: </a><font color="#B22222">      of the sum of rows entries for the diagonal preconditioner</font>
+
+<a name="line585">585: </a><font color="#B22222">   Logically Collective</font>
+
+<a name="line587">587: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line588">588: </a><font color="#B22222">+  pc - the preconditioner context</font>
+<a name="line589">589: </a><font color="#B22222">-  type - `<a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_DIAGONAL</a>`, `<a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWMAX</a>`, `<a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWSUM</a>`</font>
+
+<a name="line591">591: </a><font color="#B22222">   Options Database Key:</font>
+<a name="line592">592: </a><font color="#B22222">.  -pc_jacobi_type &lt;diagonal,rowmax,rowsum&gt; - the type of diagonal matrix to use for Jacobi</font>
+
+<a name="line594">594: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line596">596: </a><font color="#B22222">   Developer Note:</font>
+<a name="line597">597: </a><font color="#B22222">   Why is there a separate function for using the absolute value?</font>
+
+<a name="line599">599: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>`, `<a href="../../../../../manualpages/PC/PCJacobiSetUseAbs.html">PCJacobiSetUseAbs</a>()`, `<a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a>()`</font>
+<a name="line600">600: </a><font color="#B22222">@*/</font>
+<a name="line601">601: </a><strong><font color="#4169E1"><a name="PCJacobiSetType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> type)</font></strong>
+<a name="line602">602: </a>{
+<a name="line603">603: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line605">605: </a>  <a href="../../../../../manualpages/Sys/PetscTryMethod.html">PetscTryMethod</a>(pc, <font color="#666666">"PCJacobiSetType_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a>), (pc, type));
+<a name="line606">606: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line607">607: </a>}
+
+<a name="line609">609: </a><font color="#B22222">/*@</font>
+<a name="line610">610: </a><font color="#B22222">   <a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a> - Gets how the diagonal matrix is produced for the preconditioner</font>
+
+<a name="line612">612: </a><font color="#B22222">   Not Collective</font>
+
+<a name="line614">614: </a><font color="#B22222">   Input Parameter:</font>
+<a name="line615">615: </a><font color="#B22222">.  pc - the preconditioner context</font>
+
+<a name="line617">617: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line618">618: </a><font color="#B22222">.  type - `<a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_DIAGONAL</a>`, `<a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWMAX</a>`, `<a href="../../../../../manualpages/PC/PCJacobiType.html">PC_JACOBI_ROWSUM</a>`</font>
+
+<a name="line620">620: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line622">622: </a><font color="#B22222">.seealso: `<a href="../../../../../manualpages/PC/PCJACOBI.html">PCJACOBI</a>`, `PCJacobiaUseAbs()`, `<a href="../../../../../manualpages/PC/PCJacobiSetType.html">PCJacobiSetType</a>()`</font>
+<a name="line623">623: </a><font color="#B22222">@*/</font>
+<a name="line624">624: </a><strong><font color="#4169E1"><a name="PCJacobiGetType"></a><a href="../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../manualpages/PC/PCJacobiGetType.html">PCJacobiGetType</a>(<a href="../../../../../manualpages/PC/PC.html">PC</a> pc, <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> *type)</font></strong>
+<a name="line625">625: </a>{
+<a name="line626">626: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line628">628: </a>  <a href="../../../../../manualpages/Sys/PetscUseMethod.html">PetscUseMethod</a>(pc, <font color="#666666">"PCJacobiGetType_C"</font>, (<a href="../../../../../manualpages/PC/PC.html">PC</a>, <a href="../../../../../manualpages/PC/PCJacobiType.html">PCJacobiType</a> *), (pc, type));
+<a name="line629">629: </a>  <a href="../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line630">630: </a>}
+</pre>
+</body>
+
+</html>

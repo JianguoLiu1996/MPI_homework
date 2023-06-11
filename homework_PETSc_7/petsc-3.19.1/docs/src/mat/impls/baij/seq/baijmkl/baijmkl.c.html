@@ -1,0 +1,517 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/mat/impls/baij/seq/baijmkl/baijmkl.c">Actual source code: baijmkl.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:38+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222">  Defines basic operations for the MATSEQBAIJMKL matrix class.</font>
+<a name="line3">  3: </a><font color="#B22222">  Uses sparse BLAS operations from the Intel Math Kernel Library (MKL)</font>
+<a name="line4">  4: </a><font color="#B22222">  wherever possible. If used MKL version is older than 11.3 PETSc default</font>
+<a name="line5">  5: </a><font color="#B22222">  code for sparse matrix operations is used.</font>
+<a name="line6">  6: </a><font color="#B22222">*/</font>
+
+<a name="line8">  8: </a>#include <A href="../baij.h.html">&lt;../src/mat/impls/baij/seq/baij.h&gt;</A>
+<a name="line9">  9: </a>#include <A href="baijmkl.h.html">&lt;../src/mat/impls/baij/seq/baijmkl/baijmkl.h&gt;</A>
+<a name="line10"> 10: </a><font color="#A020F0">#if defined(PETSC_HAVE_MKL_INTEL_ILP64)</font>
+<a name="line11"> 11: </a><strong><font color="#228B22">  #define MKL_ILP64</font></strong>
+<a name="line12"> 12: </a><font color="#A020F0">#endif</font>
+<a name="line13"> 13: </a><font color="#A020F0">#include &lt;mkl_spblas.h&gt;</font>
+
+<a name="line15"> 15: </a><strong><font color="#4169E1"><a name="PetscSeqBAIJSupportsZeroBased"></a>static <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> PetscSeqBAIJSupportsZeroBased(void)</font></strong>
+<a name="line16"> 16: </a>{
+<a name="line17"> 17: </a>  static <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a> set = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, value;
+<a name="line18"> 18: </a>  int              n   = 1, ia[1], ja[1];
+<a name="line19"> 19: </a>  float            a[1];
+<a name="line20"> 20: </a>  sparse_status_t  status;
+<a name="line21"> 21: </a>  sparse_matrix_t  A;
+
+<a name="line23"> 23: </a>  <font color="#4169E1">if</font> (!set) {
+<a name="line24"> 24: </a>    status = mkl_sparse_s_create_bsr(&amp;A, SPARSE_INDEX_BASE_ZERO, SPARSE_LAYOUT_COLUMN_MAJOR, (MKL_INT)n, (MKL_INT)n, (MKL_INT)n, (MKL_INT *)ia, (MKL_INT *)ia, (MKL_INT *)ja, a);
+<a name="line25"> 25: </a>    value  = (status != SPARSE_STATUS_NOT_SUPPORTED) ? <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a> : <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line26"> 26: </a>    (void)mkl_sparse_destroy(A);
+<a name="line27"> 27: </a>    set = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line28"> 28: </a>  }
+<a name="line29"> 29: </a>  <font color="#4169E1">return</font> value;
+<a name="line30"> 30: </a>}
+
+<a name="line32"> 32: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line33"> 33: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>           sparse_optimized; <font color="#B22222">/* If <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, then mkl_sparse_optimize() has been called. */</font>
+<a name="line34"> 34: </a>  sparse_matrix_t     bsrA;             <font color="#B22222">/* "Handle" used by SpMV2 inspector-executor routines. */</font>
+<a name="line35"> 35: </a>  <font color="#4169E1">struct matrix_descr</font> descr;
+<a name="line36"> 36: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           *ai1;
+<a name="line37"> 37: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           *aj1;
+<a name="line38"> 38: </a>} Mat_SeqBAIJMKL;
+
+<a name="line40"> 40: </a><strong><font color="#4169E1">static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatAssemblyEnd_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Mat/MatAssemblyType.html">MatAssemblyType</a> mode)</font></strong>;
+<a name="line41"> 41: </a><strong><font color="#4169E1">extern <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatAssemblyEnd_SeqBAIJ(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a>, <a href="../../../../../../manualpages/Mat/MatAssemblyType.html">MatAssemblyType</a>)</font></strong>;
+
+<a name="line43"> 43: </a><strong><font color="#4169E1"><a name="MatConvert_SeqBAIJMKL_SeqBAIJ"></a>PETSC_INTERN <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatConvert_SeqBAIJMKL_SeqBAIJ(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Mat/MatType.html">MatType</a> type, <a href="../../../../../../manualpages/Mat/MatReuse.html">MatReuse</a> reuse, <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> *newmat)</font></strong>
+<a name="line44"> 44: </a>{
+<a name="line45"> 45: </a>  <font color="#B22222">/* This routine is only called to convert a <a href="../../../../../../manualpages/Mat/MATBAIJMKL.html">MATBAIJMKL</a> to its base PETSc type, */</font>
+<a name="line46"> 46: </a>  <font color="#B22222">/* so we will ignore '<a href="../../../../../../manualpages/Mat/MatType.html">MatType</a> type'. */</font>
+<a name="line47"> 47: </a>  <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a>             B       = *newmat;
+<a name="line48"> 48: </a>  Mat_SeqBAIJMKL *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+
+<a name="line50"> 50: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line51"> 51: </a>  <font color="#4169E1">if</font> (reuse == <a href="../../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatDuplicate.html">MatDuplicate</a>(A, <a href="../../../../../../manualpages/Mat/MatDuplicateOption.html">MAT_COPY_VALUES</a>, &amp;B));
+
+<a name="line53"> 53: </a>  <font color="#B22222">/* Reset the original function pointers. */</font>
+<a name="line54"> 54: </a>  B-&gt;ops-&gt;duplicate        = MatDuplicate_SeqBAIJ;
+<a name="line55"> 55: </a>  B-&gt;ops-&gt;assemblyend      = MatAssemblyEnd_SeqBAIJ;
+<a name="line56"> 56: </a>  B-&gt;ops-&gt;destroy          = MatDestroy_SeqBAIJ;
+<a name="line57"> 57: </a>  B-&gt;ops-&gt;multtranspose    = MatMultTranspose_SeqBAIJ;
+<a name="line58"> 58: </a>  B-&gt;ops-&gt;multtransposeadd = MatMultTransposeAdd_SeqBAIJ;
+<a name="line59"> 59: </a>  B-&gt;ops-&gt;scale            = MatScale_SeqBAIJ;
+<a name="line60"> 60: </a>  B-&gt;ops-&gt;diagonalscale    = MatDiagonalScale_SeqBAIJ;
+<a name="line61"> 61: </a>  B-&gt;ops-&gt;axpy             = MatAXPY_SeqBAIJ;
+
+<a name="line63"> 63: </a>  <font color="#4169E1">switch</font> (A-&gt;rmap-&gt;bs) {
+<a name="line64"> 64: </a>  <font color="#4169E1">case</font> 1:
+<a name="line65"> 65: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_1;
+<a name="line66"> 66: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_1;
+<a name="line67"> 67: </a>    <font color="#4169E1">break</font>;
+<a name="line68"> 68: </a>  <font color="#4169E1">case</font> 2:
+<a name="line69"> 69: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_2;
+<a name="line70"> 70: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_2;
+<a name="line71"> 71: </a>    <font color="#4169E1">break</font>;
+<a name="line72"> 72: </a>  <font color="#4169E1">case</font> 3:
+<a name="line73"> 73: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_3;
+<a name="line74"> 74: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_3;
+<a name="line75"> 75: </a>    <font color="#4169E1">break</font>;
+<a name="line76"> 76: </a>  <font color="#4169E1">case</font> 4:
+<a name="line77"> 77: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_4;
+<a name="line78"> 78: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_4;
+<a name="line79"> 79: </a>    <font color="#4169E1">break</font>;
+<a name="line80"> 80: </a>  <font color="#4169E1">case</font> 5:
+<a name="line81"> 81: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_5;
+<a name="line82"> 82: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_5;
+<a name="line83"> 83: </a>    <font color="#4169E1">break</font>;
+<a name="line84"> 84: </a>  <font color="#4169E1">case</font> 6:
+<a name="line85"> 85: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_6;
+<a name="line86"> 86: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_6;
+<a name="line87"> 87: </a>    <font color="#4169E1">break</font>;
+<a name="line88"> 88: </a>  <font color="#4169E1">case</font> 7:
+<a name="line89"> 89: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_7;
+<a name="line90"> 90: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_7;
+<a name="line91"> 91: </a>    <font color="#4169E1">break</font>;
+<a name="line92"> 92: </a>  <font color="#4169E1">case</font> 11:
+<a name="line93"> 93: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_11;
+<a name="line94"> 94: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_11;
+<a name="line95"> 95: </a>    <font color="#4169E1">break</font>;
+<a name="line96"> 96: </a>  <font color="#4169E1">case</font> 15:
+<a name="line97"> 97: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_15_ver1;
+<a name="line98"> 98: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_N;
+<a name="line99"> 99: </a>    <font color="#4169E1">break</font>;
+<a name="line100">100: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line101">101: </a>    B-&gt;ops-&gt;mult    = MatMult_SeqBAIJ_N;
+<a name="line102">102: </a>    B-&gt;ops-&gt;multadd = MatMultAdd_SeqBAIJ_N;
+<a name="line103">103: </a>    <font color="#4169E1">break</font>;
+<a name="line104">104: </a>  }
+<a name="line105">105: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)B, <font color="#666666">"MatConvert_seqbaijmkl_seqbaij_C"</font>, NULL));
+
+<a name="line107">107: </a>  <font color="#B22222">/* Free everything in the Mat_SeqBAIJMKL data structure. Currently, this</font>
+<a name="line108">108: </a><font color="#B22222">   * simply involves destroying the MKL sparse matrix handle and then freeing</font>
+<a name="line109">109: </a><font color="#B22222">   * the spptr pointer. */</font>
+<a name="line110">110: </a>  <font color="#4169E1">if</font> (reuse == <a href="../../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>) baijmkl = (Mat_SeqBAIJMKL *)B-&gt;spptr;
+
+<a name="line112">112: </a>  <font color="#4169E1">if</font> (baijmkl-&gt;sparse_optimized) PetscCallExternal(mkl_sparse_destroy, baijmkl-&gt;bsrA);
+<a name="line113">113: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree2.html">PetscFree2</a>(baijmkl-&gt;ai1, baijmkl-&gt;aj1));
+<a name="line114">114: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(B-&gt;spptr));
+
+<a name="line116">116: </a>  <font color="#B22222">/* Change the type of B to <a href="../../../../../../manualpages/Mat/MATSEQBAIJ.html">MATSEQBAIJ</a>. */</font>
+<a name="line117">117: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscObjectChangeTypeName((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)B, <a href="../../../../../../manualpages/Mat/MATSEQBAIJ.html">MATSEQBAIJ</a>));
+
+<a name="line119">119: </a>  *newmat = B;
+<a name="line120">120: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line121">121: </a>}
+
+<a name="line123">123: </a><strong><font color="#4169E1"><a name="MatDestroy_SeqBAIJMKL"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatDestroy_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A)</font></strong>
+<a name="line124">124: </a>{
+<a name="line125">125: </a>  Mat_SeqBAIJMKL *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+
+<a name="line127">127: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line128">128: </a>  <font color="#4169E1">if</font> (baijmkl) {
+<a name="line129">129: </a>    <font color="#B22222">/* Clean up everything in the Mat_SeqBAIJMKL data structure, then free A-&gt;spptr. */</font>
+<a name="line130">130: </a>    <font color="#4169E1">if</font> (baijmkl-&gt;sparse_optimized) PetscCallExternal(mkl_sparse_destroy, baijmkl-&gt;bsrA);
+<a name="line131">131: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree2.html">PetscFree2</a>(baijmkl-&gt;ai1, baijmkl-&gt;aj1));
+<a name="line132">132: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(A-&gt;spptr));
+<a name="line133">133: </a>  }
+
+<a name="line135">135: </a>  <font color="#B22222">/* Change the type of A back to SEQBAIJ and use MatDestroy_SeqBAIJ()</font>
+<a name="line136">136: </a><font color="#B22222">   * to destroy everything that remains. */</font>
+<a name="line137">137: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscObjectChangeTypeName((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A, <a href="../../../../../../manualpages/Mat/MATSEQBAIJ.html">MATSEQBAIJ</a>));
+<a name="line138">138: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatDestroy_SeqBAIJ(A));
+<a name="line139">139: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line140">140: </a>}
+
+<a name="line142">142: </a><strong><font color="#4169E1"><a name="MatSeqBAIJMKL_create_mkl_handle"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatSeqBAIJMKL_create_mkl_handle(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A)</font></strong>
+<a name="line143">143: </a>{
+<a name="line144">144: </a>  Mat_SeqBAIJ    *a       = (Mat_SeqBAIJ *)A-&gt;data;
+<a name="line145">145: </a>  Mat_SeqBAIJMKL *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+<a name="line146">146: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        mbs, nbs, nz, bs;
+<a name="line147">147: </a>  MatScalar      *aa;
+<a name="line148">148: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>       *aj, *ai;
+<a name="line149">149: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>        i;
+
+<a name="line151">151: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line152">152: </a>  <font color="#4169E1">if</font> (baijmkl-&gt;sparse_optimized) {
+<a name="line153">153: </a>    <font color="#B22222">/* Matrix has been previously assembled and optimized. Must destroy old</font>
+<a name="line154">154: </a><font color="#B22222">     * matrix handle before running the optimization step again. */</font>
+<a name="line155">155: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscFree2.html">PetscFree2</a>(baijmkl-&gt;ai1, baijmkl-&gt;aj1));
+<a name="line156">156: </a>    PetscCallMKL(mkl_sparse_destroy(baijmkl-&gt;bsrA));
+<a name="line157">157: </a>  }
+<a name="line158">158: </a>  baijmkl-&gt;sparse_optimized = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line160">160: </a>  <font color="#B22222">/* Now perform the SpMV2 setup and matrix optimization. */</font>
+<a name="line161">161: </a>  baijmkl-&gt;descr.type = SPARSE_MATRIX_TYPE_GENERAL;
+<a name="line162">162: </a>  baijmkl-&gt;descr.mode = SPARSE_FILL_MODE_LOWER;
+<a name="line163">163: </a>  baijmkl-&gt;descr.diag = SPARSE_DIAG_NON_UNIT;
+<a name="line164">164: </a>  mbs                 = a-&gt;mbs;
+<a name="line165">165: </a>  nbs                 = a-&gt;nbs;
+<a name="line166">166: </a>  nz                  = a-&gt;nz;
+<a name="line167">167: </a>  bs                  = A-&gt;rmap-&gt;bs;
+<a name="line168">168: </a>  aa                  = a-&gt;a;
+
+<a name="line170">170: </a>  <font color="#4169E1">if</font> ((nz != 0) &amp; !(A-&gt;structure_only)) {
+<a name="line171">171: </a>    <font color="#B22222">/* Create a new, optimized sparse matrix handle only if the matrix has nonzero entries.</font>
+<a name="line172">172: </a><font color="#B22222">     * The MKL sparse-inspector executor routines don't like being passed an empty matrix. */</font>
+<a name="line173">173: </a>    <font color="#4169E1">if</font> (PetscSeqBAIJSupportsZeroBased()) {
+<a name="line174">174: </a>      aj = a-&gt;j;
+<a name="line175">175: </a>      ai = a-&gt;i;
+<a name="line176">176: </a>      PetscCallMKL(mkl_sparse_x_create_bsr(&amp;(baijmkl-&gt;bsrA), SPARSE_INDEX_BASE_ZERO, SPARSE_LAYOUT_COLUMN_MAJOR, (MKL_INT)mbs, (MKL_INT)nbs, (MKL_INT)bs, (MKL_INT *)ai, (MKL_INT *)(ai + 1), (MKL_INT *)aj, aa));
+<a name="line177">177: </a>    } <font color="#4169E1">else</font> {
+<a name="line178">178: </a>      <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMalloc2.html">PetscMalloc2</a>(mbs + 1, &amp;ai, nz, &amp;aj));
+<a name="line179">179: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; mbs + 1; i++) ai[i] = a-&gt;i[i] + 1;
+<a name="line180">180: </a>      <font color="#4169E1">for</font> (i = 0; i &lt; nz; i++) aj[i] = a-&gt;j[i] + 1;
+<a name="line181">181: </a>      aa = a-&gt;a;
+<a name="line182">182: </a>      PetscCallMKL(mkl_sparse_x_create_bsr(&amp;baijmkl-&gt;bsrA, SPARSE_INDEX_BASE_ONE, SPARSE_LAYOUT_COLUMN_MAJOR, (MKL_INT)mbs, (MKL_INT)nbs, (MKL_INT)bs, (MKL_INT *)ai, (MKL_INT *)(ai + 1), (MKL_INT *)aj, aa));
+<a name="line183">183: </a>      baijmkl-&gt;ai1 = ai;
+<a name="line184">184: </a>      baijmkl-&gt;aj1 = aj;
+<a name="line185">185: </a>    }
+<a name="line186">186: </a>    PetscCallMKL(mkl_sparse_set_mv_hint(baijmkl-&gt;bsrA, SPARSE_OPERATION_NON_TRANSPOSE, baijmkl-&gt;descr, 1000));
+<a name="line187">187: </a>    PetscCallMKL(mkl_sparse_set_memory_hint(baijmkl-&gt;bsrA, SPARSE_MEMORY_AGGRESSIVE));
+<a name="line188">188: </a>    PetscCallMKL(mkl_sparse_optimize(baijmkl-&gt;bsrA));
+<a name="line189">189: </a>    baijmkl-&gt;sparse_optimized = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line190">190: </a>  }
+<a name="line191">191: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line192">192: </a>}
+
+<a name="line194">194: </a><strong><font color="#4169E1"><a name="MatDuplicate_SeqBAIJMKL"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatDuplicate_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Mat/MatDuplicateOption.html">MatDuplicateOption</a> op, <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> *M)</font></strong>
+<a name="line195">195: </a>{
+<a name="line196">196: </a>  Mat_SeqBAIJMKL *baijmkl;
+<a name="line197">197: </a>  Mat_SeqBAIJMKL *baijmkl_dest;
+
+<a name="line199">199: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line200">200: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatDuplicate_SeqBAIJ(A, op, M));
+<a name="line201">201: </a>  baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+<a name="line202">202: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;baijmkl_dest));
+<a name="line203">203: </a>  (*M)-&gt;spptr = (void *)baijmkl_dest;
+<a name="line204">204: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscMemcpy.html">PetscMemcpy</a>(baijmkl_dest, baijmkl, <font color="#4169E1">sizeof</font>(Mat_SeqBAIJMKL)));
+<a name="line205">205: </a>  baijmkl_dest-&gt;sparse_optimized = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line206">206: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+<a name="line207">207: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line208">208: </a>}
+
+<a name="line210">210: </a><strong><font color="#4169E1"><a name="MatMult_SeqBAIJMKL_SpMV2"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatMult_SeqBAIJMKL_SpMV2(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> xx, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> yy)</font></strong>
+<a name="line211">211: </a>{
+<a name="line212">212: </a>  Mat_SeqBAIJ       *a       = (Mat_SeqBAIJ *)A-&gt;data;
+<a name="line213">213: </a>  Mat_SeqBAIJMKL    *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+<a name="line214">214: </a>  const <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x;
+<a name="line215">215: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *y;
+
+<a name="line217">217: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line218">218: </a>  <font color="#B22222">/* If there are no nonzero entries, zero yy and return immediately. */</font>
+<a name="line219">219: </a>  <font color="#4169E1">if</font> (!a-&gt;nz) {
+<a name="line220">220: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecSet.html">VecSet</a>(yy, 0.0));
+<a name="line221">221: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line222">222: </a>  }
+
+<a name="line224">224: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(xx, &amp;x));
+<a name="line225">225: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(yy, &amp;y));
+
+<a name="line227">227: </a>  <font color="#B22222">/* In some cases, we get to this point without mkl_sparse_optimize() having been called, so we check and then call</font>
+<a name="line228">228: </a><font color="#B22222">   * it if needed. Eventually, when everything in PETSc is properly updating the matrix state, we should probably</font>
+<a name="line229">229: </a><font color="#B22222">   * take a "lazy" approach to creation/updating of the MKL matrix handle and plan to always do it here (when needed). */</font>
+<a name="line230">230: </a>  <font color="#4169E1">if</font> (!baijmkl-&gt;sparse_optimized) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+
+<a name="line232">232: </a>  <font color="#B22222">/* Call MKL SpMV2 executor routine to do the <a href="../../../../../../manualpages/Mat/MatMult.html">MatMult</a>. */</font>
+<a name="line233">233: </a>  PetscCallMKL(mkl_sparse_x_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, baijmkl-&gt;bsrA, baijmkl-&gt;descr, x, 0.0, y));
+
+<a name="line235">235: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>(2.0 * a-&gt;bs2 * a-&gt;nz - a-&gt;nonzerorowcnt * A-&gt;rmap-&gt;bs));
+<a name="line236">236: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(xx, &amp;x));
+<a name="line237">237: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(yy, &amp;y));
+<a name="line238">238: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line239">239: </a>}
+
+<a name="line241">241: </a><strong><font color="#4169E1"><a name="MatMultTranspose_SeqBAIJMKL_SpMV2"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatMultTranspose_SeqBAIJMKL_SpMV2(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> xx, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> yy)</font></strong>
+<a name="line242">242: </a>{
+<a name="line243">243: </a>  Mat_SeqBAIJ       *a       = (Mat_SeqBAIJ *)A-&gt;data;
+<a name="line244">244: </a>  Mat_SeqBAIJMKL    *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+<a name="line245">245: </a>  const <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x;
+<a name="line246">246: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *y;
+
+<a name="line248">248: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line249">249: </a>  <font color="#B22222">/* If there are no nonzero entries, zero yy and return immediately. */</font>
+<a name="line250">250: </a>  <font color="#4169E1">if</font> (!a-&gt;nz) {
+<a name="line251">251: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecSet.html">VecSet</a>(yy, 0.0));
+<a name="line252">252: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line253">253: </a>  }
+
+<a name="line255">255: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(xx, &amp;x));
+<a name="line256">256: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(yy, &amp;y));
+
+<a name="line258">258: </a>  <font color="#B22222">/* In some cases, we get to this point without mkl_sparse_optimize() having been called, so we check and then call</font>
+<a name="line259">259: </a><font color="#B22222">   * it if needed. Eventually, when everything in PETSc is properly updating the matrix state, we should probably</font>
+<a name="line260">260: </a><font color="#B22222">   * take a "lazy" approach to creation/updating of the MKL matrix handle and plan to always do it here (when needed). */</font>
+<a name="line261">261: </a>  <font color="#4169E1">if</font> (!baijmkl-&gt;sparse_optimized) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+
+<a name="line263">263: </a>  <font color="#B22222">/* Call MKL SpMV2 executor routine to do the <a href="../../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>. */</font>
+<a name="line264">264: </a>  PetscCallMKL(mkl_sparse_x_mv(SPARSE_OPERATION_TRANSPOSE, 1.0, baijmkl-&gt;bsrA, baijmkl-&gt;descr, x, 0.0, y));
+
+<a name="line266">266: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>(2.0 * a-&gt;bs2 * a-&gt;nz - a-&gt;nonzerorowcnt * A-&gt;rmap-&gt;bs));
+<a name="line267">267: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(xx, &amp;x));
+<a name="line268">268: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(yy, &amp;y));
+<a name="line269">269: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line270">270: </a>}
+
+<a name="line272">272: </a><strong><font color="#4169E1"><a name="MatMultAdd_SeqBAIJMKL_SpMV2"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatMultAdd_SeqBAIJMKL_SpMV2(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> xx, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> yy, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> zz)</font></strong>
+<a name="line273">273: </a>{
+<a name="line274">274: </a>  Mat_SeqBAIJ       *a       = (Mat_SeqBAIJ *)A-&gt;data;
+<a name="line275">275: </a>  Mat_SeqBAIJMKL    *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+<a name="line276">276: </a>  const <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x;
+<a name="line277">277: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *y, *z;
+<a name="line278">278: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           m = a-&gt;mbs * A-&gt;rmap-&gt;bs;
+<a name="line279">279: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i;
+
+<a name="line281">281: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line282">282: </a>  <font color="#B22222">/* If there are no nonzero entries, set zz = yy and return immediately. */</font>
+<a name="line283">283: </a>  <font color="#4169E1">if</font> (!a-&gt;nz) {
+<a name="line284">284: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(yy, zz));
+<a name="line285">285: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line286">286: </a>  }
+
+<a name="line288">288: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(xx, &amp;x));
+<a name="line289">289: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArrayPair.html">VecGetArrayPair</a>(yy, zz, &amp;y, &amp;z));
+
+<a name="line291">291: </a>  <font color="#B22222">/* In some cases, we get to this point without mkl_sparse_optimize() having been called, so we check and then call</font>
+<a name="line292">292: </a><font color="#B22222">   * it if needed. Eventually, when everything in PETSc is properly updating the matrix state, we should probably</font>
+<a name="line293">293: </a><font color="#B22222">   * take a "lazy" approach to creation/updating of the MKL matrix handle and plan to always do it here (when needed). */</font>
+<a name="line294">294: </a>  <font color="#4169E1">if</font> (!baijmkl-&gt;sparse_optimized) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+
+<a name="line296">296: </a>  <font color="#B22222">/* Call MKL sparse BLAS routine to do the <a href="../../../../../../manualpages/Mat/MatMult.html">MatMult</a>. */</font>
+<a name="line297">297: </a>  <font color="#4169E1">if</font> (zz == yy) {
+<a name="line298">298: </a>    <font color="#B22222">/* If zz and yy are the same vector, we can use mkl_sparse_x_mv, which calculates y = alpha*A*x + beta*y,</font>
+<a name="line299">299: </a><font color="#B22222">     * with alpha and beta both set to 1.0. */</font>
+<a name="line300">300: </a>    PetscCallMKL(mkl_sparse_x_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, baijmkl-&gt;bsrA, baijmkl-&gt;descr, x, 1.0, z));
+<a name="line301">301: </a>  } <font color="#4169E1">else</font> {
+<a name="line302">302: </a>    <font color="#B22222">/* zz and yy are different vectors, so we call mkl_sparse_x_mv with alpha=1.0 and beta=0.0, and then</font>
+<a name="line303">303: </a><font color="#B22222">     * we add the contents of vector yy to the result; MKL sparse BLAS does not have a <a href="../../../../../../manualpages/Mat/MatMultAdd.html">MatMultAdd</a> equivalent. */</font>
+<a name="line304">304: </a>    PetscCallMKL(mkl_sparse_x_mv(SPARSE_OPERATION_NON_TRANSPOSE, 1.0, baijmkl-&gt;bsrA, baijmkl-&gt;descr, x, 0.0, z));
+<a name="line305">305: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; m; i++) z[i] += y[i];
+<a name="line306">306: </a>  }
+
+<a name="line308">308: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>(2.0 * a-&gt;bs2 * a-&gt;nz));
+<a name="line309">309: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(xx, &amp;x));
+<a name="line310">310: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArrayPair.html">VecRestoreArrayPair</a>(yy, zz, &amp;y, &amp;z));
+<a name="line311">311: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line312">312: </a>}
+
+<a name="line314">314: </a><strong><font color="#4169E1"><a name="MatMultTransposeAdd_SeqBAIJMKL_SpMV2"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatMultTransposeAdd_SeqBAIJMKL_SpMV2(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> xx, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> yy, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> zz)</font></strong>
+<a name="line315">315: </a>{
+<a name="line316">316: </a>  Mat_SeqBAIJ       *a       = (Mat_SeqBAIJ *)A-&gt;data;
+<a name="line317">317: </a>  Mat_SeqBAIJMKL    *baijmkl = (Mat_SeqBAIJMKL *)A-&gt;spptr;
+<a name="line318">318: </a>  const <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *x;
+<a name="line319">319: </a>  <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>       *y, *z;
+<a name="line320">320: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           n = a-&gt;nbs * A-&gt;rmap-&gt;bs;
+<a name="line321">321: </a>  <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a>           i;
+<a name="line322">322: </a>  <font color="#B22222">/* Variables not in MatMultTransposeAdd_SeqBAIJ. */</font>
+
+<a name="line324">324: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line325">325: </a>  <font color="#B22222">/* If there are no nonzero entries, set zz = yy and return immediately. */</font>
+<a name="line326">326: </a>  <font color="#4169E1">if</font> (!a-&gt;nz) {
+<a name="line327">327: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(yy, zz));
+<a name="line328">328: </a>    <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line329">329: </a>  }
+
+<a name="line331">331: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArrayRead.html">VecGetArrayRead</a>(xx, &amp;x));
+<a name="line332">332: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecGetArrayPair.html">VecGetArrayPair</a>(yy, zz, &amp;y, &amp;z));
+
+<a name="line334">334: </a>  <font color="#B22222">/* In some cases, we get to this point without mkl_sparse_optimize() having been called, so we check and then call</font>
+<a name="line335">335: </a><font color="#B22222">   * it if needed. Eventually, when everything in PETSc is properly updating the matrix state, we should probably</font>
+<a name="line336">336: </a><font color="#B22222">   * take a "lazy" approach to creation/updating of the MKL matrix handle and plan to always do it here (when needed). */</font>
+<a name="line337">337: </a>  <font color="#4169E1">if</font> (!baijmkl-&gt;sparse_optimized) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+
+<a name="line339">339: </a>  <font color="#B22222">/* Call MKL sparse BLAS routine to do the <a href="../../../../../../manualpages/Mat/MatMult.html">MatMult</a>. */</font>
+<a name="line340">340: </a>  <font color="#4169E1">if</font> (zz == yy) {
+<a name="line341">341: </a>    <font color="#B22222">/* If zz and yy are the same vector, we can use mkl_sparse_x_mv, which calculates y = alpha*A*x + beta*y,</font>
+<a name="line342">342: </a><font color="#B22222">     * with alpha and beta both set to 1.0. */</font>
+<a name="line343">343: </a>    PetscCallMKL(mkl_sparse_x_mv(SPARSE_OPERATION_TRANSPOSE, 1.0, baijmkl-&gt;bsrA, baijmkl-&gt;descr, x, 1.0, z));
+<a name="line344">344: </a>  } <font color="#4169E1">else</font> {
+<a name="line345">345: </a>    <font color="#B22222">/* zz and yy are different vectors, so we call mkl_sparse_x_mv with alpha=1.0 and beta=0.0, and then</font>
+<a name="line346">346: </a><font color="#B22222">     * we add the contents of vector yy to the result; MKL sparse BLAS does not have a <a href="../../../../../../manualpages/Mat/MatMultAdd.html">MatMultAdd</a> equivalent. */</font>
+<a name="line347">347: </a>    PetscCallMKL(mkl_sparse_x_mv(SPARSE_OPERATION_TRANSPOSE, 1.0, baijmkl-&gt;bsrA, baijmkl-&gt;descr, x, 0.0, z));
+<a name="line348">348: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; n; i++) z[i] += y[i];
+<a name="line349">349: </a>  }
+
+<a name="line351">351: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Profiling/PetscLogFlops.html">PetscLogFlops</a>(2.0 * a-&gt;bs2 * a-&gt;nz));
+<a name="line352">352: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArrayRead.html">VecRestoreArrayRead</a>(xx, &amp;x));
+<a name="line353">353: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Vec/VecRestoreArrayPair.html">VecRestoreArrayPair</a>(yy, zz, &amp;y, &amp;z));
+<a name="line354">354: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line355">355: </a>}
+
+<a name="line357">357: </a><strong><font color="#4169E1"><a name="MatScale_SeqBAIJMKL"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatScale_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> inA, <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> alpha)</font></strong>
+<a name="line358">358: </a>{
+<a name="line359">359: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line360">360: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatScale_SeqBAIJ(inA, alpha));
+<a name="line361">361: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(inA));
+<a name="line362">362: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line363">363: </a>}
+
+<a name="line365">365: </a><strong><font color="#4169E1"><a name="MatDiagonalScale_SeqBAIJMKL"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatDiagonalScale_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> ll, <a href="../../../../../../manualpages/Vec/Vec.html">Vec</a> rr)</font></strong>
+<a name="line366">366: </a>{
+<a name="line367">367: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line368">368: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatDiagonalScale_SeqBAIJ(A, ll, rr));
+<a name="line369">369: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+<a name="line370">370: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line371">371: </a>}
+
+<a name="line373">373: </a><strong><font color="#4169E1"><a name="MatAXPY_SeqBAIJMKL"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatAXPY_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> Y, <a href="../../../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> a, <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> X, <a href="../../../../../../manualpages/Mat/MatStructure.html">MatStructure</a> str)</font></strong>
+<a name="line374">374: </a>{
+<a name="line375">375: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line376">376: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatAXPY_SeqBAIJ(Y, a, X, str));
+<a name="line377">377: </a>  <font color="#4169E1">if</font> (str == <a href="../../../../../../manualpages/Mat/MatStructure.html">SAME_NONZERO_PATTERN</a>) {
+<a name="line378">378: </a>    <font color="#B22222">/* <a href="../../../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>() is not called if <a href="../../../../../../manualpages/Mat/MatStructure.html">SAME_NONZERO_PATTERN</a>, so we need to force update of the MKL matrix handle. */</font>
+<a name="line379">379: </a>    <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(Y));
+<a name="line380">380: </a>  }
+<a name="line381">381: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line382">382: </a>}
+<a name="line383">383: </a><font color="#B22222">/* MatConvert_SeqBAIJ_SeqBAIJMKL converts a SeqBAIJ matrix into a</font>
+<a name="line384">384: </a><font color="#B22222"> * SeqBAIJMKL matrix.  This routine is called by the MatCreate_SeqMKLBAIJ()</font>
+<a name="line385">385: </a><font color="#B22222"> * routine, but can also be used to convert an assembled SeqBAIJ matrix</font>
+<a name="line386">386: </a><font color="#B22222"> * into a SeqBAIJMKL one. */</font>
+<a name="line387">387: </a><strong><font color="#4169E1"><a name="MatConvert_SeqBAIJ_SeqBAIJMKL"></a>PETSC_INTERN <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatConvert_SeqBAIJ_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Mat/MatType.html">MatType</a> type, <a href="../../../../../../manualpages/Mat/MatReuse.html">MatReuse</a> reuse, <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> *newmat)</font></strong>
+<a name="line388">388: </a>{
+<a name="line389">389: </a>  <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a>             B = *newmat;
+<a name="line390">390: </a>  Mat_SeqBAIJMKL *baijmkl;
+<a name="line391">391: </a>  <a href="../../../../../../manualpages/Sys/PetscBool.html">PetscBool</a>       sametype;
+
+<a name="line393">393: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line394">394: </a>  <font color="#4169E1">if</font> (reuse == <a href="../../../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>) <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatDuplicate.html">MatDuplicate</a>(A, <a href="../../../../../../manualpages/Mat/MatDuplicateOption.html">MAT_COPY_VALUES</a>, &amp;B));
+
+<a name="line396">396: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A, type, &amp;sametype));
+<a name="line397">397: </a>  <font color="#4169E1">if</font> (sametype) <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+
+<a name="line399">399: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;baijmkl));
+<a name="line400">400: </a>  B-&gt;spptr = (void *)baijmkl;
+
+<a name="line402">402: </a>  <font color="#B22222">/* Set function pointers for methods that we inherit from BAIJ but override.</font>
+<a name="line403">403: </a><font color="#B22222">   * We also parse some command line options below, since those determine some of the methods we point to. */</font>
+<a name="line404">404: </a>  B-&gt;ops-&gt;assemblyend = MatAssemblyEnd_SeqBAIJMKL;
+
+<a name="line406">406: </a>  baijmkl-&gt;sparse_optimized = <a href="../../../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+
+<a name="line408">408: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)B, <font color="#666666">"MatScale_SeqBAIJMKL_C"</font>, MatScale_SeqBAIJMKL));
+<a name="line409">409: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Sys/PetscObjectComposeFunction.html">PetscObjectComposeFunction</a>((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)B, <font color="#666666">"MatConvert_seqbaijmkl_seqbaij_C"</font>, MatConvert_SeqBAIJMKL_SeqBAIJ));
+
+<a name="line411">411: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(PetscObjectChangeTypeName((<a href="../../../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)B, MATSEQBAIJMKL));
+<a name="line412">412: </a>  *newmat = B;
+<a name="line413">413: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line414">414: </a>}
+
+<a name="line416">416: </a><strong><font color="#4169E1"><a name="MatAssemblyEnd_SeqBAIJMKL"></a>static <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatAssemblyEnd_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A, <a href="../../../../../../manualpages/Mat/MatAssemblyType.html">MatAssemblyType</a> mode)</font></strong>
+<a name="line417">417: </a>{
+<a name="line418">418: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line419">419: </a>  <font color="#4169E1">if</font> (mode == <a href="../../../../../../manualpages/Mat/MatAssemblyType.html">MAT_FLUSH_ASSEMBLY</a>) <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line420">420: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatAssemblyEnd_SeqBAIJ(A, mode));
+<a name="line421">421: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJMKL_create_mkl_handle(A));
+<a name="line422">422: </a>  A-&gt;ops-&gt;destroy          = MatDestroy_SeqBAIJMKL;
+<a name="line423">423: </a>  A-&gt;ops-&gt;mult             = MatMult_SeqBAIJMKL_SpMV2;
+<a name="line424">424: </a>  A-&gt;ops-&gt;multtranspose    = MatMultTranspose_SeqBAIJMKL_SpMV2;
+<a name="line425">425: </a>  A-&gt;ops-&gt;multadd          = MatMultAdd_SeqBAIJMKL_SpMV2;
+<a name="line426">426: </a>  A-&gt;ops-&gt;multtransposeadd = MatMultTransposeAdd_SeqBAIJMKL_SpMV2;
+<a name="line427">427: </a>  A-&gt;ops-&gt;scale            = MatScale_SeqBAIJMKL;
+<a name="line428">428: </a>  A-&gt;ops-&gt;diagonalscale    = MatDiagonalScale_SeqBAIJMKL;
+<a name="line429">429: </a>  A-&gt;ops-&gt;axpy             = MatAXPY_SeqBAIJMKL;
+<a name="line430">430: </a>  A-&gt;ops-&gt;duplicate        = MatDuplicate_SeqBAIJMKL;
+<a name="line431">431: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line432">432: </a>}
+
+<a name="line434">434: </a><font color="#B22222">/*@C</font>
+<a name="line435">435: </a><font color="#B22222">   <a href="../../../../../../manualpages/Mat/MatCreateSeqBAIJMKL.html">MatCreateSeqBAIJMKL</a> - Creates a sparse matrix of type `MATSEQBAIJMKL`.</font>
+<a name="line436">436: </a><font color="#B22222">   This type inherits from `<a href="../../../../../../manualpages/Mat/MATSEQBAIJ.html">MATSEQBAIJ</a>` and is largely identical, but uses sparse BLAS</font>
+<a name="line437">437: </a><font color="#B22222">   routines from Intel MKL whenever possible.</font>
+
+<a name="line439">439: </a><font color="#B22222">   Input Parameters:</font>
+<a name="line440">440: </a><font color="#B22222">+  comm - MPI communicator, set to `<a href="../../../../../../manualpages/Sys/PETSC_COMM_SELF.html">PETSC_COMM_SELF</a>`</font>
+<a name="line441">441: </a><font color="#B22222">.  bs - size of block, the blocks are ALWAYS square. One can use `<a href="../../../../../../manualpages/Mat/MatSetBlockSizes.html">MatSetBlockSizes</a>()` to set a different row and column blocksize but the row</font>
+<a name="line442">442: </a><font color="#B22222">          blocksize always defines the size of the blocks. The column blocksize sets the blocksize of the vectors obtained with `<a href="../../../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>()`</font>
+<a name="line443">443: </a><font color="#B22222">.  m - number of rows</font>
+<a name="line444">444: </a><font color="#B22222">.  n - number of columns</font>
+<a name="line445">445: </a><font color="#B22222">.  nz - number of nonzero blocks  per block row (same for all rows)</font>
+<a name="line446">446: </a><font color="#B22222">-  nnz - array containing the number of nonzero blocks in the various block rows</font>
+<a name="line447">447: </a><font color="#B22222">         (possibly different for each block row) or `NULL`</font>
+
+<a name="line449">449: </a><font color="#B22222">   Output Parameter:</font>
+<a name="line450">450: </a><font color="#B22222">.  A - the matrix</font>
+
+<a name="line452">452: </a><font color="#B22222">   It is recommended that one use the `<a href="../../../../../../manualpages/Mat/MatCreate.html">MatCreate</a>()`, `<a href="../../../../../../manualpages/Mat/MatSetType.html">MatSetType</a>()` and/or `<a href="../../../../../../manualpages/Mat/MatSetFromOptions.html">MatSetFromOptions</a>()`,</font>
+<a name="line453">453: </a><font color="#B22222">   MatXXXXSetPreallocation() paradigm instead of this routine directly.</font>
+<a name="line454">454: </a><font color="#B22222">   [MatXXXXSetPreallocation() is, for example, `<a href="../../../../../../manualpages/Mat/MatSeqBAIJSetPreallocation.html">MatSeqBAIJSetPreallocation</a>()`]</font>
+
+<a name="line456">456: </a><font color="#B22222">   Options Database Keys:</font>
+<a name="line457">457: </a><font color="#B22222">+   -mat_no_unroll - uses code that does not unroll the loops in the block calculations (much slower)</font>
+<a name="line458">458: </a><font color="#B22222">-   -mat_block_size - size of the blocks to use</font>
+
+<a name="line460">460: </a><font color="#B22222">   Level: intermediate</font>
+
+<a name="line462">462: </a><font color="#B22222">   Notes:</font>
+<a name="line463">463: </a><font color="#B22222">   The number of rows and columns must be divisible by blocksize.</font>
+
+<a name="line465">465: </a><font color="#B22222">   If the `nnz` parameter is given then the `nz` parameter is ignored</font>
+
+<a name="line467">467: </a><font color="#B22222">   A nonzero block is any block that as 1 or more nonzeros in it</font>
+
+<a name="line469">469: </a><font color="#B22222">   `<a href="../../../../../../manualpages/Mat/MatMult.html">MatMult</a>()`, `<a href="../../../../../../manualpages/Mat/MatMultAdd.html">MatMultAdd</a>()`, `<a href="../../../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>()`, and `<a href="../../../../../../manualpages/Mat/MatMultTransposeAdd.html">MatMultTransposeAdd</a>()`</font>
+<a name="line470">470: </a><font color="#B22222">   operations are currently supported.</font>
+<a name="line471">471: </a><font color="#B22222">   If the installed version of MKL supports the "SpMV2" sparse</font>
+<a name="line472">472: </a><font color="#B22222">   inspector-executor routines, then those are used by default.</font>
+<a name="line473">473: </a><font color="#B22222">   Default PETSc kernels are used otherwise.</font>
+
+<a name="line475">475: </a><font color="#B22222">   The `<a href="../../../../../../manualpages/Mat/MATSEQBAIJ.html">MATSEQBAIJ</a>` format is fully compatible with standard Fortran</font>
+<a name="line476">476: </a><font color="#B22222">   storage.  That is, the stored row and column indices can begin at</font>
+<a name="line477">477: </a><font color="#B22222">   either one (as in Fortran) or zero.  See the users' manual for details.</font>
+
+<a name="line479">479: </a><font color="#B22222">   Specify the preallocated storage with either nz or nnz (not both).</font>
+<a name="line480">480: </a><font color="#B22222">   Set nz = `<a href="../../../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>` and nnz = NULL for PETSc to control dynamic memory</font>
+<a name="line481">481: </a><font color="#B22222">   allocation.  See [Sparse Matrices](sec_matsparse) for details.</font>
+<a name="line482">482: </a><font color="#B22222">   matrices.</font>
+
+<a name="line484">484: </a><font color="#B22222">.seealso: [Sparse Matrices](sec_matsparse), `<a href="../../../../../../manualpages/Mat/MatCreate.html">MatCreate</a>()`, `<a href="../../../../../../manualpages/Mat/MatCreateSeqAIJ.html">MatCreateSeqAIJ</a>()`, `<a href="../../../../../../manualpages/Mat/MatSetValues.html">MatSetValues</a>()`, `<a href="../../../../../../manualpages/Mat/MatCreateBAIJ.html">MatCreateBAIJ</a>()`</font>
+<a name="line485">485: </a><font color="#B22222">@*/</font>
+<a name="line486">486: </a><strong><font color="#4169E1"><a name="MatCreateSeqBAIJMKL"></a><a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> <a href="../../../../../../manualpages/Mat/MatCreateSeqBAIJMKL.html">MatCreateSeqBAIJMKL</a>(<a href="../../../../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> bs, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> m, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> n, <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nz, const <a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> nnz[], <a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> *A)</font></strong>
+<a name="line487">487: </a>{
+<a name="line488">488: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line489">489: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(comm, A));
+<a name="line490">490: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatSetSizes.html">MatSetSizes</a>(*A, m, n, m, n));
+<a name="line491">491: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatSetType.html">MatSetType</a>(*A, MATSEQBAIJMKL));
+<a name="line492">492: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatSeqBAIJSetPreallocation_SeqBAIJ(*A, bs, nz, (<a href="../../../../../../manualpages/Sys/PetscInt.html">PetscInt</a> *)nnz));
+<a name="line493">493: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line494">494: </a>}
+
+<a name="line496">496: </a><strong><font color="#4169E1"><a name="MatCreate_SeqBAIJMKL"></a>PETSC_EXTERN <a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MatCreate_SeqBAIJMKL(<a href="../../../../../../manualpages/Mat/Mat.html">Mat</a> A)</font></strong>
+<a name="line497">497: </a>{
+<a name="line498">498: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line499">499: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../../../manualpages/Mat/MatSetType.html">MatSetType</a>(A, <a href="../../../../../../manualpages/Mat/MATSEQBAIJ.html">MATSEQBAIJ</a>));
+<a name="line500">500: </a>  <a href="../../../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(MatConvert_SeqBAIJ_SeqBAIJMKL(A, MATSEQBAIJMKL, <a href="../../../../../../manualpages/Mat/MatReuse.html">MAT_INPLACE_MATRIX</a>, &amp;A));
+<a name="line501">501: </a>  <a href="../../../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line502">502: </a>}
+</pre>
+</body>
+
+</html>

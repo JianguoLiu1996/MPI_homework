@@ -1,0 +1,850 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/sys/mpiuni/mpi.c">Actual source code: mpi.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:38+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a><font color="#B22222">/*</font>
+<a name="line2">  2: </a><font color="#B22222">      This provides a few of the MPI-uni functions that cannot be implemented</font>
+<a name="line3">  3: </a><font color="#B22222">    with C macros</font>
+<a name="line4">  4: </a><font color="#B22222">*/</font>
+<a name="line5">  5: </a>#include <A href="../../../include/petscsys.h.html">&lt;petscsys.h&gt;</A>
+<a name="line6">  6: </a><font color="#A020F0">#ifndef MPIUNI_H</font>
+<a name="line7">  7: </a><font color="#A020F0">  #error </font><font color="#666666">"Wrong mpi.h included! require mpi.h from MPIUNI"</font><font color="#A020F0"></font>
+<a name="line8">  8: </a><font color="#A020F0">#endif</font>
+
+<a name="line10"> 10: </a>#include <A href="../../../include/petscdevice_cupm.h.html">&lt;petscdevice_cupm.h&gt;</A>
+<a name="line11"> 11: </a>#include <A href="../../../include/petsc/private/petscimpl.h.html">&lt;petsc/private/petscimpl.h&gt;</A>
+
+<a name="line13"> 13: </a><strong><font color="#228B22">#define MPI_SUCCESS 0</font></strong>
+<a name="line14"> 14: </a><strong><font color="#228B22">#define MPI_FAILURE 1</font></strong>
+
+<a name="line16"> 16: </a>void *MPIUNI_TMP = NULL;
+
+<a name="line18"> 18: </a><font color="#B22222">/*</font>
+<a name="line19"> 19: </a><font color="#B22222">       With MPI Uni there are exactly four distinct communicators:</font>
+<a name="line20"> 20: </a><font color="#B22222">    MPI_COMM_SELF, MPI_COMM_WORLD, and a <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_dup.html#MPI_Comm_dup">MPI_Comm_dup</a>() of each of these (duplicates of duplicates return the same communictor)</font>
+
+<a name="line22"> 22: </a><font color="#B22222">    MPI_COMM_SELF and MPI_COMM_WORLD are <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>() in <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>() but in general with PETSc,</font>
+<a name="line23"> 23: </a><font color="#B22222">     the other communicators are freed once the last PETSc object is freed (before <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>()).</font>
+
+<a name="line25"> 25: </a><font color="#B22222">*/</font>
+<a name="line26"> 26: </a><strong><font color="#228B22">#define MAX_ATTR 256</font></strong>
+<a name="line27"> 27: </a><strong><font color="#228B22">#define MAX_COMM 128</font></strong>
+
+<a name="line29"> 29: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line30"> 30: </a>  void *attribute_val;
+<a name="line31"> 31: </a>  int   active;
+<a name="line32"> 32: </a>} MPI_Attr;
+
+<a name="line34"> 34: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line35"> 35: </a>  void                *extra_state;
+<a name="line36"> 36: </a>  MPI_Delete_function *del;
+<a name="line37"> 37: </a>  int                  active; <font color="#B22222">/* Is this keyval in use by some comm? */</font>
+<a name="line38"> 38: </a>} MPI_Attr_keyval;
+
+<a name="line40"> 40: </a>static MPI_Attr_keyval attr_keyval[MAX_ATTR];
+<a name="line41"> 41: </a>static MPI_Attr        attr[MAX_COMM][MAX_ATTR];
+<a name="line42"> 42: </a>static int             comm_active[MAX_COMM]; <font color="#B22222">/* Boolean array indicating which comms are in use */</font>
+<a name="line43"> 43: </a>static int             mpi_tag_ub           = 100000000;
+<a name="line44"> 44: </a>static int             num_attr             = 1; <font color="#B22222">/* Maximal number of keyvals/attributes ever created, including the predefined MPI_TAG_UB attribute. */</font>
+<a name="line45"> 45: </a>static int             MaxComm              = 2; <font color="#B22222">/* Maximal number of communicators ever created, including comm_self(1), comm_world(2), but not comm_null(0) */</font>
+<a name="line46"> 46: </a>static void           *MPIUNIF_mpi_in_place = 0;
+
+<a name="line48"> 48: </a><strong><font color="#228B22">#define CommIdx(comm) ((comm)-1) </font><font color="#B22222">/* the communicator's internal index used in attr[idx][] and comm_active[idx]. comm_null does not occupy slots in attr[][] */</font><font color="#228B22"></font></strong>
+
+<a name="line50"> 50: </a><font color="#A020F0">#if defined(__cplusplus)</font>
+<a name="line51"> 51: </a>extern <font color="#666666">"C"</font> {
+<a name="line52"> 52: </a><font color="#A020F0">#endif</font>
+
+<a name="line54"> 54: </a><font color="#B22222">/*</font>
+<a name="line55"> 55: </a><font color="#B22222">   To avoid problems with prototypes to the system memcpy() it is duplicated here</font>
+<a name="line56"> 56: </a><font color="#B22222">*/</font>
+<a name="line57"> 57: </a><strong><font color="#4169E1"><a name="MPIUNI_Memcpy"></a>int MPIUNI_Memcpy(void *dst, const void *src, int n)</font></strong>
+<a name="line58"> 58: </a>{
+<a name="line59"> 59: </a>  <font color="#4169E1">if</font> (dst == MPI_IN_PLACE || dst == MPIUNIF_mpi_in_place) <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line60"> 60: </a>  <font color="#4169E1">if</font> (src == MPI_IN_PLACE || src == MPIUNIF_mpi_in_place) <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line61"> 61: </a>  <font color="#4169E1">if</font> (!n) <font color="#4169E1">return</font> MPI_SUCCESS;
+
+<a name="line63"> 63: </a>    <font color="#B22222">/* GPU-aware MPIUNI. Use synchronous copy per MPI semantics */</font>
+<a name="line64"> 64: </a><font color="#A020F0">#if defined(PETSC_HAVE_CUDA)</font>
+<a name="line65"> 65: </a>  <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscDeviceInitialized.html">PetscDeviceInitialized</a>(<a href="../../../manualpages/Sys/PetscDeviceType.html">PETSC_DEVICE_CUDA</a>)) {
+<a name="line66"> 66: </a>    cudaError_t cerr = cudaMemcpy(dst, src, n, cudaMemcpyDefault);
+<a name="line67"> 67: </a>    <font color="#4169E1">if</font> (cerr != cudaSuccess) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line68"> 68: </a>  } <font color="#4169E1">else</font>
+<a name="line69"> 69: </a><font color="#A020F0">#elif defined(PETSC_HAVE_HIP)</font>
+<a name="line70"> 70: </a>  <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscDeviceInitialized.html">PetscDeviceInitialized</a>(<a href="../../../manualpages/Sys/PetscDeviceType.html">PETSC_DEVICE_HIP</a>)) {
+<a name="line71"> 71: </a>    hipError_t cerr = hipMemcpy(dst, src, n, hipMemcpyDefault);
+<a name="line72"> 72: </a>    <font color="#4169E1">if</font> (cerr != hipSuccess) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line73"> 73: </a>  } <font color="#4169E1">else</font>
+<a name="line74"> 74: </a><font color="#A020F0">#endif</font>
+<a name="line75"> 75: </a>  {
+<a name="line76"> 76: </a>    memcpy(dst, src, n);
+<a name="line77"> 77: </a>  }
+<a name="line78"> 78: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line79"> 79: </a>}
+
+<a name="line81"> 81: </a>static int classcnt = 0;
+<a name="line82"> 82: </a>static int codecnt  = 0;
+
+<a name="line84"> 84: </a><strong><font color="#4169E1"><a name="MPI_Add_error_class"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Add_error_class.html#MPI_Add_error_class">MPI_Add_error_class</a>(int *cl)</font></strong>
+<a name="line85"> 85: </a>{
+<a name="line86"> 86: </a>  *cl = classcnt++;
+<a name="line87"> 87: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line88"> 88: </a>}
+
+<a name="line90"> 90: </a><strong><font color="#4169E1"><a name="MPI_Add_error_code"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Add_error_code.html#MPI_Add_error_code">MPI_Add_error_code</a>(int cl, int *co)</font></strong>
+<a name="line91"> 91: </a>{
+<a name="line92"> 92: </a>  <font color="#4169E1">if</font> (cl &gt;= classcnt) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line93"> 93: </a>  *co = codecnt++;
+<a name="line94"> 94: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line95"> 95: </a>}
+
+<a name="line97"> 97: </a><strong><font color="#4169E1"><a name="MPI_Type_get_envelope"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_get_envelope.html#MPI_Type_get_envelope">MPI_Type_get_envelope</a>(MPI_Datatype datatype, int *num_integers, int *num_addresses, int *num_datatypes, int *combiner)</font></strong>
+<a name="line98"> 98: </a>{
+<a name="line99"> 99: </a>  int comb = datatype &gt;&gt; 28;
+<a name="line100">100: </a>  <font color="#4169E1">switch</font> (comb) {
+<a name="line101">101: </a>  <font color="#4169E1">case</font> MPI_COMBINER_NAMED:
+<a name="line102">102: </a>    *num_integers  = 0;
+<a name="line103">103: </a>    *num_addresses = 0;
+<a name="line104">104: </a>    *num_datatypes = 0;
+<a name="line105">105: </a>    *combiner      = comb;
+<a name="line106">106: </a>    <font color="#4169E1">break</font>;
+<a name="line107">107: </a>  <font color="#4169E1">case</font> MPI_COMBINER_DUP:
+<a name="line108">108: </a>    *num_integers  = 0;
+<a name="line109">109: </a>    *num_addresses = 0;
+<a name="line110">110: </a>    *num_datatypes = 1;
+<a name="line111">111: </a>    *combiner      = comb;
+<a name="line112">112: </a>    <font color="#4169E1">break</font>;
+<a name="line113">113: </a>  <font color="#4169E1">case</font> MPI_COMBINER_CONTIGUOUS:
+<a name="line114">114: </a>    *num_integers  = 1;
+<a name="line115">115: </a>    *num_addresses = 0;
+<a name="line116">116: </a>    *num_datatypes = 1;
+<a name="line117">117: </a>    *combiner      = comb;
+<a name="line118">118: </a>    <font color="#4169E1">break</font>;
+<a name="line119">119: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line120">120: </a>    <font color="#4169E1">return</font> MPIUni_Abort(MPI_COMM_SELF, 1);
+<a name="line121">121: </a>  }
+<a name="line122">122: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line123">123: </a>}
+
+<a name="line125">125: </a><strong><font color="#4169E1"><a name="MPI_Type_get_contents"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Type_get_contents.html#MPI_Type_get_contents">MPI_Type_get_contents</a>(MPI_Datatype datatype, int max_integers, int max_addresses, int max_datatypes, int *array_of_integers, MPI_Aint *array_of_addresses, MPI_Datatype *array_of_datatypes)</font></strong>
+<a name="line126">126: </a>{
+<a name="line127">127: </a>  int comb = datatype &gt;&gt; 28;
+<a name="line128">128: </a>  <font color="#4169E1">switch</font> (comb) {
+<a name="line129">129: </a>  <font color="#4169E1">case</font> MPI_COMBINER_NAMED:
+<a name="line130">130: </a>    <font color="#4169E1">return</font> MPIUni_Abort(MPI_COMM_SELF, 1);
+<a name="line131">131: </a>  <font color="#4169E1">case</font> MPI_COMBINER_DUP:
+<a name="line132">132: </a>    <font color="#4169E1">if</font> (max_datatypes &lt; 1) <font color="#4169E1">return</font> MPIUni_Abort(MPI_COMM_SELF, 1);
+<a name="line133">133: </a>    array_of_datatypes[0] = datatype &amp; 0x0fffffff;
+<a name="line134">134: </a>    <font color="#4169E1">break</font>;
+<a name="line135">135: </a>  <font color="#4169E1">case</font> MPI_COMBINER_CONTIGUOUS:
+<a name="line136">136: </a>    <font color="#4169E1">if</font> (max_integers &lt; 1 || max_datatypes &lt; 1) <font color="#4169E1">return</font> MPIUni_Abort(MPI_COMM_SELF, 1);
+<a name="line137">137: </a>    array_of_integers[0]  = (datatype &gt;&gt; 8) &amp; 0xfff;         <font color="#B22222">/* count */</font>
+<a name="line138">138: </a>    array_of_datatypes[0] = (datatype &amp; 0x0ff000ff) | 0x100; <font color="#B22222">/* basic named type (count=1) from which the contiguous type is derived */</font>
+<a name="line139">139: </a>    <font color="#4169E1">break</font>;
+<a name="line140">140: </a><strong><font color="#FF0000">  default:</font></strong>
+<a name="line141">141: </a>    <font color="#4169E1">return</font> MPIUni_Abort(MPI_COMM_SELF, 1);
+<a name="line142">142: </a>  }
+<a name="line143">143: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line144">144: </a>}
+
+<a name="line146">146: </a><font color="#B22222">/*</font>
+<a name="line147">147: </a><font color="#B22222">   Used to set the built-in MPI_TAG_UB attribute</font>
+<a name="line148">148: </a><font color="#B22222">*/</font>
+<a name="line149">149: </a><strong><font color="#4169E1"><a name="Keyval_setup"></a>static int Keyval_setup(void)</font></strong>
+<a name="line150">150: </a>{
+<a name="line151">151: </a>  attr[CommIdx(MPI_COMM_WORLD)][0].active        = 1;
+<a name="line152">152: </a>  attr[CommIdx(MPI_COMM_WORLD)][0].attribute_val = &amp;mpi_tag_ub;
+<a name="line153">153: </a>  attr[CommIdx(MPI_COMM_SELF)][0].active         = 1;
+<a name="line154">154: </a>  attr[CommIdx(MPI_COMM_SELF)][0].attribute_val  = &amp;mpi_tag_ub;
+<a name="line155">155: </a>  attr_keyval[0].active                          = 1;
+<a name="line156">156: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line157">157: </a>}
+
+<a name="line159">159: </a><strong><font color="#4169E1"><a name="MPI_Comm_create_keyval"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_create_keyval.html#MPI_Comm_create_keyval">MPI_Comm_create_keyval</a>(MPI_Copy_function *copy_fn, MPI_Delete_function *delete_fn, int *keyval, void *extra_state)</font></strong>
+<a name="line160">160: </a>{
+<a name="line161">161: </a>  int i, keyid;
+<a name="line162">162: </a>  <font color="#4169E1">for</font> (i = 1; i &lt; num_attr; i++) { <font color="#B22222">/* the first attribute is always in use */</font>
+<a name="line163">163: </a>    <font color="#4169E1">if</font> (!attr_keyval[i].active) {
+<a name="line164">164: </a>      keyid = i;
+<a name="line165">165: </a>      <font color="#4169E1">goto</font> found;
+<a name="line166">166: </a>    }
+<a name="line167">167: </a>  }
+<a name="line168">168: </a>  <font color="#4169E1">if</font> (num_attr &gt;= MAX_ATTR) <font color="#4169E1">return</font> MPIUni_Abort(MPI_COMM_WORLD, 1);
+<a name="line169">169: </a>  keyid = num_attr++;
+
+<a name="line171">171: </a><strong><font color="#FF0000">found:</font></strong>
+<a name="line172">172: </a>  attr_keyval[keyid].extra_state = extra_state;
+<a name="line173">173: </a>  attr_keyval[keyid].del         = delete_fn;
+<a name="line174">174: </a>  attr_keyval[keyid].active      = 1;
+<a name="line175">175: </a>  *keyval                        = keyid;
+<a name="line176">176: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line177">177: </a>}
+
+<a name="line179">179: </a><font color="#B22222">/*</font>
+<a name="line180">180: </a><font color="#B22222">  The reference counting business is here to guard against the following:</font>
+
+<a name="line182">182: </a><font color="#B22222">  <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_set_attr.html#MPI_Comm_set_attr">MPI_Comm_set_attr</a>(comm, keyval, some_attr);</font>
+<a name="line183">183: </a><font color="#B22222">  <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free_keyval.html#MPI_Comm_free_keyval">MPI_Comm_free_keyval</a>(&amp;keyval);</font>
+<a name="line184">184: </a><font color="#B22222">  <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;comm);</font>
+
+<a name="line186">186: </a><font color="#B22222">  Here <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>() will try to destroy all of the attributes of the comm, and hence we</font>
+<a name="line187">187: </a><font color="#B22222">  should not clear the deleter or extra_state until all communicators that have the attribute</font>
+<a name="line188">188: </a><font color="#B22222">  set are either freed or have given up their attribute.</font>
+
+<a name="line190">190: </a><font color="#B22222">  The attribute reference count is INCREASED in:</font>
+<a name="line191">191: </a><font color="#B22222">  - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_create_keyval.html#MPI_Comm_create_keyval">MPI_Comm_create_keyval</a>()</font>
+<a name="line192">192: </a><font color="#B22222">  - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_set_attr.html#MPI_Comm_set_attr">MPI_Comm_set_attr</a>()</font>
+
+<a name="line194">194: </a><font color="#B22222">  The atrtibute reference count is DECREASED in:</font>
+<a name="line195">195: </a><font color="#B22222">  - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free_keyval.html#MPI_Comm_free_keyval">MPI_Comm_free_keyval</a>()</font>
+<a name="line196">196: </a><font color="#B22222">  - <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_delete_attr.html#MPI_Comm_delete_attr">MPI_Comm_delete_attr</a>() (but only if the comm has the attribute)</font>
+<a name="line197">197: </a><font color="#B22222">*/</font>
+<a name="line198">198: </a><strong><font color="#4169E1"><a name="MPI_Attr_dereference_keyval"></a>static int MPI_Attr_dereference_keyval(int keyval)</font></strong>
+<a name="line199">199: </a>{
+<a name="line200">200: </a>  <font color="#4169E1">if</font> (--(attr_keyval[keyval].active) &lt;= 0) {
+<a name="line201">201: </a>    attr_keyval[keyval].extra_state = 0;
+<a name="line202">202: </a>    attr_keyval[keyval].del         = 0;
+<a name="line203">203: </a>  }
+<a name="line204">204: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line205">205: </a>}
+
+<a name="line207">207: </a><strong><font color="#4169E1"><a name="MPI_Attr_reference_keyval"></a>static int MPI_Attr_reference_keyval(int keyval)</font></strong>
+<a name="line208">208: </a>{
+<a name="line209">209: </a>  ++(attr_keyval[keyval].active);
+<a name="line210">210: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line211">211: </a>}
+
+<a name="line213">213: </a><strong><font color="#4169E1"><a name="MPI_Comm_free_keyval"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free_keyval.html#MPI_Comm_free_keyval">MPI_Comm_free_keyval</a>(int *keyval)</font></strong>
+<a name="line214">214: </a>{
+<a name="line215">215: </a>  int ret;
+
+<a name="line217">217: </a>  <font color="#4169E1">if</font> (*keyval &lt; 0 || *keyval &gt;= num_attr) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line218">218: </a>  <font color="#4169E1">if</font> ((ret = MPI_Attr_dereference_keyval(*keyval))) <font color="#4169E1">return</font> ret;
+<a name="line219">219: </a>  *keyval = 0;
+<a name="line220">220: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line221">221: </a>}
+
+<a name="line223">223: </a><strong><font color="#4169E1"><a name="MPI_Comm_set_attr"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_set_attr.html#MPI_Comm_set_attr">MPI_Comm_set_attr</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int keyval, void *attribute_val)</font></strong>
+<a name="line224">224: </a>{
+<a name="line225">225: </a>  int idx = CommIdx(comm), ret;
+<a name="line226">226: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line227">227: </a>  <font color="#4169E1">if</font> (keyval &lt; 0 || keyval &gt;= num_attr) <font color="#4169E1">return</font> MPI_FAILURE;
+
+<a name="line229">229: </a>  <font color="#4169E1">if</font> ((ret = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_delete_attr.html#MPI_Comm_delete_attr">MPI_Comm_delete_attr</a>(comm, keyval))) <font color="#4169E1">return</font> ret;
+<a name="line230">230: </a>  <font color="#4169E1">if</font> ((ret = MPI_Attr_reference_keyval(keyval))) <font color="#4169E1">return</font> ret;
+<a name="line231">231: </a>  attr[idx][keyval].active        = 1;
+<a name="line232">232: </a>  attr[idx][keyval].attribute_val = attribute_val;
+<a name="line233">233: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line234">234: </a>}
+
+<a name="line236">236: </a><strong><font color="#4169E1"><a name="MPI_Comm_delete_attr"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_delete_attr.html#MPI_Comm_delete_attr">MPI_Comm_delete_attr</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int keyval)</font></strong>
+<a name="line237">237: </a>{
+<a name="line238">238: </a>  int idx = CommIdx(comm);
+<a name="line239">239: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line240">240: </a>  <font color="#4169E1">if</font> (keyval &lt; 0 || keyval &gt;= num_attr) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line241">241: </a>  <font color="#4169E1">if</font> (attr[idx][keyval].active) {
+<a name="line242">242: </a>    int   ret;
+<a name="line243">243: </a>    void *save_attribute_val = attr[idx][keyval].attribute_val;
+
+<a name="line245">245: </a>    attr[idx][keyval].active        = 0;
+<a name="line246">246: </a>    attr[idx][keyval].attribute_val = 0;
+<a name="line247">247: </a>    <font color="#4169E1">if</font> (attr_keyval[keyval].del) {
+<a name="line248">248: </a>      <font color="#4169E1">if</font> ((ret = (*(attr_keyval[keyval].del))(comm, keyval, save_attribute_val, attr_keyval[keyval].extra_state))) <font color="#4169E1">return</font> ret;
+<a name="line249">249: </a>    }
+<a name="line250">250: </a>    <font color="#4169E1">if</font> ((ret = MPI_Attr_dereference_keyval(keyval))) <font color="#4169E1">return</font> ret;
+<a name="line251">251: </a>  }
+<a name="line252">252: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line253">253: </a>}
+
+<a name="line255">255: </a><strong><font color="#4169E1"><a name="MPI_Comm_get_attr"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_get_attr.html#MPI_Comm_get_attr">MPI_Comm_get_attr</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int keyval, void *attribute_val, int *flag)</font></strong>
+<a name="line256">256: </a>{
+<a name="line257">257: </a>  int idx = CommIdx(comm);
+<a name="line258">258: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line259">259: </a>  <font color="#4169E1">if</font> (!keyval) Keyval_setup();
+<a name="line260">260: </a>  *flag                   = attr[idx][keyval].active;
+<a name="line261">261: </a>  *(void **)attribute_val = attr[idx][keyval].attribute_val;
+<a name="line262">262: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line263">263: </a>}
+
+<a name="line265">265: </a>static char all_comm_names[MAX_COMM][MPI_MAX_OBJECT_NAME] = {<font color="#666666">"MPI_COMM_SELF"</font>, <font color="#666666">"MPI_COMM_WORLD"</font>};
+
+<a name="line267">267: </a><strong><font color="#4169E1"><a name="MPI_Comm_get_name"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_get_name.html#MPI_Comm_get_name">MPI_Comm_get_name</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, char *comm_name, int *resultlen)</font></strong>
+<a name="line268">268: </a>{
+<a name="line269">269: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line270">270: </a>  <font color="#4169E1">if</font> (!comm_name || !resultlen) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line271">271: </a>  strncpy(comm_name, all_comm_names[CommIdx(comm)], MPI_MAX_OBJECT_NAME - 1);
+<a name="line272">272: </a>  *resultlen = (int)strlen(comm_name);
+<a name="line273">273: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line274">274: </a>}
+
+<a name="line276">276: </a><strong><font color="#4169E1"><a name="MPI_Comm_set_name"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_set_name.html#MPI_Comm_set_name">MPI_Comm_set_name</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, const char *comm_name)</font></strong>
+<a name="line277">277: </a>{
+<a name="line278">278: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line279">279: </a>  <font color="#4169E1">if</font> (!comm_name) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line280">280: </a>  <font color="#4169E1">if</font> (strlen(comm_name) &gt; MPI_MAX_OBJECT_NAME - 1) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line281">281: </a>  strncpy(all_comm_names[CommIdx(comm)], comm_name, MPI_MAX_OBJECT_NAME - 1);
+<a name="line282">282: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line283">283: </a>}
+
+<a name="line285">285: </a><strong><font color="#4169E1"><a name="MPI_Comm_create"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_create.html#MPI_Comm_create">MPI_Comm_create</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, MPI_Group group, <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *newcomm)</font></strong>
+<a name="line286">286: </a>{
+<a name="line287">287: </a>  int j;
+<a name="line288">288: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line289">289: </a>  <font color="#4169E1">for</font> (j = 3; j &lt;= MaxComm; j++) {
+<a name="line290">290: </a>    <font color="#4169E1">if</font> (!comm_active[CommIdx(j)]) {
+<a name="line291">291: </a>      comm_active[CommIdx(j)] = 1;
+<a name="line292">292: </a>      *newcomm                = j;
+<a name="line293">293: </a>      <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line294">294: </a>    }
+<a name="line295">295: </a>  }
+<a name="line296">296: </a>  <font color="#4169E1">if</font> (MaxComm &gt;= MAX_COMM) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line297">297: </a>  *newcomm                       = ++MaxComm;
+<a name="line298">298: </a>  comm_active[CommIdx(*newcomm)] = 1;
+<a name="line299">299: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line300">300: </a>}
+
+<a name="line302">302: </a><strong><font color="#4169E1"><a name="MPI_Comm_dup"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_dup.html#MPI_Comm_dup">MPI_Comm_dup</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *out)</font></strong>
+<a name="line303">303: </a>{
+<a name="line304">304: </a>  int j;
+<a name="line305">305: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line306">306: </a>  <font color="#4169E1">for</font> (j = 3; j &lt;= MaxComm; j++) {
+<a name="line307">307: </a>    <font color="#4169E1">if</font> (!comm_active[CommIdx(j)]) {
+<a name="line308">308: </a>      comm_active[CommIdx(j)] = 1;
+<a name="line309">309: </a>      *out                    = j;
+<a name="line310">310: </a>      <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line311">311: </a>    }
+<a name="line312">312: </a>  }
+<a name="line313">313: </a>  <font color="#4169E1">if</font> (MaxComm &gt;= MAX_COMM) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line314">314: </a>  *out                       = ++MaxComm;
+<a name="line315">315: </a>  comm_active[CommIdx(*out)] = 1;
+<a name="line316">316: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line317">317: </a>}
+
+<a name="line319">319: </a><strong><font color="#4169E1"><a name="MPI_Comm_free"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm)</font></strong>
+<a name="line320">320: </a>{
+<a name="line321">321: </a>  int idx = CommIdx(*comm);
+
+<a name="line323">323: </a>  <font color="#4169E1">if</font> (*comm &lt; 1 || *comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line324">324: </a>  <font color="#4169E1">for</font> (int i = 0; i &lt; num_attr; i++) {
+<a name="line325">325: </a>    int ret = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_delete_attr.html#MPI_Comm_delete_attr">MPI_Comm_delete_attr</a>(*comm, i);
+
+<a name="line327">327: </a>    <font color="#4169E1">if</font> (ret) <font color="#4169E1">return</font> ret;
+<a name="line328">328: </a>  }
+<a name="line329">329: </a>  <font color="#4169E1">if</font> (*comm &gt;= 3) comm_active[idx] = 0;
+<a name="line330">330: </a>  *comm = 0;
+<a name="line331">331: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line332">332: </a>}
+
+<a name="line334">334: </a><strong><font color="#4169E1"><a name="MPI_Comm_size"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_size.html#MPI_Comm_size">MPI_Comm_size</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int *size)</font></strong>
+<a name="line335">335: </a>{
+<a name="line336">336: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line337">337: </a>  *size = 1;
+<a name="line338">338: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line339">339: </a>}
+
+<a name="line341">341: </a><strong><font color="#4169E1"><a name="MPI_Comm_rank"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int *rank)</font></strong>
+<a name="line342">342: </a>{
+<a name="line343">343: </a>  <font color="#4169E1">if</font> (comm &lt; 1 || comm &gt; MaxComm) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line344">344: </a>  *rank = 0;
+<a name="line345">345: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line346">346: </a>}
+
+<a name="line348">348: </a><strong><font color="#4169E1"><a name="MPIUni_Abort"></a>int MPIUni_Abort(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int errorcode)</font></strong>
+<a name="line349">349: </a>{
+<a name="line350">350: </a>  printf(<font color="#666666">"MPI operation not supported by PETSc's sequential MPI wrappers\n"</font>);
+<a name="line351">351: </a>  <font color="#4169E1">return</font> MPI_ERR_NOSUPPORT;
+<a name="line352">352: </a>}
+
+<a name="line354">354: </a><strong><font color="#4169E1"><a name="MPI_Abort"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Abort.html#MPI_Abort">MPI_Abort</a>(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm, int errorcode)</font></strong>
+<a name="line355">355: </a>{
+<a name="line356">356: </a>  abort();
+<a name="line357">357: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line358">358: </a>}
+
+<a name="line360">360: </a><font color="#B22222">/* --------------------------------------------------------------------------*/</font>
+
+<a name="line362">362: </a>static int MPI_was_initialized = 0;
+<a name="line363">363: </a>static int MPI_was_finalized   = 0;
+
+<a name="line365">365: </a><strong><font color="#4169E1"><a name="MPI_Init"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Init.html#MPI_Init">MPI_Init</a>(int *argc, char ***argv)</font></strong>
+<a name="line366">366: </a>{
+<a name="line367">367: </a>  <font color="#4169E1">if</font> (MPI_was_initialized) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line368">368: </a>  <font color="#B22222">/* MPI standard says "once <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a> returns, no MPI routine (not even <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Init.html#MPI_Init">MPI_Init</a>) may be called", so an MPI standard compliant</font>
+<a name="line369">369: </a><font color="#B22222">     MPIU should have this 'if (MPI_was_finalized) return MPI_FAILURE;' check. We relax it here to make life easier for users</font>
+<a name="line370">370: </a><font color="#B22222">     of MPIU so that they can do multiple <a href="../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>/Finalize().</font>
+<a name="line371">371: </a><font color="#B22222">  */</font>
+<a name="line372">372: </a>  <font color="#B22222">/* if (MPI_was_finalized) return MPI_FAILURE; */</font>
+<a name="line373">373: </a>  MPI_was_initialized = 1;
+<a name="line374">374: </a>  MPI_was_finalized   = 0;
+<a name="line375">375: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line376">376: </a>}
+
+<a name="line378">378: </a><strong><font color="#4169E1"><a name="MPI_Init_thread"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Init_thread.html#MPI_Init_thread">MPI_Init_thread</a>(int *argc, char ***argv, int required, int *provided)</font></strong>
+<a name="line379">379: </a>{
+<a name="line380">380: </a>  <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Query_thread.html#MPI_Query_thread">MPI_Query_thread</a>(provided);
+<a name="line381">381: </a>  <font color="#4169E1">return</font> <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Init.html#MPI_Init">MPI_Init</a>(argc, argv);
+<a name="line382">382: </a>}
+
+<a name="line384">384: </a><strong><font color="#4169E1"><a name="MPI_Query_thread"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Query_thread.html#MPI_Query_thread">MPI_Query_thread</a>(int *provided)</font></strong>
+<a name="line385">385: </a>{
+<a name="line386">386: </a>  *provided = MPI_THREAD_FUNNELED;
+<a name="line387">387: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line388">388: </a>}
+
+<a name="line390">390: </a><strong><font color="#4169E1"><a name="MPI_Finalize"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>(void)</font></strong>
+<a name="line391">391: </a>{
+<a name="line392">392: </a>  <font color="#4169E1">if</font> (MPI_was_finalized || !MPI_was_initialized) <font color="#4169E1">return</font> MPI_FAILURE;
+<a name="line393">393: </a>  <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> comm = MPI_COMM_WORLD;
+<a name="line394">394: </a>  int      ret  = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;comm);
+
+<a name="line396">396: </a>  <font color="#4169E1">if</font> (ret) <font color="#4169E1">return</font> ret;
+<a name="line397">397: </a>  comm = MPI_COMM_SELF;
+<a name="line398">398: </a>  ret  = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_free.html#MPI_Comm_free">MPI_Comm_free</a>(&amp;comm);
+<a name="line399">399: </a>  <font color="#4169E1">if</font> (ret) <font color="#4169E1">return</font> ret;
+<a name="line400">400: </a>  <font color="#4169E1">if</font> (<a href="../../../manualpages/Sys/PetscDefined.html">PetscDefined</a>(USE_DEBUG)) {
+<a name="line401">401: </a>    <font color="#4169E1">for</font> (int i = 3; i &lt;= MaxComm; ++i) {
+<a name="line402">402: </a>      <font color="#4169E1">if</font> (comm_active[CommIdx(i)]) printf(<font color="#666666">"MPIUni warning: MPI communicator %d is not freed before <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>()\n"</font>, i);
+<a name="line403">403: </a>    }
+
+<a name="line405">405: </a>    <font color="#4169E1">for</font> (int i = 1; i &lt;= MaxComm; ++i) {
+<a name="line406">406: </a>      <font color="#4169E1">for</font> (int j = 0; j &lt; num_attr; ++j) {
+<a name="line407">407: </a>        <font color="#4169E1">if</font> (attr[CommIdx(i)][j].active) printf(<font color="#666666">"MPIUni warning: MPI communicator %d attribute %d was not freed before <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>()\n"</font>, i, j);
+<a name="line408">408: </a>      }
+<a name="line409">409: </a>    }
+
+<a name="line411">411: </a>    <font color="#4169E1">for</font> (int i = 1; i &lt; num_attr; ++i) {
+<a name="line412">412: </a>      <font color="#4169E1">if</font> (attr_keyval[i].active) printf(<font color="#666666">"MPIUni warning: MPI attribute %d was not freed before <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>()\n"</font>, i);
+<a name="line413">413: </a>    }
+<a name="line414">414: </a>  }
+
+<a name="line416">416: </a>  <font color="#B22222">/* reset counters */</font>
+<a name="line417">417: </a>  MaxComm             = 2;
+<a name="line418">418: </a>  num_attr            = 1;
+<a name="line419">419: </a>  MPI_was_finalized   = 1;
+<a name="line420">420: </a>  MPI_was_initialized = 0;
+<a name="line421">421: </a>  <a href="../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>    = MPI_COMM_NULL;
+<a name="line422">422: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line423">423: </a>}
+
+<a name="line425">425: </a><strong><font color="#4169E1"><a name="MPI_Initialized"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Initialized.html#MPI_Initialized">MPI_Initialized</a>(int *flag)</font></strong>
+<a name="line426">426: </a>{
+<a name="line427">427: </a>  *flag = MPI_was_initialized;
+<a name="line428">428: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line429">429: </a>}
+
+<a name="line431">431: </a><strong><font color="#4169E1"><a name="MPI_Finalized"></a>int <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalized.html#MPI_Finalized">MPI_Finalized</a>(int *flag)</font></strong>
+<a name="line432">432: </a>{
+<a name="line433">433: </a>  *flag = MPI_was_finalized;
+<a name="line434">434: </a>  <font color="#4169E1">return</font> MPI_SUCCESS;
+<a name="line435">435: </a>}
+
+<a name="line437">437: </a><font color="#B22222">/* -------------------     Fortran versions of several routines ------------------ */</font>
+
+<a name="line439">439: </a><font color="#A020F0">#if defined(PETSC_HAVE_FORTRAN_CAPS)</font>
+<a name="line440">440: </a><strong><font color="#228B22">  #define mpiunisetmoduleblock_         MPIUNISETMODULEBLOCK</font></strong>
+<a name="line441">441: </a><strong><font color="#228B22">  #define mpiunisetfortranbasepointers_ MPIUNISETFORTRANBASEPOINTERS</font></strong>
+<a name="line442">442: </a><strong><font color="#228B22">  #define petsc_mpi_init_               PETSC_MPI_INIT</font></strong>
+<a name="line443">443: </a><strong><font color="#228B22">  #define petsc_mpi_finalize_           PETSC_MPI_FINALIZE</font></strong>
+<a name="line444">444: </a><strong><font color="#228B22">  #define petsc_mpi_comm_size_          PETSC_MPI_COMM_SIZE</font></strong>
+<a name="line445">445: </a><strong><font color="#228B22">  #define petsc_mpi_comm_rank_          PETSC_MPI_COMM_RANK</font></strong>
+<a name="line446">446: </a><strong><font color="#228B22">  #define petsc_mpi_abort_              PETSC_MPI_ABORT</font></strong>
+<a name="line447">447: </a><strong><font color="#228B22">  #define petsc_mpi_reduce_             PETSC_MPI_REDUCE</font></strong>
+<a name="line448">448: </a><strong><font color="#228B22">  #define petsc_mpi_allreduce_          PETSC_MPI_ALLREDUCE</font></strong>
+<a name="line449">449: </a><strong><font color="#228B22">  #define petsc_mpi_barrier_            PETSC_MPI_BARRIER</font></strong>
+<a name="line450">450: </a><strong><font color="#228B22">  #define petsc_mpi_bcast_              PETSC_MPI_BCAST</font></strong>
+<a name="line451">451: </a><strong><font color="#228B22">  #define petsc_mpi_gather_             PETSC_MPI_GATHER</font></strong>
+<a name="line452">452: </a><strong><font color="#228B22">  #define petsc_mpi_allgather_          PETSC_MPI_ALLGATHER</font></strong>
+<a name="line453">453: </a><strong><font color="#228B22">  #define petsc_mpi_comm_split_         PETSC_MPI_COMM_SPLIT</font></strong>
+<a name="line454">454: </a><strong><font color="#228B22">  #define petsc_mpi_scan_               PETSC_MPI_SCAN</font></strong>
+<a name="line455">455: </a><strong><font color="#228B22">  #define petsc_mpi_send_               PETSC_MPI_SEND</font></strong>
+<a name="line456">456: </a><strong><font color="#228B22">  #define petsc_mpi_recv_               PETSC_MPI_RECV</font></strong>
+<a name="line457">457: </a><strong><font color="#228B22">  #define petsc_mpi_reduce_scatter_     PETSC_MPI_REDUCE_SCATTER</font></strong>
+<a name="line458">458: </a><strong><font color="#228B22">  #define petsc_mpi_irecv_              PETSC_MPI_IRECV</font></strong>
+<a name="line459">459: </a><strong><font color="#228B22">  #define petsc_mpi_isend_              PETSC_MPI_ISEND</font></strong>
+<a name="line460">460: </a><strong><font color="#228B22">  #define petsc_mpi_sendrecv_           PETSC_MPI_SENDRECV</font></strong>
+<a name="line461">461: </a><strong><font color="#228B22">  #define petsc_mpi_test_               PETSC_MPI_TEST</font></strong>
+<a name="line462">462: </a><strong><font color="#228B22">  #define petsc_mpi_waitall_            PETSC_MPI_WAITALL</font></strong>
+<a name="line463">463: </a><strong><font color="#228B22">  #define petsc_mpi_waitany_            PETSC_MPI_WAITANY</font></strong>
+<a name="line464">464: </a><strong><font color="#228B22">  #define petsc_mpi_allgatherv_         PETSC_MPI_ALLGATHERV</font></strong>
+<a name="line465">465: </a><strong><font color="#228B22">  #define petsc_mpi_alltoallv_          PETSC_MPI_ALLTOALLV</font></strong>
+<a name="line466">466: </a><strong><font color="#228B22">  #define petsc_mpi_comm_create_        PETSC_MPI_COMM_CREATE</font></strong>
+<a name="line467">467: </a><strong><font color="#228B22">  #define petsc_mpi_address_            PETSC_MPI_ADDRESS</font></strong>
+<a name="line468">468: </a><strong><font color="#228B22">  #define petsc_mpi_pack_               PETSC_MPI_PACK</font></strong>
+<a name="line469">469: </a><strong><font color="#228B22">  #define petsc_mpi_unpack_             PETSC_MPI_UNPACK</font></strong>
+<a name="line470">470: </a><strong><font color="#228B22">  #define petsc_mpi_pack_size_          PETSC_MPI_PACK_SIZE</font></strong>
+<a name="line471">471: </a><strong><font color="#228B22">  #define petsc_mpi_type_struct_        PETSC_MPI_TYPE_STRUCT</font></strong>
+<a name="line472">472: </a><strong><font color="#228B22">  #define petsc_mpi_type_commit_        PETSC_MPI_TYPE_COMMIT</font></strong>
+<a name="line473">473: </a><strong><font color="#228B22">  #define petsc_mpi_wtime_              PETSC_MPI_WTIME</font></strong>
+<a name="line474">474: </a><strong><font color="#228B22">  #define petsc_mpi_cancel_             PETSC_MPI_CANCEL</font></strong>
+<a name="line475">475: </a><strong><font color="#228B22">  #define petsc_mpi_comm_dup_           PETSC_MPI_COMM_DUP</font></strong>
+<a name="line476">476: </a><strong><font color="#228B22">  #define petsc_mpi_comm_free_          PETSC_MPI_COMM_FREE</font></strong>
+<a name="line477">477: </a><strong><font color="#228B22">  #define petsc_mpi_get_count_          PETSC_MPI_GET_COUNT</font></strong>
+<a name="line478">478: </a><strong><font color="#228B22">  #define petsc_mpi_get_processor_name_ PETSC_MPI_GET_PROCESSOR_NAME</font></strong>
+<a name="line479">479: </a><strong><font color="#228B22">  #define petsc_mpi_initialized_        PETSC_MPI_INITIALIZED</font></strong>
+<a name="line480">480: </a><strong><font color="#228B22">  #define petsc_mpi_iprobe_             PETSC_MPI_IPROBE</font></strong>
+<a name="line481">481: </a><strong><font color="#228B22">  #define petsc_mpi_probe_              PETSC_MPI_PROBE</font></strong>
+<a name="line482">482: </a><strong><font color="#228B22">  #define petsc_mpi_request_free_       PETSC_MPI_REQUEST_FREE</font></strong>
+<a name="line483">483: </a><strong><font color="#228B22">  #define petsc_mpi_ssend_              PETSC_MPI_SSEND</font></strong>
+<a name="line484">484: </a><strong><font color="#228B22">  #define petsc_mpi_wait_               PETSC_MPI_WAIT</font></strong>
+<a name="line485">485: </a><strong><font color="#228B22">  #define petsc_mpi_comm_group_         PETSC_MPI_COMM_GROUP</font></strong>
+<a name="line486">486: </a><strong><font color="#228B22">  #define petsc_mpi_exscan_             PETSC_MPI_EXSCAN</font></strong>
+<a name="line487">487: </a><font color="#A020F0">#elif !defined(PETSC_HAVE_FORTRAN_UNDERSCORE)</font>
+<a name="line488">488: </a><strong><font color="#228B22">  #define mpiunisetmoduleblock_         mpiunisetmoduleblock</font></strong>
+<a name="line489">489: </a><strong><font color="#228B22">  #define mpiunisetfortranbasepointers_ mpiunisetfortranbasepointers</font></strong>
+<a name="line490">490: </a><strong><font color="#228B22">  #define petsc_mpi_init_               petsc_mpi_init</font></strong>
+<a name="line491">491: </a><strong><font color="#228B22">  #define petsc_mpi_finalize_           petsc_mpi_finalize</font></strong>
+<a name="line492">492: </a><strong><font color="#228B22">  #define petsc_mpi_comm_size_          petsc_mpi_comm_size</font></strong>
+<a name="line493">493: </a><strong><font color="#228B22">  #define petsc_mpi_comm_rank_          petsc_mpi_comm_rank</font></strong>
+<a name="line494">494: </a><strong><font color="#228B22">  #define petsc_mpi_abort_              petsc_mpi_abort</font></strong>
+<a name="line495">495: </a><strong><font color="#228B22">  #define petsc_mpi_reduce_             petsc_mpi_reduce</font></strong>
+<a name="line496">496: </a><strong><font color="#228B22">  #define petsc_mpi_allreduce_          petsc_mpi_allreduce</font></strong>
+<a name="line497">497: </a><strong><font color="#228B22">  #define petsc_mpi_barrier_            petsc_mpi_barrier</font></strong>
+<a name="line498">498: </a><strong><font color="#228B22">  #define petsc_mpi_bcast_              petsc_mpi_bcast</font></strong>
+<a name="line499">499: </a><strong><font color="#228B22">  #define petsc_mpi_gather_             petsc_mpi_gather</font></strong>
+<a name="line500">500: </a><strong><font color="#228B22">  #define petsc_mpi_allgather_          petsc_mpi_allgather</font></strong>
+<a name="line501">501: </a><strong><font color="#228B22">  #define petsc_mpi_comm_split_         petsc_mpi_comm_split</font></strong>
+<a name="line502">502: </a><strong><font color="#228B22">  #define petsc_mpi_scan_               petsc_mpi_scan</font></strong>
+<a name="line503">503: </a><strong><font color="#228B22">  #define petsc_mpi_send_               petsc_mpi_send</font></strong>
+<a name="line504">504: </a><strong><font color="#228B22">  #define petsc_mpi_recv_               petsc_mpi_recv</font></strong>
+<a name="line505">505: </a><strong><font color="#228B22">  #define petsc_mpi_reduce_scatter_     petsc_mpi_reduce_scatter</font></strong>
+<a name="line506">506: </a><strong><font color="#228B22">  #define petsc_mpi_irecv_              petsc_mpi_irecv</font></strong>
+<a name="line507">507: </a><strong><font color="#228B22">  #define petsc_mpi_isend_              petsc_mpi_isend</font></strong>
+<a name="line508">508: </a><strong><font color="#228B22">  #define petsc_mpi_sendrecv_           petsc_mpi_sendrecv</font></strong>
+<a name="line509">509: </a><strong><font color="#228B22">  #define petsc_mpi_test_               petsc_mpi_test</font></strong>
+<a name="line510">510: </a><strong><font color="#228B22">  #define petsc_mpi_waitall_            petsc_mpi_waitall</font></strong>
+<a name="line511">511: </a><strong><font color="#228B22">  #define petsc_mpi_waitany_            petsc_mpi_waitany</font></strong>
+<a name="line512">512: </a><strong><font color="#228B22">  #define petsc_mpi_allgatherv_         petsc_mpi_allgatherv</font></strong>
+<a name="line513">513: </a><strong><font color="#228B22">  #define petsc_mpi_alltoallv_          petsc_mpi_alltoallv</font></strong>
+<a name="line514">514: </a><strong><font color="#228B22">  #define petsc_mpi_comm_create_        petsc_mpi_comm_create</font></strong>
+<a name="line515">515: </a><strong><font color="#228B22">  #define petsc_mpi_address_            petsc_mpi_address</font></strong>
+<a name="line516">516: </a><strong><font color="#228B22">  #define petsc_mpi_pack_               petsc_mpi_pack</font></strong>
+<a name="line517">517: </a><strong><font color="#228B22">  #define petsc_mpi_unpack_             petsc_mpi_unpack</font></strong>
+<a name="line518">518: </a><strong><font color="#228B22">  #define petsc_mpi_pack_size_          petsc_mpi_pack_size</font></strong>
+<a name="line519">519: </a><strong><font color="#228B22">  #define petsc_mpi_type_struct_        petsc_mpi_type_struct</font></strong>
+<a name="line520">520: </a><strong><font color="#228B22">  #define petsc_mpi_type_commit_        petsc_mpi_type_commit</font></strong>
+<a name="line521">521: </a><strong><font color="#228B22">  #define petsc_mpi_wtime_              petsc_mpi_wtime</font></strong>
+<a name="line522">522: </a><strong><font color="#228B22">  #define petsc_mpi_cancel_             petsc_mpi_cancel</font></strong>
+<a name="line523">523: </a><strong><font color="#228B22">  #define petsc_mpi_comm_dup_           petsc_mpi_comm_dup</font></strong>
+<a name="line524">524: </a><strong><font color="#228B22">  #define petsc_mpi_comm_free_          petsc_mpi_comm_free</font></strong>
+<a name="line525">525: </a><strong><font color="#228B22">  #define petsc_mpi_get_count_          petsc_mpi_get_count</font></strong>
+<a name="line526">526: </a><strong><font color="#228B22">  #define petsc_mpi_get_processor_name_ petsc_mpi_get_processor_name</font></strong>
+<a name="line527">527: </a><strong><font color="#228B22">  #define petsc_mpi_initialized_        petsc_mpi_initialized</font></strong>
+<a name="line528">528: </a><strong><font color="#228B22">  #define petsc_mpi_iprobe_             petsc_mpi_iprobe</font></strong>
+<a name="line529">529: </a><strong><font color="#228B22">  #define petsc_mpi_probe_              petsc_mpi_probe</font></strong>
+<a name="line530">530: </a><strong><font color="#228B22">  #define petsc_mpi_request_free_       petsc_mpi_request_free</font></strong>
+<a name="line531">531: </a><strong><font color="#228B22">  #define petsc_mpi_ssend_              petsc_mpi_ssend</font></strong>
+<a name="line532">532: </a><strong><font color="#228B22">  #define petsc_mpi_wait_               petsc_mpi_wait</font></strong>
+<a name="line533">533: </a><strong><font color="#228B22">  #define petsc_mpi_comm_group_         petsc_mpi_comm_group</font></strong>
+<a name="line534">534: </a><strong><font color="#228B22">  #define petsc_mpi_exscan_             petsc_mpi_exscan</font></strong>
+<a name="line535">535: </a><font color="#A020F0">#endif</font>
+
+<a name="line537">537: </a><font color="#A020F0">#if defined(PETSC_HAVE_FORTRAN_UNDERSCORE_UNDERSCORE)</font>
+<a name="line538">538: </a><strong><font color="#228B22">  #define petsc_mpi_init_               petsc_mpi_init__</font></strong>
+<a name="line539">539: </a><strong><font color="#228B22">  #define petsc_mpi_finalize_           petsc_mpi_finalize__</font></strong>
+<a name="line540">540: </a><strong><font color="#228B22">  #define petsc_mpi_comm_size_          petsc_mpi_comm_size__</font></strong>
+<a name="line541">541: </a><strong><font color="#228B22">  #define petsc_mpi_comm_rank_          petsc_mpi_comm_rank__</font></strong>
+<a name="line542">542: </a><strong><font color="#228B22">  #define petsc_mpi_abort_              petsc_mpi_abort__</font></strong>
+<a name="line543">543: </a><strong><font color="#228B22">  #define petsc_mpi_reduce_             petsc_mpi_reduce__</font></strong>
+<a name="line544">544: </a><strong><font color="#228B22">  #define petsc_mpi_allreduce_          petsc_mpi_allreduce__</font></strong>
+<a name="line545">545: </a><strong><font color="#228B22">  #define petsc_mpi_barrier_            petsc_mpi_barrier__</font></strong>
+<a name="line546">546: </a><strong><font color="#228B22">  #define petsc_mpi_bcast_              petsc_mpi_bcast__</font></strong>
+<a name="line547">547: </a><strong><font color="#228B22">  #define petsc_mpi_gather_             petsc_mpi_gather__</font></strong>
+<a name="line548">548: </a><strong><font color="#228B22">  #define petsc_mpi_allgather_          petsc_mpi_allgather__</font></strong>
+<a name="line549">549: </a><strong><font color="#228B22">  #define petsc_mpi_comm_split_         petsc_mpi_comm_split__</font></strong>
+<a name="line550">550: </a><strong><font color="#228B22">  #define petsc_mpi_scan_               petsc_mpi_scan__</font></strong>
+<a name="line551">551: </a><strong><font color="#228B22">  #define petsc_mpi_send_               petsc_mpi_send__</font></strong>
+<a name="line552">552: </a><strong><font color="#228B22">  #define petsc_mpi_recv_               petsc_mpi_recv__</font></strong>
+<a name="line553">553: </a><strong><font color="#228B22">  #define petsc_mpi_reduce_scatter_     petsc_mpi_reduce_scatter__</font></strong>
+<a name="line554">554: </a><strong><font color="#228B22">  #define petsc_mpi_irecv_              petsc_mpi_irecv__</font></strong>
+<a name="line555">555: </a><strong><font color="#228B22">  #define petsc_mpi_isend_              petsc_mpi_isend__</font></strong>
+<a name="line556">556: </a><strong><font color="#228B22">  #define petsc_mpi_sendrecv_           petsc_mpi_sendrecv__</font></strong>
+<a name="line557">557: </a><strong><font color="#228B22">  #define petsc_mpi_test_               petsc_mpi_test__</font></strong>
+<a name="line558">558: </a><strong><font color="#228B22">  #define petsc_mpi_waitall_            petsc_mpi_waitall__</font></strong>
+<a name="line559">559: </a><strong><font color="#228B22">  #define petsc_mpi_waitany_            petsc_mpi_waitany__</font></strong>
+<a name="line560">560: </a><strong><font color="#228B22">  #define petsc_mpi_allgatherv_         petsc_mpi_allgatherv__</font></strong>
+<a name="line561">561: </a><strong><font color="#228B22">  #define petsc_mpi_alltoallv_          petsc_mpi_alltoallv__</font></strong>
+<a name="line562">562: </a><strong><font color="#228B22">  #define petsc_mpi_comm_create_        petsc_mpi_comm_create__</font></strong>
+<a name="line563">563: </a><strong><font color="#228B22">  #define petsc_mpi_address_            petsc_mpi_address__</font></strong>
+<a name="line564">564: </a><strong><font color="#228B22">  #define petsc_mpi_pack_               petsc_mpi_pack__</font></strong>
+<a name="line565">565: </a><strong><font color="#228B22">  #define petsc_mpi_unpack_             petsc_mpi_unpack__</font></strong>
+<a name="line566">566: </a><strong><font color="#228B22">  #define petsc_mpi_pack_size_          petsc_mpi_pack_size__</font></strong>
+<a name="line567">567: </a><strong><font color="#228B22">  #define petsc_mpi_type_struct_        petsc_mpi_type_struct__</font></strong>
+<a name="line568">568: </a><strong><font color="#228B22">  #define petsc_mpi_type_commit_        petsc_mpi_type_commit__</font></strong>
+<a name="line569">569: </a><strong><font color="#228B22">  #define petsc_mpi_wtime_              petsc_mpi_wtime__</font></strong>
+<a name="line570">570: </a><strong><font color="#228B22">  #define petsc_mpi_cancel_             petsc_mpi_cancel__</font></strong>
+<a name="line571">571: </a><strong><font color="#228B22">  #define petsc_mpi_comm_dup_           petsc_mpi_comm_dup__</font></strong>
+<a name="line572">572: </a><strong><font color="#228B22">  #define petsc_mpi_comm_free_          petsc_mpi_comm_free__</font></strong>
+<a name="line573">573: </a><strong><font color="#228B22">  #define petsc_mpi_get_count_          petsc_mpi_get_count__</font></strong>
+<a name="line574">574: </a><strong><font color="#228B22">  #define petsc_mpi_get_processor_name_ petsc_mpi_get_processor_name__</font></strong>
+<a name="line575">575: </a><strong><font color="#228B22">  #define petsc_mpi_initialized_        petsc_mpi_initialized__</font></strong>
+<a name="line576">576: </a><strong><font color="#228B22">  #define petsc_mpi_iprobe_             petsc_mpi_iprobe__</font></strong>
+<a name="line577">577: </a><strong><font color="#228B22">  #define petsc_mpi_probe_              petsc_mpi_probe__</font></strong>
+<a name="line578">578: </a><strong><font color="#228B22">  #define petsc_mpi_request_free_       petsc_mpi_request_free__</font></strong>
+<a name="line579">579: </a><strong><font color="#228B22">  #define petsc_mpi_ssend_              petsc_mpi_ssend__</font></strong>
+<a name="line580">580: </a><strong><font color="#228B22">  #define petsc_mpi_wait_               petsc_mpi_wait__</font></strong>
+<a name="line581">581: </a><strong><font color="#228B22">  #define petsc_mpi_comm_group_         petsc_mpi_comm_group__</font></strong>
+<a name="line582">582: </a><strong><font color="#228B22">  #define petsc_mpi_exscan_             petsc_mpi_exscan__</font></strong>
+<a name="line583">583: </a><font color="#A020F0">#endif</font>
+
+<a name="line585">585: </a><font color="#B22222">/* Do not build fortran interface if MPI namespace collision is to be avoided */</font>
+<a name="line586">586: </a><font color="#A020F0">#if defined(PETSC_HAVE_FORTRAN)</font>
+
+<a name="line588">588: </a><strong><font color="#4169E1">PETSC_EXTERN void mpiunisetmoduleblock_(void)</font></strong>;
+
+<a name="line590">590: </a><strong><font color="#4169E1"><a name="mpiunisetfortranbasepointers_"></a>PETSC_EXTERN void mpiunisetfortranbasepointers_(void *f_mpi_in_place)</font></strong>
+<a name="line591">591: </a>{
+<a name="line592">592: </a>  MPIUNIF_mpi_in_place = f_mpi_in_place;
+<a name="line593">593: </a>}
+
+<a name="line595">595: </a><strong><font color="#4169E1"><a name="petsc_mpi_init_"></a>PETSC_EXTERN void petsc_mpi_init_(int *ierr)</font></strong>
+<a name="line596">596: </a>{
+<a name="line597">597: </a>  mpiunisetmoduleblock_();
+<a name="line598">598: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Init.html#MPI_Init">MPI_Init</a>((int *)0, (char ***)0);
+<a name="line599">599: </a>}
+
+<a name="line601">601: </a><strong><font color="#4169E1"><a name="petsc_mpi_finalize_"></a>PETSC_EXTERN void petsc_mpi_finalize_(int *ierr)</font></strong>
+<a name="line602">602: </a>{
+<a name="line603">603: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Finalize.html#MPI_Finalize">MPI_Finalize</a>();
+<a name="line604">604: </a>}
+
+<a name="line606">606: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_size_"></a>PETSC_EXTERN void petsc_mpi_comm_size_(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm, int *size, int *ierr)</font></strong>
+<a name="line607">607: </a>{
+<a name="line608">608: </a>  *size = 1;
+<a name="line609">609: </a>  *ierr = 0;
+<a name="line610">610: </a>}
+
+<a name="line612">612: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_rank_"></a>PETSC_EXTERN void petsc_mpi_comm_rank_(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm, int *rank, int *ierr)</font></strong>
+<a name="line613">613: </a>{
+<a name="line614">614: </a>  *rank = 0;
+<a name="line615">615: </a>  *ierr = MPI_SUCCESS;
+<a name="line616">616: </a>}
+
+<a name="line618">618: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_split_"></a>PETSC_EXTERN void petsc_mpi_comm_split_(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm, int *color, int *key, <a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *newcomm, int *ierr)</font></strong>
+<a name="line619">619: </a>{
+<a name="line620">620: </a>  *newcomm = *comm;
+<a name="line621">621: </a>  *ierr    = MPI_SUCCESS;
+<a name="line622">622: </a>}
+
+<a name="line624">624: </a><strong><font color="#4169E1"><a name="petsc_mpi_abort_"></a>PETSC_EXTERN void petsc_mpi_abort_(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm, int *errorcode, int *ierr)</font></strong>
+<a name="line625">625: </a>{
+<a name="line626">626: </a>  abort();
+<a name="line627">627: </a>  *ierr = MPI_SUCCESS;
+<a name="line628">628: </a>}
+
+<a name="line630">630: </a><strong><font color="#4169E1"><a name="petsc_mpi_reduce_"></a>PETSC_EXTERN void petsc_mpi_reduce_(void *sendbuf, void *recvbuf, int *count, int *datatype, int *op, int *root, int *comm, int *ierr)</font></strong>
+<a name="line631">631: </a>{
+<a name="line632">632: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Reduce.html#MPI_Reduce">MPI_Reduce</a>(sendbuf, recvbuf, *count, *datatype, *op, *root, *comm);
+<a name="line633">633: </a>}
+
+<a name="line635">635: </a><strong><font color="#4169E1"><a name="petsc_mpi_allreduce_"></a>PETSC_EXTERN void petsc_mpi_allreduce_(void *sendbuf, void *recvbuf, int *count, int *datatype, int *op, int *comm, int *ierr)</font></strong>
+<a name="line636">636: </a>{
+<a name="line637">637: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allreduce.html#MPI_Allreduce">MPI_Allreduce</a>(sendbuf, recvbuf, *count, *datatype, *op, *comm);
+<a name="line638">638: </a>}
+
+<a name="line640">640: </a><strong><font color="#4169E1"><a name="petsc_mpi_barrier_"></a>PETSC_EXTERN void petsc_mpi_barrier_(<a href="../../../manualpages/Sys/MPI_Comm.html">MPI_Comm</a> *comm, int *ierr)</font></strong>
+<a name="line641">641: </a>{
+<a name="line642">642: </a>  *ierr = MPI_SUCCESS;
+<a name="line643">643: </a>}
+
+<a name="line645">645: </a><strong><font color="#4169E1"><a name="petsc_mpi_bcast_"></a>PETSC_EXTERN void petsc_mpi_bcast_(void *buf, int *count, int *datatype, int *root, int *comm, int *ierr)</font></strong>
+<a name="line646">646: </a>{
+<a name="line647">647: </a>  *ierr = MPI_SUCCESS;
+<a name="line648">648: </a>}
+
+<a name="line650">650: </a><strong><font color="#4169E1"><a name="petsc_mpi_gather_"></a>PETSC_EXTERN void petsc_mpi_gather_(void *sendbuf, int *scount, int *sdatatype, void *recvbuf, int *rcount, int *rdatatype, int *root, int *comm, int *ierr)</font></strong>
+<a name="line651">651: </a>{
+<a name="line652">652: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Gather.html#MPI_Gather">MPI_Gather</a>(sendbuf, *scount, *sdatatype, recvbuf, rcount, rdatatype, *root, *comm);
+<a name="line653">653: </a>}
+
+<a name="line655">655: </a><strong><font color="#4169E1"><a name="petsc_mpi_allgather_"></a>PETSC_EXTERN void petsc_mpi_allgather_(void *sendbuf, int *scount, int *sdatatype, void *recvbuf, int *rcount, int *rdatatype, int *comm, int *ierr)</font></strong>
+<a name="line656">656: </a>{
+<a name="line657">657: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allgather.html#MPI_Allgather">MPI_Allgather</a>(sendbuf, *scount, *sdatatype, recvbuf, rcount, rdatatype, *comm);
+<a name="line658">658: </a>}
+
+<a name="line660">660: </a><strong><font color="#4169E1"><a name="petsc_mpi_scan_"></a>PETSC_EXTERN void petsc_mpi_scan_(void *sendbuf, void *recvbuf, int *count, int *datatype, int *op, int *comm, int *ierr)</font></strong>
+<a name="line661">661: </a>{
+<a name="line662">662: </a>  *ierr = MPIUNI_Memcpy(recvbuf, sendbuf, (*count) * MPI_sizeof(*datatype));
+<a name="line663">663: </a>}
+
+<a name="line665">665: </a><strong><font color="#4169E1"><a name="petsc_mpi_send_"></a>PETSC_EXTERN void petsc_mpi_send_(void *buf, int *count, int *datatype, int *dest, int *tag, int *comm, int *ierr)</font></strong>
+<a name="line666">666: </a>{
+<a name="line667">667: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line668">668: </a>}
+
+<a name="line670">670: </a><strong><font color="#4169E1"><a name="petsc_mpi_recv_"></a>PETSC_EXTERN void petsc_mpi_recv_(void *buf, int *count, int *datatype, int *source, int *tag, int *comm, int status, int *ierr)</font></strong>
+<a name="line671">671: </a>{
+<a name="line672">672: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line673">673: </a>}
+
+<a name="line675">675: </a><strong><font color="#4169E1"><a name="petsc_mpi_reduce_scatter_"></a>PETSC_EXTERN void petsc_mpi_reduce_scatter_(void *sendbuf, void *recvbuf, int *recvcounts, int *datatype, int *op, int *comm, int *ierr)</font></strong>
+<a name="line676">676: </a>{
+<a name="line677">677: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line678">678: </a>}
+
+<a name="line680">680: </a><strong><font color="#4169E1"><a name="petsc_mpi_irecv_"></a>PETSC_EXTERN void petsc_mpi_irecv_(void *buf, int *count, int *datatype, int *source, int *tag, int *comm, int *request, int *ierr)</font></strong>
+<a name="line681">681: </a>{
+<a name="line682">682: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line683">683: </a>}
+
+<a name="line685">685: </a><strong><font color="#4169E1"><a name="petsc_mpi_isend_"></a>PETSC_EXTERN void petsc_mpi_isend_(void *buf, int *count, int *datatype, int *dest, int *tag, int *comm, int *request, int *ierr)</font></strong>
+<a name="line686">686: </a>{
+<a name="line687">687: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line688">688: </a>}
+
+<a name="line690">690: </a><strong><font color="#4169E1"><a name="petsc_mpi_sendrecv_"></a>PETSC_EXTERN void petsc_mpi_sendrecv_(void *sendbuf, int *sendcount, int *sendtype, int *dest, int *sendtag, void *recvbuf, int *recvcount, int *recvtype, int *source, int *recvtag, int *comm, int *status, int *ierr)</font></strong>
+<a name="line691">691: </a>{
+<a name="line692">692: </a>  *ierr = MPIUNI_Memcpy(recvbuf, sendbuf, (*sendcount) * MPI_sizeof(*sendtype));
+<a name="line693">693: </a>}
+
+<a name="line695">695: </a><strong><font color="#4169E1"><a name="petsc_mpi_test_"></a>PETSC_EXTERN void petsc_mpi_test_(int *request, int *flag, int *status, int *ierr)</font></strong>
+<a name="line696">696: </a>{
+<a name="line697">697: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line698">698: </a>}
+
+<a name="line700">700: </a><strong><font color="#4169E1"><a name="petsc_mpi_waitall_"></a>PETSC_EXTERN void petsc_mpi_waitall_(int *count, int *array_of_requests, int *array_of_statuses, int *ierr)</font></strong>
+<a name="line701">701: </a>{
+<a name="line702">702: </a>  *ierr = MPI_SUCCESS;
+<a name="line703">703: </a>}
+
+<a name="line705">705: </a><strong><font color="#4169E1"><a name="petsc_mpi_waitany_"></a>PETSC_EXTERN void petsc_mpi_waitany_(int *count, int *array_of_requests, int *index, int *status, int *ierr)</font></strong>
+<a name="line706">706: </a>{
+<a name="line707">707: </a>  *ierr = MPI_SUCCESS;
+<a name="line708">708: </a>}
+
+<a name="line710">710: </a><strong><font color="#4169E1"><a name="petsc_mpi_allgatherv_"></a>PETSC_EXTERN void petsc_mpi_allgatherv_(void *sendbuf, int *sendcount, int *sendtype, void *recvbuf, int *recvcounts, int *displs, int *recvtype, int *comm, int *ierr)</font></strong>
+<a name="line711">711: </a>{
+<a name="line712">712: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Allgatherv.html#MPI_Allgatherv">MPI_Allgatherv</a>(sendbuf, *sendcount, *sendtype, recvbuf, recvcounts, displs, *recvtype, *comm);
+<a name="line713">713: </a>}
+
+<a name="line715">715: </a><strong><font color="#4169E1"><a name="petsc_mpi_alltoallv_"></a>PETSC_EXTERN void petsc_mpi_alltoallv_(void *sendbuf, int *sendcounts, int *sdispls, int *sendtype, void *recvbuf, int *recvcounts, int *rdispls, int *recvtype, int *comm, int *ierr)</font></strong>
+<a name="line716">716: </a>{
+<a name="line717">717: </a>  *ierr = <a href="http://www.mpich.org/static/docs/latest/www3/MPI_Alltoallv.html#MPI_Alltoallv">MPI_Alltoallv</a>(sendbuf, sendcounts, sdispls, *sendtype, recvbuf, recvcounts, rdispls, *recvtype, *comm);
+<a name="line718">718: </a>}
+
+<a name="line720">720: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_create_"></a>PETSC_EXTERN void petsc_mpi_comm_create_(int *comm, int *group, int *newcomm, int *ierr)</font></strong>
+<a name="line721">721: </a>{
+<a name="line722">722: </a>  *newcomm = *comm;
+<a name="line723">723: </a>  *ierr    = MPI_SUCCESS;
+<a name="line724">724: </a>}
+
+<a name="line726">726: </a><strong><font color="#4169E1"><a name="petsc_mpi_address_"></a>PETSC_EXTERN void petsc_mpi_address_(void *location, MPI_Aint *address, int *ierr)</font></strong>
+<a name="line727">727: </a>{
+<a name="line728">728: </a>  *address = (MPI_Aint)((char *)location);
+<a name="line729">729: </a>  *ierr    = MPI_SUCCESS;
+<a name="line730">730: </a>}
+
+<a name="line732">732: </a><strong><font color="#4169E1"><a name="petsc_mpi_pack_"></a>PETSC_EXTERN void petsc_mpi_pack_(void *inbuf, int *incount, int *datatype, void *outbuf, int *outsize, int *position, int *comm, int *ierr)</font></strong>
+<a name="line733">733: </a>{
+<a name="line734">734: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line735">735: </a>}
+
+<a name="line737">737: </a><strong><font color="#4169E1"><a name="petsc_mpi_unpack_"></a>PETSC_EXTERN void petsc_mpi_unpack_(void *inbuf, int *insize, int *position, void *outbuf, int *outcount, int *datatype, int *comm, int *ierr)</font></strong>
+<a name="line738">738: </a>{
+<a name="line739">739: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line740">740: </a>}
+
+<a name="line742">742: </a><strong><font color="#4169E1"><a name="petsc_mpi_pack_size_"></a>PETSC_EXTERN void petsc_mpi_pack_size_(int *incount, int *datatype, int *comm, int *size, int *ierr)</font></strong>
+<a name="line743">743: </a>{
+<a name="line744">744: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line745">745: </a>}
+
+<a name="line747">747: </a><strong><font color="#4169E1"><a name="petsc_mpi_type_struct_"></a>PETSC_EXTERN void petsc_mpi_type_struct_(int *count, int *array_of_blocklengths, int *array_of_displaments, int *array_of_types, int *newtype, int *ierr)</font></strong>
+<a name="line748">748: </a>{
+<a name="line749">749: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line750">750: </a>}
+
+<a name="line752">752: </a><strong><font color="#4169E1"><a name="petsc_mpi_type_commit_"></a>PETSC_EXTERN void petsc_mpi_type_commit_(int *datatype, int *ierr)</font></strong>
+<a name="line753">753: </a>{
+<a name="line754">754: </a>  *ierr = MPI_SUCCESS;
+<a name="line755">755: </a>}
+
+<a name="line757">757: </a><strong><font color="#4169E1"><a name="petsc_mpi_wtime_"></a>double petsc_mpi_wtime_(void)</font></strong>
+<a name="line758">758: </a>{
+<a name="line759">759: </a>  <font color="#4169E1">return</font> 0.0;
+<a name="line760">760: </a>}
+
+<a name="line762">762: </a><strong><font color="#4169E1"><a name="petsc_mpi_cancel_"></a>PETSC_EXTERN void petsc_mpi_cancel_(int *request, int *ierr)</font></strong>
+<a name="line763">763: </a>{
+<a name="line764">764: </a>  *ierr = MPI_SUCCESS;
+<a name="line765">765: </a>}
+
+<a name="line767">767: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_dup_"></a>PETSC_EXTERN void petsc_mpi_comm_dup_(int *comm, int *out, int *ierr)</font></strong>
+<a name="line768">768: </a>{
+<a name="line769">769: </a>  *out  = *comm;
+<a name="line770">770: </a>  *ierr = MPI_SUCCESS;
+<a name="line771">771: </a>}
+
+<a name="line773">773: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_free_"></a>PETSC_EXTERN void petsc_mpi_comm_free_(int *comm, int *ierr)</font></strong>
+<a name="line774">774: </a>{
+<a name="line775">775: </a>  *ierr = MPI_SUCCESS;
+<a name="line776">776: </a>}
+
+<a name="line778">778: </a><strong><font color="#4169E1"><a name="petsc_mpi_get_count_"></a>PETSC_EXTERN void petsc_mpi_get_count_(int *status, int *datatype, int *count, int *ierr)</font></strong>
+<a name="line779">779: </a>{
+<a name="line780">780: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line781">781: </a>}
+
+<a name="line783">783: </a><strong><font color="#4169E1"><a name="petsc_mpi_get_processor_name_"></a>PETSC_EXTERN void petsc_mpi_get_processor_name_(char *name, int *result_len, int *ierr, PETSC_FORTRAN_CHARLEN_T len)</font></strong>
+<a name="line784">784: </a>{
+<a name="line785">785: </a>  MPIUNI_Memcpy(name, <font color="#666666">"localhost"</font>, 9 * <font color="#4169E1">sizeof</font>(char));
+<a name="line786">786: </a>  *result_len = 9;
+<a name="line787">787: </a>  *ierr       = MPI_SUCCESS;
+<a name="line788">788: </a>}
+
+<a name="line790">790: </a><strong><font color="#4169E1"><a name="petsc_mpi_initialized_"></a>PETSC_EXTERN void petsc_mpi_initialized_(int *flag, int *ierr)</font></strong>
+<a name="line791">791: </a>{
+<a name="line792">792: </a>  *flag = MPI_was_initialized;
+<a name="line793">793: </a>  *ierr = MPI_SUCCESS;
+<a name="line794">794: </a>}
+
+<a name="line796">796: </a><strong><font color="#4169E1"><a name="petsc_mpi_iprobe_"></a>PETSC_EXTERN void petsc_mpi_iprobe_(int *source, int *tag, int *comm, int *glag, int *status, int *ierr)</font></strong>
+<a name="line797">797: </a>{
+<a name="line798">798: </a>  *ierr = MPI_SUCCESS;
+<a name="line799">799: </a>}
+
+<a name="line801">801: </a><strong><font color="#4169E1"><a name="petsc_mpi_probe_"></a>PETSC_EXTERN void petsc_mpi_probe_(int *source, int *tag, int *comm, int *flag, int *status, int *ierr)</font></strong>
+<a name="line802">802: </a>{
+<a name="line803">803: </a>  *ierr = MPI_SUCCESS;
+<a name="line804">804: </a>}
+
+<a name="line806">806: </a><strong><font color="#4169E1"><a name="petsc_mpi_request_free_"></a>PETSC_EXTERN void petsc_mpi_request_free_(int *request, int *ierr)</font></strong>
+<a name="line807">807: </a>{
+<a name="line808">808: </a>  *ierr = MPI_SUCCESS;
+<a name="line809">809: </a>}
+
+<a name="line811">811: </a><strong><font color="#4169E1"><a name="petsc_mpi_ssend_"></a>PETSC_EXTERN void petsc_mpi_ssend_(void *buf, int *count, int *datatype, int *dest, int *tag, int *comm, int *ierr)</font></strong>
+<a name="line812">812: </a>{
+<a name="line813">813: </a>  *ierr = MPIUni_Abort(MPI_COMM_WORLD, 0);
+<a name="line814">814: </a>}
+
+<a name="line816">816: </a><strong><font color="#4169E1"><a name="petsc_mpi_wait_"></a>PETSC_EXTERN void petsc_mpi_wait_(int *request, int *status, int *ierr)</font></strong>
+<a name="line817">817: </a>{
+<a name="line818">818: </a>  *ierr = MPI_SUCCESS;
+<a name="line819">819: </a>}
+
+<a name="line821">821: </a><strong><font color="#4169E1"><a name="petsc_mpi_comm_group_"></a>PETSC_EXTERN void petsc_mpi_comm_group_(int *comm, int *group, int *ierr)</font></strong>
+<a name="line822">822: </a>{
+<a name="line823">823: </a>  *ierr = MPI_SUCCESS;
+<a name="line824">824: </a>}
+
+<a name="line826">826: </a><strong><font color="#4169E1"><a name="petsc_mpi_exscan_"></a>PETSC_EXTERN void petsc_mpi_exscan_(void *sendbuf, void *recvbuf, int *count, int *datatype, int *op, int *comm, int *ierr)</font></strong>
+<a name="line827">827: </a>{
+<a name="line828">828: </a>  *ierr = MPI_SUCCESS;
+<a name="line829">829: </a>}
+
+<a name="line831">831: </a><font color="#A020F0">#endif </font><font color="#B22222">/* PETSC_HAVE_FORTRAN */</font><font color="#A020F0"></font>
+
+<a name="line833">833: </a><font color="#A020F0">#if defined(__cplusplus)</font>
+<a name="line834">834: </a>}
+<a name="line835">835: </a><font color="#A020F0">#endif</font>
+</pre>
+</body>
+
+</html>

@@ -1,0 +1,429 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/tao/constrained/tutorials/tomographyADMM.c">Actual source code: tomographyADMM.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:17+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+<a name="line1">  1: </a>#include <A href="../../../../include/petsctao.h.html">&lt;petsctao.h&gt;</A>
+<a name="line2">  2: </a><font color="#B22222">/*</font>
+<a name="line3">  3: </a><font color="#B22222">Description:   ADMM tomography reconstruction example .</font>
+<a name="line4">  4: </a><font color="#B22222">               0.5*||Ax-b||^2 + lambda*g(x)</font>
+<a name="line5">  5: </a><font color="#B22222">Reference:     BRGN Tomography Example</font>
+<a name="line6">  6: </a><font color="#B22222">*/</font>
+
+<a name="line8">  8: </a>static char help[] = <font color="#666666">"Finds the ADMM solution to the under constraint linear model Ax = b, with regularizer. \n\</font>
+<a name="line9">  9: </a><font color="#666666">                      A is a M*N real matrix (M&lt;N), x is sparse. A good regularizer is an L1 regularizer. \n\</font>
+<a name="line10"> 10: </a><font color="#666666">                      We first split the operator into 0.5*||Ax-b||^2, f(x), and lambda*||x||_1, g(z), where lambda is user specified weight. \n\</font>
+<a name="line11"> 11: </a><font color="#666666">                      g(z) could be either ||z||_1, or ||z||_2^2. Default closed form solution for NORM1 would be soft-threshold, which is \n\</font>
+<a name="line12"> 12: </a><font color="#666666">                      natively supported in admm.c with -tao_admm_regularizer_type soft-threshold. Or user can use regular TAO solver for  \n\</font>
+<a name="line13"> 13: </a><font color="#666666">                      either NORM1 or NORM2 or <a href="../../../../manualpages/Tao/TAOSHELL.html">TAOSHELL</a>, with -reg {1,2,3} \n\</font>
+<a name="line14"> 14: </a><font color="#666666">                      Then, we augment both f and g, and solve it via ADMM. \n\</font>
+<a name="line15"> 15: </a><font color="#666666">                      D is the M*N transform matrix so that D*x is sparse. \n"</font>;
+
+<a name="line17"> 17: </a><font color="#4169E1">typedef</font> <font color="#4169E1">struct</font> {
+<a name="line18"> 18: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  M, N, K, reg;
+<a name="line19"> 19: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> lambda, eps, mumin;
+<a name="line20"> 20: </a>  <a href="../../../../manualpages/Mat/Mat.html">Mat</a>       A, ATA, H, Hx, D, Hz, DTD, HF;
+<a name="line21"> 21: </a>  <a href="../../../../manualpages/Vec/Vec.html">Vec</a>       c, xlb, xub, x, b, workM, workN, workN2, workN3, xGT; <font color="#B22222">/* observation b, ground truth xGT, the lower bound and upper bound of x*/</font>
+<a name="line22"> 22: </a>} AppCtx;
+
+<a name="line24"> 24: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line26"> 26: </a><strong><font color="#4169E1"><a name="NullJacobian"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> NullJacobian(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> J, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> Jpre, void *ptr)</font></strong>
+<a name="line27"> 27: </a>{
+<a name="line28"> 28: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line29"> 29: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line30"> 30: </a>}
+
+<a name="line32"> 32: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line34"> 34: </a><strong><font color="#4169E1"><a name="TaoShellSolve_SoftThreshold"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> TaoShellSolve_SoftThreshold(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao)</font></strong>
+<a name="line35"> 35: </a>{
+<a name="line36"> 36: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> lambda, mu;
+<a name="line37"> 37: </a>  AppCtx   *user;
+<a name="line38"> 38: </a>  <a href="../../../../manualpages/Vec/Vec.html">Vec</a>       out, work, y, x;
+<a name="line39"> 39: </a>  <a href="../../../../manualpages/Tao/Tao.html">Tao</a>       admm_tao, misfit;
+
+<a name="line41"> 41: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line42"> 42: </a>  user = NULL;
+<a name="line43"> 43: </a>  mu   = 0;
+<a name="line44"> 44: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoGetADMMParentTao.html">TaoGetADMMParentTao</a>(tao, &amp;admm_tao));
+<a name="line45"> 45: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMGetMisfitSubsolver.html">TaoADMMGetMisfitSubsolver</a>(admm_tao, &amp;misfit));
+<a name="line46"> 46: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMGetSpectralPenalty.html">TaoADMMGetSpectralPenalty</a>(admm_tao, &amp;mu));
+<a name="line47"> 47: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoShellGetContext.html">TaoShellGetContext</a>(tao, &amp;user));
+
+<a name="line49"> 49: </a>  lambda = user-&gt;lambda;
+<a name="line50"> 50: </a>  work   = user-&gt;workN;
+<a name="line51"> 51: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoGetSolution.html">TaoGetSolution</a>(tao, &amp;out));
+<a name="line52"> 52: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoGetSolution.html">TaoGetSolution</a>(misfit, &amp;x));
+<a name="line53"> 53: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMGetDualVector.html">TaoADMMGetDualVector</a>(admm_tao, &amp;y));
+
+<a name="line55"> 55: </a>  <font color="#B22222">/* Dx + y/mu */</font>
+<a name="line56"> 56: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(user-&gt;D, x, work));
+<a name="line57"> 57: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(work, 1 / mu, y));
+
+<a name="line59"> 59: </a>  <font color="#B22222">/* soft thresholding */</font>
+<a name="line60"> 60: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSoftThreshold.html">TaoSoftThreshold</a>(work, -lambda / mu, lambda / mu, out));
+<a name="line61"> 61: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line62"> 62: </a>}
+
+<a name="line64"> 64: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line66"> 66: </a><strong><font color="#4169E1"><a name="MisfitObjectiveAndGradient"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> MisfitObjectiveAndGradient(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *f, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> g, void *ptr)</font></strong>
+<a name="line67"> 67: </a>{
+<a name="line68"> 68: </a>  AppCtx *user = (AppCtx *)ptr;
+
+<a name="line70"> 70: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line71"> 71: </a>  <font color="#B22222">/* Objective  0.5*||Ax-b||_2^2 */</font>
+<a name="line72"> 72: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(user-&gt;A, X, user-&gt;workM));
+<a name="line73"> 73: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(user-&gt;workM, -1, user-&gt;b));
+<a name="line74"> 74: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>(user-&gt;workM, user-&gt;workM, f));
+<a name="line75"> 75: </a>  *f *= 0.5;
+<a name="line76"> 76: </a>  <font color="#B22222">/* Gradient. ATAx-ATb */</font>
+<a name="line77"> 77: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(user-&gt;ATA, X, user-&gt;workN));
+<a name="line78"> 78: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(user-&gt;A, user-&gt;b, user-&gt;workN2));
+<a name="line79"> 79: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(g, -1., user-&gt;workN2, user-&gt;workN));
+<a name="line80"> 80: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line81"> 81: </a>}
+
+<a name="line83"> 83: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line85"> 85: </a><strong><font color="#4169E1"><a name="RegularizerObjectiveAndGradient1"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> RegularizerObjectiveAndGradient1(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *f_reg, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> G_reg, void *ptr)</font></strong>
+<a name="line86"> 86: </a>{
+<a name="line87"> 87: </a>  AppCtx *user = (AppCtx *)ptr;
+
+<a name="line89"> 89: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line90"> 90: </a>  <font color="#B22222">/* compute regularizer objective</font>
+<a name="line91"> 91: </a><font color="#B22222">   * f = f + lambda*sum(sqrt(y.^2+epsilon^2) - epsilon), where y = D*x */</font>
+<a name="line92"> 92: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(X, user-&gt;workN2));
+<a name="line93"> 93: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecPow.html">VecPow</a>(user-&gt;workN2, 2.));
+<a name="line94"> 94: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecShift.html">VecShift</a>(user-&gt;workN2, user-&gt;eps * user-&gt;eps));
+<a name="line95"> 95: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSqrtAbs.html">VecSqrtAbs</a>(user-&gt;workN2));
+<a name="line96"> 96: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(user-&gt;workN2, user-&gt;workN3));
+<a name="line97"> 97: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecShift.html">VecShift</a>(user-&gt;workN2, -user-&gt;eps));
+<a name="line98"> 98: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSum.html">VecSum</a>(user-&gt;workN2, f_reg));
+<a name="line99"> 99: </a>  *f_reg *= user-&gt;lambda;
+<a name="line100">100: </a>  <font color="#B22222">/* compute regularizer gradient = lambda*x */</font>
+<a name="line101">101: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecPointwiseDivide.html">VecPointwiseDivide</a>(G_reg, X, user-&gt;workN3));
+<a name="line102">102: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecScale.html">VecScale</a>(G_reg, user-&gt;lambda));
+<a name="line103">103: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line104">104: </a>}
+
+<a name="line106">106: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line108">108: </a><strong><font color="#4169E1"><a name="RegularizerObjectiveAndGradient2"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> RegularizerObjectiveAndGradient2(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *f_reg, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> G_reg, void *ptr)</font></strong>
+<a name="line109">109: </a>{
+<a name="line110">110: </a>  AppCtx   *user = (AppCtx *)ptr;
+<a name="line111">111: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> temp;
+
+<a name="line113">113: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line114">114: </a>  <font color="#B22222">/* compute regularizer objective = lambda*|z|_2^2 */</font>
+<a name="line115">115: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>(X, X, &amp;temp));
+<a name="line116">116: </a>  *f_reg = 0.5 * user-&gt;lambda * temp;
+<a name="line117">117: </a>  <font color="#B22222">/* compute regularizer gradient = lambda*z */</font>
+<a name="line118">118: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCopy.html">VecCopy</a>(X, G_reg));
+<a name="line119">119: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecScale.html">VecScale</a>(G_reg, user-&gt;lambda));
+<a name="line120">120: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line121">121: </a>}
+
+<a name="line123">123: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line125">125: </a><strong><font color="#4169E1"><a name="HessianMisfit"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> HessianMisfit(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, void *ptr)</font></strong>
+<a name="line126">126: </a>{
+<a name="line127">127: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line128">128: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line129">129: </a>}
+
+<a name="line131">131: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line133">133: </a><strong><font color="#4169E1"><a name="HessianReg"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> HessianReg(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, void *ptr)</font></strong>
+<a name="line134">134: </a>{
+<a name="line135">135: </a>  AppCtx *user = (AppCtx *)ptr;
+
+<a name="line137">137: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line138">138: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(user-&gt;D, x, user-&gt;workN));
+<a name="line139">139: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecPow.html">VecPow</a>(user-&gt;workN2, 2.));
+<a name="line140">140: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecShift.html">VecShift</a>(user-&gt;workN2, user-&gt;eps * user-&gt;eps));
+<a name="line141">141: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSqrtAbs.html">VecSqrtAbs</a>(user-&gt;workN2));
+<a name="line142">142: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecShift.html">VecShift</a>(user-&gt;workN2, -user-&gt;eps));
+<a name="line143">143: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecReciprocal.html">VecReciprocal</a>(user-&gt;workN2));
+<a name="line144">144: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecScale.html">VecScale</a>(user-&gt;workN2, user-&gt;eps * user-&gt;eps));
+<a name="line145">145: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDiagonalSet.html">MatDiagonalSet</a>(H, user-&gt;workN2, <a href="../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>));
+<a name="line146">146: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line147">147: </a>}
+
+<a name="line149">149: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line151">151: </a><strong><font color="#4169E1"><a name="FullObjGrad"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> FullObjGrad(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> X, <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> *f, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> g, void *ptr)</font></strong>
+<a name="line152">152: </a>{
+<a name="line153">153: </a>  AppCtx   *user = (AppCtx *)ptr;
+<a name="line154">154: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> f_reg;
+
+<a name="line156">156: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line157">157: </a>  <font color="#B22222">/* Objective  0.5*||Ax-b||_2^2 + lambda*||x||_2^2*/</font>
+<a name="line158">158: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(user-&gt;A, X, user-&gt;workM));
+<a name="line159">159: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(user-&gt;workM, -1, user-&gt;b));
+<a name="line160">160: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDot.html">VecDot</a>(user-&gt;workM, user-&gt;workM, f));
+<a name="line161">161: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(X, <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;f_reg));
+<a name="line162">162: </a>  *f *= 0.5;
+<a name="line163">163: </a>  *f += user-&gt;lambda * f_reg * f_reg;
+<a name="line164">164: </a>  <font color="#B22222">/* Gradient. ATAx-ATb + 2*lambda*x */</font>
+<a name="line165">165: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(user-&gt;ATA, X, user-&gt;workN));
+<a name="line166">166: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(user-&gt;A, user-&gt;b, user-&gt;workN2));
+<a name="line167">167: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecWAXPY.html">VecWAXPY</a>(g, -1., user-&gt;workN2, user-&gt;workN));
+<a name="line168">168: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(g, 2 * user-&gt;lambda, X));
+<a name="line169">169: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line170">170: </a>}
+<a name="line171">171: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line173">173: </a><strong><font color="#4169E1"><a name="HessianFull"></a>static <a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> HessianFull(<a href="../../../../manualpages/Tao/Tao.html">Tao</a> tao, <a href="../../../../manualpages/Vec/Vec.html">Vec</a> x, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> H, <a href="../../../../manualpages/Mat/Mat.html">Mat</a> Hpre, void *ptr)</font></strong>
+<a name="line174">174: </a>{
+<a name="line175">175: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line176">176: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line177">177: </a>}
+<a name="line178">178: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line180">180: </a><strong><font color="#4169E1"><a name="InitializeUserData"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> InitializeUserData(AppCtx *user)</font></strong>
+<a name="line181">181: </a>{
+<a name="line182">182: </a>  char        dataFile[] = <font color="#666666">"tomographyData_A_b_xGT"</font>; <font color="#B22222">/* Matrix A and vectors b, xGT(ground truth) binary files generated by Matlab. Debug: change from "tomographyData_A_b_xGT" to "cs1Data_A_b_xGT". */</font>
+<a name="line183">183: </a>  <a href="../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> fd;                                    <font color="#B22222">/* used to load data from file */</font>
+<a name="line184">184: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    k, n;
+<a name="line185">185: </a>  <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> v;
+
+<a name="line187">187: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line188">188: </a>  <font color="#B22222">/* Load the A matrix, b vector, and xGT vector from a binary file. */</font>
+<a name="line189">189: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, dataFile, <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_READ</a>, &amp;fd));
+<a name="line190">190: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;user-&gt;A));
+<a name="line191">191: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetType.html">MatSetType</a>(user-&gt;A, <a href="../../../../manualpages/Mat/MATAIJ.html">MATAIJ</a>));
+<a name="line192">192: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatLoad.html">MatLoad</a>(user-&gt;A, fd));
+<a name="line193">193: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;user-&gt;b));
+<a name="line194">194: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(user-&gt;b, fd));
+<a name="line195">195: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;user-&gt;xGT));
+<a name="line196">196: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(user-&gt;xGT, fd));
+<a name="line197">197: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;fd));
+
+<a name="line199">199: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatGetSize.html">MatGetSize</a>(user-&gt;A, &amp;user-&gt;M, &amp;user-&gt;N));
+
+<a name="line201">201: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;user-&gt;D));
+<a name="line202">202: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetSizes.html">MatSetSizes</a>(user-&gt;D, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, user-&gt;N, user-&gt;N));
+<a name="line203">203: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetFromOptions.html">MatSetFromOptions</a>(user-&gt;D));
+<a name="line204">204: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetUp.html">MatSetUp</a>(user-&gt;D));
+<a name="line205">205: </a>  <font color="#4169E1">for</font> (k = 0; k &lt; user-&gt;N; k++) {
+<a name="line206">206: </a>    v = 1.0;
+<a name="line207">207: </a>    n = k + 1;
+<a name="line208">208: </a>    <font color="#4169E1">if</font> (k &lt; user-&gt;N - 1) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetValues.html">MatSetValues</a>(user-&gt;D, 1, &amp;k, 1, &amp;n, &amp;v, <a href="../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>));
+<a name="line209">209: </a>    v = -1.0;
+<a name="line210">210: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetValues.html">MatSetValues</a>(user-&gt;D, 1, &amp;k, 1, &amp;k, &amp;v, <a href="../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>));
+<a name="line211">211: </a>  }
+<a name="line212">212: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(user-&gt;D, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line213">213: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(user-&gt;D, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+
+<a name="line215">215: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(user-&gt;D, user-&gt;D, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;user-&gt;DTD));
+
+<a name="line217">217: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;user-&gt;Hz));
+<a name="line218">218: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetSizes.html">MatSetSizes</a>(user-&gt;Hz, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, user-&gt;N, user-&gt;N));
+<a name="line219">219: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetFromOptions.html">MatSetFromOptions</a>(user-&gt;Hz));
+<a name="line220">220: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetUp.html">MatSetUp</a>(user-&gt;Hz));
+<a name="line221">221: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(user-&gt;Hz, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line222">222: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(user-&gt;Hz, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+
+<a name="line224">224: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;(user-&gt;x)));
+<a name="line225">225: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;(user-&gt;workM)));
+<a name="line226">226: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;(user-&gt;workN)));
+<a name="line227">227: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;(user-&gt;workN2)));
+<a name="line228">228: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(user-&gt;x, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, user-&gt;N));
+<a name="line229">229: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(user-&gt;workM, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, user-&gt;M));
+<a name="line230">230: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(user-&gt;workN, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, user-&gt;N));
+<a name="line231">231: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(user-&gt;workN2, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>, user-&gt;N));
+<a name="line232">232: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(user-&gt;x));
+<a name="line233">233: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(user-&gt;workM));
+<a name="line234">234: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(user-&gt;workN));
+<a name="line235">235: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(user-&gt;workN2));
+
+<a name="line237">237: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(user-&gt;workN, &amp;(user-&gt;workN3)));
+<a name="line238">238: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(user-&gt;x, &amp;(user-&gt;xlb)));
+<a name="line239">239: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(user-&gt;x, &amp;(user-&gt;xub)));
+<a name="line240">240: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(user-&gt;x, &amp;(user-&gt;c)));
+<a name="line241">241: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(user-&gt;xlb, 0.0));
+<a name="line242">242: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(user-&gt;c, 0.0));
+<a name="line243">243: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(user-&gt;xub, PETSC_INFINITY));
+
+<a name="line245">245: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(user-&gt;A, user-&gt;A, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;(user-&gt;ATA)));
+<a name="line246">246: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(user-&gt;A, user-&gt;A, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;(user-&gt;Hx)));
+<a name="line247">247: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(user-&gt;A, user-&gt;A, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, <a href="../../../../manualpages/Sys/PETSC_DEFAULT.html">PETSC_DEFAULT</a>, &amp;(user-&gt;HF)));
+
+<a name="line249">249: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(user-&gt;ATA, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line250">250: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(user-&gt;ATA, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line251">251: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(user-&gt;Hx, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line252">252: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(user-&gt;Hx, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line253">253: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyBegin.html">MatAssemblyBegin</a>(user-&gt;HF, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+<a name="line254">254: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatAssemblyEnd.html">MatAssemblyEnd</a>(user-&gt;HF, <a href="../../../../manualpages/Mat/MatAssemblyType.html">MAT_FINAL_ASSEMBLY</a>));
+
+<a name="line256">256: </a>  user-&gt;lambda = 1.e-8;
+<a name="line257">257: </a>  user-&gt;eps    = 1.e-3;
+<a name="line258">258: </a>  user-&gt;reg    = 2;
+<a name="line259">259: </a>  user-&gt;mumin  = 5.e-6;
+
+<a name="line261">261: </a>  <a href="../../../../manualpages/Sys/PetscOptionsBegin.html">PetscOptionsBegin</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, NULL, <font color="#666666">"Configure separable objection example"</font>, <font color="#666666">"tomographyADMM.c"</font>);
+<a name="line262">262: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsInt.html">PetscOptionsInt</a>(<font color="#666666">"-reg"</font>, <font color="#666666">"Regularization scheme for z solver (1,2)"</font>, <font color="#666666">"tomographyADMM.c"</font>, user-&gt;reg, &amp;(user-&gt;reg), NULL));
+<a name="line263">263: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-lambda"</font>, <font color="#666666">"The regularization multiplier. 1 default"</font>, <font color="#666666">"tomographyADMM.c"</font>, user-&gt;lambda, &amp;(user-&gt;lambda), NULL));
+<a name="line264">264: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-eps"</font>, <font color="#666666">"L1 norm epsilon padding"</font>, <font color="#666666">"tomographyADMM.c"</font>, user-&gt;eps, &amp;(user-&gt;eps), NULL));
+<a name="line265">265: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsReal.html">PetscOptionsReal</a>(<font color="#666666">"-mumin"</font>, <font color="#666666">"Minimum value for ADMM spectral penalty"</font>, <font color="#666666">"tomographyADMM.c"</font>, user-&gt;mumin, &amp;(user-&gt;mumin), NULL));
+<a name="line266">266: </a>  <a href="../../../../manualpages/Sys/PetscOptionsEnd.html">PetscOptionsEnd</a>();
+<a name="line267">267: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line268">268: </a>}
+
+<a name="line270">270: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line272">272: </a><strong><font color="#4169E1"><a name="DestroyContext"></a><a href="../../../../manualpages/Sys/PetscErrorCode.html">PetscErrorCode</a> DestroyContext(AppCtx *user)</font></strong>
+<a name="line273">273: </a>{
+<a name="line274">274: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBegin.html">PetscFunctionBegin</a>;
+<a name="line275">275: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;A));
+<a name="line276">276: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;ATA));
+<a name="line277">277: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;Hx));
+<a name="line278">278: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;Hz));
+<a name="line279">279: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;HF));
+<a name="line280">280: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;D));
+<a name="line281">281: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;user-&gt;DTD));
+<a name="line282">282: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;xGT));
+<a name="line283">283: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;xlb));
+<a name="line284">284: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;xub));
+<a name="line285">285: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;b));
+<a name="line286">286: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;x));
+<a name="line287">287: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;c));
+<a name="line288">288: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;workN3));
+<a name="line289">289: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;workN2));
+<a name="line290">290: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;workN));
+<a name="line291">291: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;user-&gt;workM));
+<a name="line292">292: </a>  <a href="../../../../manualpages/Sys/PetscFunctionReturn.html">PetscFunctionReturn</a>(<a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_SUCCESS</a>);
+<a name="line293">293: </a>}
+
+<a name="line295">295: </a><font color="#B22222">/*------------------------------------------------------------*/</font>
+
+<a name="line297">297: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc, char **argv)</font></strong>
+<a name="line298">298: </a>{
+<a name="line299">299: </a>  <a href="../../../../manualpages/Tao/Tao.html">Tao</a>         tao, misfit, reg;
+<a name="line300">300: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>   v1, v2;
+<a name="line301">301: </a>  AppCtx     *user;
+<a name="line302">302: </a>  <a href="../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> fd;
+<a name="line303">303: </a>  char        resultFile[] = <font color="#666666">"tomographyResult_x"</font>;
+
+<a name="line305">305: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line306">306: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>(&amp;argc, &amp;argv, (char *)0, help));
+<a name="line307">307: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscNew.html">PetscNew</a>(&amp;user));
+<a name="line308">308: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(InitializeUserData(user));
+
+<a name="line310">310: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoCreate.html">TaoCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;tao));
+<a name="line311">311: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetType.html">TaoSetType</a>(tao, <a href="../../../../manualpages/Tao/TAOADMM.html">TAOADMM</a>));
+<a name="line312">312: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetSolution.html">TaoSetSolution</a>(tao, user-&gt;x));
+<a name="line313">313: </a>  <font color="#B22222">/* f(x) + g(x) for parent tao */</font>
+<a name="line314">314: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetSpectralPenalty.html">TaoADMMSetSpectralPenalty</a>(tao, 1.));
+<a name="line315">315: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetObjectiveAndGradient.html">TaoSetObjectiveAndGradient</a>(tao, NULL, FullObjGrad, (void *)user));
+<a name="line316">316: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatShift.html">MatShift</a>(user-&gt;HF, user-&gt;lambda));
+<a name="line317">317: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetHessian.html">TaoSetHessian</a>(tao, user-&gt;HF, user-&gt;HF, HessianFull, (void *)user));
+
+<a name="line319">319: </a>  <font color="#B22222">/* f(x) for misfit tao */</font>
+<a name="line320">320: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetMisfitObjectiveAndGradientRoutine.html">TaoADMMSetMisfitObjectiveAndGradientRoutine</a>(tao, MisfitObjectiveAndGradient, (void *)user));
+<a name="line321">321: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetMisfitHessianRoutine.html">TaoADMMSetMisfitHessianRoutine</a>(tao, user-&gt;Hx, user-&gt;Hx, HessianMisfit, (void *)user));
+<a name="line322">322: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetMisfitHessianChangeStatus.html">TaoADMMSetMisfitHessianChangeStatus</a>(tao, <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>));
+<a name="line323">323: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetMisfitConstraintJacobian.html">TaoADMMSetMisfitConstraintJacobian</a>(tao, user-&gt;D, user-&gt;D, NullJacobian, (void *)user));
+
+<a name="line325">325: </a>  <font color="#B22222">/* g(x) for regularizer tao */</font>
+<a name="line326">326: </a>  <font color="#4169E1">if</font> (user-&gt;reg == 1) {
+<a name="line327">327: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegularizerObjectiveAndGradientRoutine.html">TaoADMMSetRegularizerObjectiveAndGradientRoutine</a>(tao, RegularizerObjectiveAndGradient1, (void *)user));
+<a name="line328">328: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegularizerHessianRoutine.html">TaoADMMSetRegularizerHessianRoutine</a>(tao, user-&gt;Hz, user-&gt;Hz, HessianReg, (void *)user));
+<a name="line329">329: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegHessianChangeStatus.html">TaoADMMSetRegHessianChangeStatus</a>(tao, <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line330">330: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (user-&gt;reg == 2) {
+<a name="line331">331: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegularizerObjectiveAndGradientRoutine.html">TaoADMMSetRegularizerObjectiveAndGradientRoutine</a>(tao, RegularizerObjectiveAndGradient2, (void *)user));
+<a name="line332">332: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatShift.html">MatShift</a>(user-&gt;Hz, 1));
+<a name="line333">333: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatScale.html">MatScale</a>(user-&gt;Hz, user-&gt;lambda));
+<a name="line334">334: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegularizerHessianRoutine.html">TaoADMMSetRegularizerHessianRoutine</a>(tao, user-&gt;Hz, user-&gt;Hz, HessianMisfit, (void *)user));
+<a name="line335">335: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegHessianChangeStatus.html">TaoADMMSetRegHessianChangeStatus</a>(tao, <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line336">336: </a>  } <font color="#4169E1">else</font> <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(user-&gt;reg == 3, <a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_ARG_UNKNOWN_TYPE</a>, <font color="#666666">"Incorrect Reg type"</font>); <font color="#B22222">/* TaoShell case */</font>
+
+<a name="line338">338: </a>  <font color="#B22222">/* Set type for the misfit solver */</font>
+<a name="line339">339: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMGetMisfitSubsolver.html">TaoADMMGetMisfitSubsolver</a>(tao, &amp;misfit));
+<a name="line340">340: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMGetRegularizationSubsolver.html">TaoADMMGetRegularizationSubsolver</a>(tao, &amp;reg));
+<a name="line341">341: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetType.html">TaoSetType</a>(misfit, <a href="../../../../manualpages/Tao/TAONLS.html">TAONLS</a>));
+<a name="line342">342: </a>  <font color="#4169E1">if</font> (user-&gt;reg == 3) {
+<a name="line343">343: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetType.html">TaoSetType</a>(reg, <a href="../../../../manualpages/Tao/TAOSHELL.html">TAOSHELL</a>));
+<a name="line344">344: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoShellSetContext.html">TaoShellSetContext</a>(reg, (void *)user));
+<a name="line345">345: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoShellSetSolve.html">TaoShellSetSolve</a>(reg, TaoShellSolve_SoftThreshold));
+<a name="line346">346: </a>  } <font color="#4169E1">else</font> {
+<a name="line347">347: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetType.html">TaoSetType</a>(reg, <a href="../../../../manualpages/Tao/TAONLS.html">TAONLS</a>));
+<a name="line348">348: </a>  }
+<a name="line349">349: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetVariableBounds.html">TaoSetVariableBounds</a>(misfit, user-&gt;xlb, user-&gt;xub));
+
+<a name="line351">351: </a>  <font color="#B22222">/* Soft Thresholding solves the ADMM problem with the L1 regularizer lambda*||z||_1 and the x-z=0 constraint */</font>
+<a name="line352">352: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegularizerCoefficient.html">TaoADMMSetRegularizerCoefficient</a>(tao, user-&gt;lambda));
+<a name="line353">353: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetRegularizerConstraintJacobian.html">TaoADMMSetRegularizerConstraintJacobian</a>(tao, NULL, NULL, NullJacobian, (void *)user));
+<a name="line354">354: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetMinimumSpectralPenalty.html">TaoADMMSetMinimumSpectralPenalty</a>(tao, user-&gt;mumin));
+
+<a name="line356">356: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoADMMSetConstraintVectorRHS.html">TaoADMMSetConstraintVectorRHS</a>(tao, user-&gt;c));
+<a name="line357">357: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSetFromOptions.html">TaoSetFromOptions</a>(tao));
+<a name="line358">358: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoSolve.html">TaoSolve</a>(tao));
+
+<a name="line360">360: </a>  <font color="#B22222">/* Save x (reconstruction of object) vector to a binary file, which maybe read from Matlab and convert to a 2D image for comparison. */</font>
+<a name="line361">361: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, resultFile, <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_WRITE</a>, &amp;fd));
+<a name="line362">362: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(user-&gt;x, fd));
+<a name="line363">363: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;fd));
+
+<a name="line365">365: </a>  <font color="#B22222">/* compute the error */</font>
+<a name="line366">366: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(user-&gt;x, -1, user-&gt;xGT));
+<a name="line367">367: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(user-&gt;x, <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;v1));
+<a name="line368">368: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(user-&gt;xGT, <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;v2));
+<a name="line369">369: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"relative reconstruction error: ||x-xGT||/||xGT|| = %6.4e.\n"</font>, (double)(v1 / v2)));
+
+<a name="line371">371: </a>  <font color="#B22222">/* Free TAO data structures */</font>
+<a name="line372">372: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Tao/TaoDestroy.html">TaoDestroy</a>(&amp;tao));
+<a name="line373">373: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(DestroyContext(user));
+<a name="line374">374: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(user));
+<a name="line375">375: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a>());
+<a name="line376">376: </a>  <font color="#4169E1">return</font> 0;
+<a name="line377">377: </a>}
+
+<a name="line379">379: </a><font color="#B22222">/*TEST</font>
+
+<a name="line381">381: </a><font color="#B22222">   build:</font>
+<a name="line382">382: </a><font color="#B22222">      requires: !complex !single !__float128 !defined(PETSC_USE_64BIT_INDICES)</font>
+
+<a name="line384">384: </a><font color="#B22222">   test:</font>
+<a name="line385">385: </a><font color="#B22222">      suffix: 1</font>
+<a name="line386">386: </a><font color="#B22222">      localrunfiles: tomographyData_A_b_xGT</font>
+<a name="line387">387: </a><font color="#B22222">      args:  -lambda 1.e-8 -tao_monitor -tao_type nls -tao_nls_pc_type icc</font>
+
+<a name="line389">389: </a><font color="#B22222">   test:</font>
+<a name="line390">390: </a><font color="#B22222">      suffix: 2</font>
+<a name="line391">391: </a><font color="#B22222">      localrunfiles: tomographyData_A_b_xGT</font>
+<a name="line392">392: </a><font color="#B22222">      args:  -reg 2 -lambda 1.e-8 -tao_admm_dual_update update_basic -tao_admm_regularizer_type regularizer_user -tao_max_it 20 -tao_monitor -tao_admm_tolerance_update_factor 1.e-8  -misfit_tao_nls_pc_type icc -misfit_tao_monitor -reg_tao_monitor</font>
+
+<a name="line394">394: </a><font color="#B22222">   test:</font>
+<a name="line395">395: </a><font color="#B22222">      suffix: 3</font>
+<a name="line396">396: </a><font color="#B22222">      localrunfiles: tomographyData_A_b_xGT</font>
+<a name="line397">397: </a><font color="#B22222">      args:  -lambda 1.e-8 -tao_admm_dual_update update_basic -tao_admm_regularizer_type regularizer_soft_thresh -tao_max_it 20 -tao_monitor -tao_admm_tolerance_update_factor 1.e-8 -misfit_tao_nls_pc_type icc -misfit_tao_monitor</font>
+
+<a name="line399">399: </a><font color="#B22222">   test:</font>
+<a name="line400">400: </a><font color="#B22222">      suffix: 4</font>
+<a name="line401">401: </a><font color="#B22222">      localrunfiles: tomographyData_A_b_xGT</font>
+<a name="line402">402: </a><font color="#B22222">      args:  -lambda 1.e-8 -tao_admm_dual_update update_adaptive -tao_admm_regularizer_type regularizer_soft_thresh -tao_max_it 20 -tao_monitor -misfit_tao_monitor -misfit_tao_nls_pc_type icc</font>
+
+<a name="line404">404: </a><font color="#B22222">   test:</font>
+<a name="line405">405: </a><font color="#B22222">      suffix: 5</font>
+<a name="line406">406: </a><font color="#B22222">      localrunfiles: tomographyData_A_b_xGT</font>
+<a name="line407">407: </a><font color="#B22222">      args:  -reg 2 -lambda 1.e-8 -tao_admm_dual_update update_adaptive -tao_admm_regularizer_type regularizer_user -tao_max_it 20 -tao_monitor -tao_admm_tolerance_update_factor 1.e-8 -misfit_tao_monitor -reg_tao_monitor -misfit_tao_nls_pc_type icc</font>
+
+<a name="line409">409: </a><font color="#B22222">   test:</font>
+<a name="line410">410: </a><font color="#B22222">      suffix: 6</font>
+<a name="line411">411: </a><font color="#B22222">      localrunfiles: tomographyData_A_b_xGT</font>
+<a name="line412">412: </a><font color="#B22222">      args:  -reg 3 -lambda 1.e-8 -tao_admm_dual_update update_adaptive -tao_admm_regularizer_type regularizer_user -tao_max_it 20 -tao_monitor -tao_admm_tolerance_update_factor 1.e-8 -misfit_tao_monitor -reg_tao_monitor -misfit_tao_nls_pc_type icc</font>
+
+<a name="line414">414: </a><font color="#B22222">TEST*/</font>
+</pre>
+</body>
+
+</html>

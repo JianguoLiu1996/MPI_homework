@@ -1,0 +1,893 @@
+<center><a href="https://gitlab.com/petsc/petsc/-/blob/a093114c2e7b4ba1f47e6ac8a72c57724150f16d/src/ksp/ksp/tutorials/ex72.c">Actual source code: ex72.c</a></center><br>
+
+<html>
+<head>
+<title></title>
+<meta name="generator" content="c2html 0.9.4">
+<meta name="date" content="2023-04-30T14:19:46+00:00">
+</head>
+
+<body bgcolor="#FFFFFF">
+<pre width="80">
+
+<a name="line2">  2: </a>static char help[] = <font color="#666666">"Reads a PETSc matrix and vector from a file and solves a linear system.\n\</font>
+<a name="line3">  3: </a><font color="#666666">This version first preloads and solves a small system, then loads \n\</font>
+<a name="line4">  4: </a><font color="#666666">another (larger) system and solves it as well.  This example illustrates\n\</font>
+<a name="line5">  5: </a><font color="#666666">preloading of instructions with the smaller system so that more accurate\n\</font>
+<a name="line6">  6: </a><font color="#666666">performance monitoring can be done with the larger one (that actually\n\</font>
+<a name="line7">  7: </a><font color="#666666">is the system of interest).  See the 'Performance Hints' chapter of the\n\</font>
+<a name="line8">  8: </a><font color="#666666">users manual for a discussion of preloading.  Input parameters include\n\</font>
+<a name="line9">  9: </a><font color="#666666">  -f0 &lt;input_file&gt; : first file to load (small system)\n\</font>
+<a name="line10"> 10: </a><font color="#666666">  -f1 &lt;input_file&gt; : second file to load (larger system)\n\n\</font>
+<a name="line11"> 11: </a><font color="#666666">  -nearnulldim &lt;0&gt; : number of vectors in the near-null space immediately following matrix\n\n\</font>
+<a name="line12"> 12: </a><font color="#666666">  -trans  : solve transpose system instead\n\n"</font>;
+<a name="line13"> 13: </a><font color="#B22222">/*</font>
+<a name="line14"> 14: </a><font color="#B22222">  This code can be used to test PETSc interface to other packages.\n\</font>
+<a name="line15"> 15: </a><font color="#B22222">  Examples of command line options:       \n\</font>
+<a name="line16"> 16: </a><font color="#B22222">   ./ex72 -f0 &lt;datafile&gt; -ksp_type preonly  \n\</font>
+<a name="line17"> 17: </a><font color="#B22222">        -help -ksp_view                  \n\</font>
+<a name="line18"> 18: </a><font color="#B22222">        -num_numfac &lt;num_numfac&gt; -num_rhs &lt;num_rhs&gt; \n\</font>
+<a name="line19"> 19: </a><font color="#B22222">        -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type superlu or superlu_dist or mumps \n\</font>
+<a name="line20"> 20: </a><font color="#B22222">        -ksp_type preonly -pc_type cholesky -pc_factor_mat_solver_type mumps \n\</font>
+<a name="line21"> 21: </a><font color="#B22222">   mpiexec -n &lt;np&gt; ./ex72 -f0 &lt;datafile&gt; -ksp_type cg -pc_type asm -pc_asm_type basic -sub_pc_type icc -mat_type sbaij</font>
+<a name="line22"> 22: </a><font color="#B22222"> \n\n";</font>
+<a name="line23"> 23: </a><font color="#B22222">*/</font>
+
+<a name="line25"> 25: </a><font color="#B22222">/*</font>
+<a name="line26"> 26: </a><font color="#B22222">  Include "petscksp.h" so that we can use <a href="../../../../manualpages/KSP/KSP.html">KSP</a> solvers.  Note that this file</font>
+<a name="line27"> 27: </a><font color="#B22222">  automatically includes:</font>
+<a name="line28"> 28: </a><font color="#B22222">     petscsys.h       - base PETSc routines   petscvec.h - vectors</font>
+<a name="line29"> 29: </a><font color="#B22222">     petscmat.h - matrices</font>
+<a name="line30"> 30: </a><font color="#B22222">     petscis.h     - index sets            petscksp.h - Krylov subspace methods</font>
+<a name="line31"> 31: </a><font color="#B22222">     petscviewer.h - viewers               petscpc.h  - preconditioners</font>
+<a name="line32"> 32: </a><font color="#B22222">*/</font>
+<a name="line33"> 33: </a>#include <A href="../../../../include/petscksp.h.html">&lt;petscksp.h&gt;</A>
+
+<a name="line35"> 35: </a><strong><font color="#4169E1"><a name="main"></a>int main(int argc, char **args)</font></strong>
+<a name="line36"> 36: </a>{
+<a name="line37"> 37: </a>  <a href="../../../../manualpages/KSP/KSP.html">KSP</a>         ksp;                         <font color="#B22222">/* linear solver context */</font>
+<a name="line38"> 38: </a>  <a href="../../../../manualpages/Mat/Mat.html">Mat</a>         A;                           <font color="#B22222">/* matrix */</font>
+<a name="line39"> 39: </a>  <a href="../../../../manualpages/Vec/Vec.html">Vec</a>         x, b, u;                     <font color="#B22222">/* approx solution, RHS, exact solution */</font>
+<a name="line40"> 40: </a>  <a href="../../../../manualpages/Viewer/PetscViewer.html">PetscViewer</a> viewer;                      <font color="#B22222">/* viewer */</font>
+<a name="line41"> 41: </a>  char        file[4][PETSC_MAX_PATH_LEN]; <font color="#B22222">/* input file name */</font>
+<a name="line42"> 42: </a>  <a href="../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   table = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, flg, trans = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, initialguess = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line43"> 43: </a>  <a href="../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   outputSoln = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, constantnullspace = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line44"> 44: </a>  <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    its, num_numfac, m, n, M, p, nearnulldim = 0;
+<a name="line45"> 45: </a>  <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a>   norm;
+<a name="line46"> 46: </a>  <a href="../../../../manualpages/Sys/PetscBool.html">PetscBool</a>   preload = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, isSymmetric, cknorm = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, initialguessfile = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line47"> 47: </a>  <a href="../../../../manualpages/Sys/PetscMPIInt.html">PetscMPIInt</a> rank;
+<a name="line48"> 48: </a>  char        initialguessfilename[PETSC_MAX_PATH_LEN];
+<a name="line49"> 49: </a>  char        mtype[PETSC_MAX_PATH_LEN];
+
+<a name="line51"> 51: </a>  <a href="../../../../manualpages/Sys/PetscFunctionBeginUser.html">PetscFunctionBeginUser</a>;
+<a name="line52"> 52: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscInitialize.html">PetscInitialize</a>(&amp;argc, &amp;args, (char *)0, help));
+<a name="line53"> 53: </a>  <a href="../../../../manualpages/Sys/PetscCallMPI.html">PetscCallMPI</a>(<a href="http://www.mpich.org/static/docs/latest/www3/MPI_Comm_rank.html#MPI_Comm_rank">MPI_Comm_rank</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;rank));
+<a name="line54"> 54: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-table"</font>, &amp;table, NULL));
+<a name="line55"> 55: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-constantnullspace"</font>, &amp;constantnullspace, NULL));
+<a name="line56"> 56: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-trans"</font>, &amp;trans, NULL));
+<a name="line57"> 57: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-initialguess"</font>, &amp;initialguess, NULL));
+<a name="line58"> 58: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-output_solution"</font>, &amp;outputSoln, NULL));
+<a name="line59"> 59: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-initialguessfilename"</font>, initialguessfilename, <font color="#4169E1">sizeof</font>(initialguessfilename), &amp;initialguessfile));
+<a name="line60"> 60: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetInt.html">PetscOptionsGetInt</a>(NULL, NULL, <font color="#666666">"-nearnulldim"</font>, &amp;nearnulldim, NULL));
+
+<a name="line62"> 62: </a>  <font color="#B22222">/*</font>
+<a name="line63"> 63: </a><font color="#B22222">     Determine files from which we read the two linear systems</font>
+<a name="line64"> 64: </a><font color="#B22222">     (matrix and right-hand-side vector).</font>
+<a name="line65"> 65: </a><font color="#B22222">  */</font>
+<a name="line66"> 66: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-f"</font>, file[0], <font color="#4169E1">sizeof</font>(file[0]), &amp;flg));
+<a name="line67"> 67: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line68"> 68: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscStrncpy.html">PetscStrncpy</a>(file[1], file[0], <font color="#4169E1">sizeof</font>(file[1])));
+<a name="line69"> 69: </a>    preload = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line70"> 70: </a>  } <font color="#4169E1">else</font> {
+<a name="line71"> 71: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-f0"</font>, file[0], <font color="#4169E1">sizeof</font>(file[0]), &amp;flg));
+<a name="line72"> 72: </a>    <a href="../../../../manualpages/Sys/PetscCheck.html">PetscCheck</a>(flg, <a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <a href="../../../../manualpages/Sys/PetscErrorCode.html">PETSC_ERR_USER_INPUT</a>, <font color="#666666">"Must indicate binary file with the -f0 or -f option"</font>);
+<a name="line73"> 73: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-f1"</font>, file[1], <font color="#4169E1">sizeof</font>(file[1]), &amp;flg));
+<a name="line74"> 74: </a>    <font color="#4169E1">if</font> (!flg) preload = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>; <font color="#B22222">/* don't bother with second system */</font>
+<a name="line75"> 75: </a>  }
+
+<a name="line77"> 77: </a>  <font color="#B22222">/* -----------------------------------------------------------</font>
+<a name="line78"> 78: </a><font color="#B22222">                  Beginning of linear solver loop</font>
+<a name="line79"> 79: </a><font color="#B22222">     ----------------------------------------------------------- */</font>
+<a name="line80"> 80: </a>  <font color="#B22222">/*</font>
+<a name="line81"> 81: </a><font color="#B22222">     Loop through the linear solve 2 times.</font>
+<a name="line82"> 82: </a><font color="#B22222">      - The intention here is to preload and solve a small system;</font>
+<a name="line83"> 83: </a><font color="#B22222">        then load another (larger) system and solve it as well.</font>
+<a name="line84"> 84: </a><font color="#B22222">        This process preloads the instructions with the smaller</font>
+<a name="line85"> 85: </a><font color="#B22222">        system so that more accurate performance monitoring (via</font>
+<a name="line86"> 86: </a><font color="#B22222">        -log_view) can be done with the larger one (that actually</font>
+<a name="line87"> 87: </a><font color="#B22222">        is the system of interest).</font>
+<a name="line88"> 88: </a><font color="#B22222">  */</font>
+<a name="line89"> 89: </a>  <a href="../../../../manualpages/Profiling/PetscPreLoadBegin.html">PetscPreLoadBegin</a>(preload, <font color="#666666">"Load system"</font>);
+
+<a name="line91"> 91: </a>  <font color="#B22222">/* - - - - - - - - - - - New Stage - - - - - - - - - - - - -</font>
+<a name="line92"> 92: </a><font color="#B22222">                         Load system</font>
+<a name="line93"> 93: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line95"> 95: </a>  <font color="#B22222">/*</font>
+<a name="line96"> 96: </a><font color="#B22222">     Open binary file.  Note that we use <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_READ</a> to indicate</font>
+<a name="line97"> 97: </a><font color="#B22222">     reading from this file.</font>
+<a name="line98"> 98: </a><font color="#B22222">  */</font>
+<a name="line99"> 99: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, file[PetscPreLoadIt], <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_READ</a>, &amp;viewer));
+
+<a name="line101">101: </a>  <font color="#B22222">/*</font>
+<a name="line102">102: </a><font color="#B22222">     Load the matrix and vector; then destroy the viewer.</font>
+<a name="line103">103: </a><font color="#B22222">  */</font>
+<a name="line104">104: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatCreate.html">MatCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;A));
+<a name="line105">105: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetFromOptions.html">MatSetFromOptions</a>(A));
+<a name="line106">106: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatLoad.html">MatLoad</a>(A, viewer));
+
+<a name="line108">108: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-mat_convert_type"</font>, mtype, <font color="#4169E1">sizeof</font>(mtype), &amp;flg));
+<a name="line109">109: </a>  <font color="#4169E1">if</font> (flg) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatConvert.html">MatConvert</a>(A, mtype, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INPLACE_MATRIX</a>, &amp;A));
+
+<a name="line111">111: </a>  <font color="#4169E1">if</font> (nearnulldim) {
+<a name="line112">112: </a>    <a href="../../../../manualpages/Mat/MatNullSpace.html">MatNullSpace</a> nullsp;
+<a name="line113">113: </a>    <a href="../../../../manualpages/Vec/Vec.html">Vec</a>         *nullvecs;
+<a name="line114">114: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     i;
+<a name="line115">115: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscMalloc1.html">PetscMalloc1</a>(nearnulldim, &amp;nullvecs));
+<a name="line116">116: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; nearnulldim; i++) {
+<a name="line117">117: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;nullvecs[i]));
+<a name="line118">118: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(nullvecs[i], viewer));
+<a name="line119">119: </a>    }
+<a name="line120">120: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatNullSpaceCreate.html">MatNullSpaceCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>, nearnulldim, nullvecs, &amp;nullsp));
+<a name="line121">121: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetNearNullSpace.html">MatSetNearNullSpace</a>(A, nullsp));
+<a name="line122">122: </a>    <font color="#4169E1">for</font> (i = 0; i &lt; nearnulldim; i++) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;nullvecs[i]));
+<a name="line123">123: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFree.html">PetscFree</a>(nullvecs));
+<a name="line124">124: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatNullSpaceDestroy.html">MatNullSpaceDestroy</a>(&amp;nullsp));
+<a name="line125">125: </a>  }
+<a name="line126">126: </a>  <font color="#4169E1">if</font> (constantnullspace) {
+<a name="line127">127: </a>    <a href="../../../../manualpages/Mat/MatNullSpace.html">MatNullSpace</a> constant;
+<a name="line128">128: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatNullSpaceCreate.html">MatNullSpaceCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>, 0, NULL, &amp;constant));
+<a name="line129">129: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetNullSpace.html">MatSetNullSpace</a>(A, constant));
+<a name="line130">130: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatNullSpaceDestroy.html">MatNullSpaceDestroy</a>(&amp;constant));
+<a name="line131">131: </a>  }
+<a name="line132">132: </a>  flg = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line133">133: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-rhs"</font>, file[2], <font color="#4169E1">sizeof</font>(file[2]), &amp;flg));
+<a name="line134">134: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;b));
+<a name="line135">135: </a>  <font color="#4169E1">if</font> (flg) { <font color="#B22222">/* rhs is stored in a separate file */</font>
+<a name="line136">136: </a>    <font color="#4169E1">if</font> (file[2][0] == '0' || file[2][0] == 0) {
+<a name="line137">137: </a>      <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>    m;
+<a name="line138">138: </a>      <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> one = 1.0;
+<a name="line139">139: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Profiling/PetscInfo.html">PetscInfo</a>(0, <font color="#666666">"Using vector of ones for RHS\n"</font>));
+<a name="line140">140: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatGetLocalSize.html">MatGetLocalSize</a>(A, &amp;m, NULL));
+<a name="line141">141: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(b, m, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>));
+<a name="line142">142: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(b));
+<a name="line143">143: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(b, one));
+<a name="line144">144: </a>    } <font color="#4169E1">else</font> {
+<a name="line145">145: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line146">146: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, file[2], <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_READ</a>, &amp;viewer));
+<a name="line147">147: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(b));
+<a name="line148">148: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(b, viewer));
+<a name="line149">149: </a>    }
+<a name="line150">150: </a>  } <font color="#4169E1">else</font> { <font color="#B22222">/* rhs is stored in the same file as matrix */</font>
+<a name="line151">151: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(b));
+<a name="line152">152: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(b, viewer));
+<a name="line153">153: </a>  }
+<a name="line154">154: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+
+<a name="line156">156: </a>  <font color="#B22222">/* Make A singular for testing zero-pivot of ilu factorization */</font>
+<a name="line157">157: </a>  <font color="#B22222">/* Example: ./ex72 -f0 &lt;datafile&gt; -test_zeropivot -pc_factor_shift_type &lt;shift_type&gt; */</font>
+<a name="line158">158: </a>  flg = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line159">159: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-test_zeropivot"</font>, &amp;flg, NULL));
+<a name="line160">160: </a>  <font color="#4169E1">if</font> (flg) { <font color="#B22222">/* set a row as zeros */</font>
+<a name="line161">161: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> row = 0;
+<a name="line162">162: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatSetOption.html">MatSetOption</a>(A, <a href="../../../../manualpages/Mat/MatOption.html">MAT_KEEP_NONZERO_PATTERN</a>, <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>));
+<a name="line163">163: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatZeroRows.html">MatZeroRows</a>(A, 1, &amp;row, 0.0, NULL, NULL));
+<a name="line164">164: </a>  }
+
+<a name="line166">166: </a>  <font color="#B22222">/* Check whether A is symmetric, then set A-&gt;symmetric option */</font>
+<a name="line167">167: </a>  flg = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line168">168: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-check_symmetry"</font>, &amp;flg, NULL));
+<a name="line169">169: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line170">170: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatIsSymmetric.html">MatIsSymmetric</a>(A, 0.0, &amp;isSymmetric));
+<a name="line171">171: </a>    <font color="#4169E1">if</font> (!isSymmetric) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Warning: A is non-symmetric \n"</font>));
+<a name="line172">172: </a>  }
+
+<a name="line174">174: </a>  <font color="#B22222">/*</font>
+<a name="line175">175: </a><font color="#B22222">     If the loaded matrix is larger than the vector (due to being padded</font>
+<a name="line176">176: </a><font color="#B22222">     to match the block size of the system), then create a new padded vector.</font>
+<a name="line177">177: </a><font color="#B22222">  */</font>
+
+<a name="line179">179: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatGetLocalSize.html">MatGetLocalSize</a>(A, NULL, &amp;n));
+<a name="line180">180: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatGetSize.html">MatGetSize</a>(A, &amp;M, NULL));
+<a name="line181">181: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecGetSize.html">VecGetSize</a>(b, &amp;m));
+<a name="line182">182: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(b, &amp;p));
+<a name="line183">183: </a>  preload = (<a href="../../../../manualpages/Sys/PetscBool.html">PetscBool</a>)(M != m || p != n); <font color="#B22222">/* Global or local dimension mismatch */</font>
+<a name="line184">184: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/MPIU_Allreduce.html">MPIU_Allreduce</a>(&amp;preload, &amp;flg, 1, MPIU_BOOL, MPI_LOR, <a href="../../../../manualpages/Sys/PetscObjectComm.html">PetscObjectComm</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A)));
+<a name="line185">185: </a>  <font color="#4169E1">if</font> (flg) { <font color="#B22222">/* Create a new vector b by padding the old one */</font>
+<a name="line186">186: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>     j, mvec, start, end, indx;
+<a name="line187">187: </a>    <a href="../../../../manualpages/Vec/Vec.html">Vec</a>          tmp;
+<a name="line188">188: </a>    <a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a> *bold;
+
+<a name="line190">190: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;tmp));
+<a name="line191">191: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetSizes.html">VecSetSizes</a>(tmp, n, <a href="../../../../manualpages/Sys/PETSC_DECIDE.html">PETSC_DECIDE</a>));
+<a name="line192">192: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetFromOptions.html">VecSetFromOptions</a>(tmp));
+<a name="line193">193: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecGetOwnershipRange.html">VecGetOwnershipRange</a>(b, &amp;start, &amp;end));
+<a name="line194">194: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecGetLocalSize.html">VecGetLocalSize</a>(b, &amp;mvec));
+<a name="line195">195: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecGetArray.html">VecGetArray</a>(b, &amp;bold));
+<a name="line196">196: </a>    <font color="#4169E1">for</font> (j = 0; j &lt; mvec; j++) {
+<a name="line197">197: </a>      indx = start + j;
+<a name="line198">198: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSetValues.html">VecSetValues</a>(tmp, 1, &amp;indx, bold + j, <a href="../../../../manualpages/Sys/INSERT_VALUES.html">INSERT_VALUES</a>));
+<a name="line199">199: </a>    }
+<a name="line200">200: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecRestoreArray.html">VecRestoreArray</a>(b, &amp;bold));
+<a name="line201">201: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;b));
+<a name="line202">202: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAssemblyBegin.html">VecAssemblyBegin</a>(tmp));
+<a name="line203">203: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAssemblyEnd.html">VecAssemblyEnd</a>(tmp));
+<a name="line204">204: </a>    b = tmp;
+<a name="line205">205: </a>  }
+
+<a name="line207">207: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatCreateVecs.html">MatCreateVecs</a>(A, &amp;x, NULL));
+<a name="line208">208: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(b, &amp;u));
+<a name="line209">209: </a>  <font color="#4169E1">if</font> (initialguessfile) {
+<a name="line210">210: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, initialguessfilename, <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_READ</a>, &amp;viewer));
+<a name="line211">211: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(x, viewer));
+<a name="line212">212: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line213">213: </a>    initialguess = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_TRUE</a>;
+<a name="line214">214: </a>  } <font color="#4169E1">else</font> <font color="#4169E1">if</font> (initialguess) {
+<a name="line215">215: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(x, 1.0));
+<a name="line216">216: </a>  } <font color="#4169E1">else</font> {
+<a name="line217">217: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(x, 0.0));
+<a name="line218">218: </a>  }
+
+<a name="line220">220: </a>  <font color="#B22222">/* Check scaling in A */</font>
+<a name="line221">221: </a>  flg = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line222">222: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-check_scaling"</font>, &amp;flg, NULL));
+<a name="line223">223: </a>  <font color="#4169E1">if</font> (flg) {
+<a name="line224">224: </a>    <a href="../../../../manualpages/Vec/Vec.html">Vec</a>       max, min;
+<a name="line225">225: </a>    <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a>  idx;
+<a name="line226">226: </a>    <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> val;
+
+<a name="line228">228: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(x, &amp;max));
+<a name="line229">229: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDuplicate.html">VecDuplicate</a>(x, &amp;min));
+<a name="line230">230: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatGetRowMaxAbs.html">MatGetRowMaxAbs</a>(A, max, NULL));
+<a name="line231">231: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatGetRowMinAbs.html">MatGetRowMinAbs</a>(A, min, NULL));
+<a name="line232">232: </a>    {
+<a name="line233">233: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerASCIIOpen.html">PetscViewerASCIIOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"max.data"</font>, &amp;viewer));
+<a name="line234">234: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(max, viewer));
+<a name="line235">235: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line236">236: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerASCIIOpen.html">PetscViewerASCIIOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"min.data"</font>, &amp;viewer));
+<a name="line237">237: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(min, viewer));
+<a name="line238">238: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line239">239: </a>    }
+<a name="line240">240: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(max, <a href="../../../../manualpages/Viewer/PETSC_VIEWER_DRAW_WORLD.html">PETSC_VIEWER_DRAW_WORLD</a>));
+<a name="line241">241: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecMax.html">VecMax</a>(max, &amp;idx, &amp;val));
+<a name="line242">242: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Largest max row element %g at row %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, (double)val, idx));
+<a name="line243">243: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(min, <a href="../../../../manualpages/Viewer/PETSC_VIEWER_DRAW_WORLD.html">PETSC_VIEWER_DRAW_WORLD</a>));
+<a name="line244">244: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecMin.html">VecMin</a>(min, &amp;idx, &amp;val));
+<a name="line245">245: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Smallest min row element %g at row %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, (double)val, idx));
+<a name="line246">246: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecMin.html">VecMin</a>(max, &amp;idx, &amp;val));
+<a name="line247">247: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Smallest max row element %g at row %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, (double)val, idx));
+<a name="line248">248: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecPointwiseDivide.html">VecPointwiseDivide</a>(max, max, min));
+<a name="line249">249: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecMax.html">VecMax</a>(max, &amp;idx, &amp;val));
+<a name="line250">250: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Largest row ratio %g at row %"</font> PetscInt_FMT <font color="#666666">"\n"</font>, (double)val, idx));
+<a name="line251">251: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(max, <a href="../../../../manualpages/Viewer/PETSC_VIEWER_DRAW_WORLD.html">PETSC_VIEWER_DRAW_WORLD</a>));
+<a name="line252">252: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;max));
+<a name="line253">253: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;min));
+<a name="line254">254: </a>  }
+
+<a name="line256">256: </a>  <font color="#B22222">/*  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatView.html">MatView</a>(A,<a href="../../../../manualpages/Viewer/PETSC_VIEWER_STDOUT_WORLD.html">PETSC_VIEWER_STDOUT_WORLD</a>)); */</font>
+<a name="line257">257: </a>  <font color="#B22222">/* - - - - - - - - - - - New Stage - - - - - - - - - - - - -</font>
+<a name="line258">258: </a><font color="#B22222">                    Setup solve for system</font>
+<a name="line259">259: </a><font color="#B22222">   - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+<a name="line260">260: </a>  <font color="#B22222">/*</font>
+<a name="line261">261: </a><font color="#B22222">     Conclude profiling last stage; begin profiling next stage.</font>
+<a name="line262">262: </a><font color="#B22222">  */</font>
+<a name="line263">263: </a>  <a href="../../../../manualpages/Profiling/PetscPreLoadStage.html">PetscPreLoadStage</a>(<font color="#666666">"KSPSetUpSolve"</font>);
+
+<a name="line265">265: </a>  <font color="#B22222">/*</font>
+<a name="line266">266: </a><font color="#B22222">     Create linear solver; set operators; set runtime options.</font>
+<a name="line267">267: </a><font color="#B22222">  */</font>
+<a name="line268">268: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPCreate.html">KSPCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;ksp));
+<a name="line269">269: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetInitialGuessNonzero.html">KSPSetInitialGuessNonzero</a>(ksp, initialguess));
+<a name="line270">270: </a>  num_numfac = 1;
+<a name="line271">271: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetInt.html">PetscOptionsGetInt</a>(NULL, NULL, <font color="#666666">"-num_numfac"</font>, &amp;num_numfac, NULL));
+<a name="line272">272: </a>  <font color="#4169E1">while</font> (num_numfac--) {
+<a name="line273">273: </a>    <a href="../../../../manualpages/PC/PC.html">PC</a>        pc;
+<a name="line274">274: </a>    <a href="../../../../manualpages/Sys/PetscBool.html">PetscBool</a> lsqr, isbddc, ismatis;
+<a name="line275">275: </a>    char      str[32];
+
+<a name="line277">277: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-ksp_type"</font>, str, <font color="#4169E1">sizeof</font>(str), &amp;lsqr));
+<a name="line278">278: </a>    <font color="#4169E1">if</font> (lsqr) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscStrcmp.html">PetscStrcmp</a>(<font color="#666666">"lsqr"</font>, str, &amp;lsqr));
+<a name="line279">279: </a>    <font color="#4169E1">if</font> (lsqr) {
+<a name="line280">280: </a>      <a href="../../../../manualpages/Mat/Mat.html">Mat</a> BtB;
+<a name="line281">281: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatTransposeMatMult.html">MatTransposeMatMult</a>(A, A, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, 4, &amp;BtB));
+<a name="line282">282: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetOperators.html">KSPSetOperators</a>(ksp, A, BtB));
+<a name="line283">283: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;BtB));
+<a name="line284">284: </a>    } <font color="#4169E1">else</font> {
+<a name="line285">285: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetOperators.html">KSPSetOperators</a>(ksp, A, A));
+<a name="line286">286: </a>    }
+<a name="line287">287: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetFromOptions.html">KSPSetFromOptions</a>(ksp));
+
+<a name="line289">289: </a>    <font color="#B22222">/* if we test BDDC, make sure pmat is of type <a href="../../../../manualpages/Mat/MATIS.html">MATIS</a> */</font>
+<a name="line290">290: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPGetPC.html">KSPGetPC</a>(ksp, &amp;pc));
+<a name="line291">291: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)pc, <a href="../../../../manualpages/PC/PCBDDC.html">PCBDDC</a>, &amp;isbddc));
+<a name="line292">292: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscObjectTypeCompare.html">PetscObjectTypeCompare</a>((<a href="../../../../manualpages/Sys/PetscObject.html">PetscObject</a>)A, <a href="../../../../manualpages/Mat/MATIS.html">MATIS</a>, &amp;ismatis));
+<a name="line293">293: </a>    <font color="#4169E1">if</font> (isbddc &amp;&amp; !ismatis) {
+<a name="line294">294: </a>      <a href="../../../../manualpages/Mat/Mat.html">Mat</a> J;
+
+<a name="line296">296: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatConvert.html">MatConvert</a>(A, <a href="../../../../manualpages/Mat/MATIS.html">MATIS</a>, <a href="../../../../manualpages/Mat/MatReuse.html">MAT_INITIAL_MATRIX</a>, &amp;J));
+<a name="line297">297: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetOperators.html">KSPSetOperators</a>(ksp, A, J));
+<a name="line298">298: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;J));
+<a name="line299">299: </a>    }
+
+<a name="line301">301: </a>    <font color="#B22222">/*</font>
+<a name="line302">302: </a><font color="#B22222">     Here we explicitly call <a href="../../../../manualpages/KSP/KSPSetUp.html">KSPSetUp</a>() and <a href="../../../../manualpages/KSP/KSPSetUpOnBlocks.html">KSPSetUpOnBlocks</a>() to</font>
+<a name="line303">303: </a><font color="#B22222">     enable more precise profiling of setting up the preconditioner.</font>
+<a name="line304">304: </a><font color="#B22222">     These calls are optional, since both will be called within</font>
+<a name="line305">305: </a><font color="#B22222">     <a href="../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>() if they haven't been called already.</font>
+<a name="line306">306: </a><font color="#B22222">    */</font>
+<a name="line307">307: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetUp.html">KSPSetUp</a>(ksp));
+<a name="line308">308: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSetUpOnBlocks.html">KSPSetUpOnBlocks</a>(ksp));
+
+<a name="line310">310: </a>    <font color="#B22222">/* - - - - - - - - - - - New Stage - - - - - - - - - - - - -</font>
+<a name="line311">311: </a><font color="#B22222">                         Solve system</font>
+<a name="line312">312: </a><font color="#B22222">      - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line314">314: </a>    <font color="#B22222">/*</font>
+<a name="line315">315: </a><font color="#B22222">     Solve linear system;</font>
+<a name="line316">316: </a><font color="#B22222">    */</font>
+<a name="line317">317: </a>    <font color="#4169E1">if</font> (trans) {
+<a name="line318">318: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSolveTranspose.html">KSPSolveTranspose</a>(ksp, b, x));
+<a name="line319">319: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPGetIterationNumber.html">KSPGetIterationNumber</a>(ksp, &amp;its));
+<a name="line320">320: </a>    } <font color="#4169E1">else</font> {
+<a name="line321">321: </a>      <a href="../../../../manualpages/Sys/PetscInt.html">PetscInt</a> num_rhs = 1;
+<a name="line322">322: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetInt.html">PetscOptionsGetInt</a>(NULL, NULL, <font color="#666666">"-num_rhs"</font>, &amp;num_rhs, NULL));
+<a name="line323">323: </a>      cknorm = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line324">324: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-cknorm"</font>, &amp;cknorm, NULL));
+<a name="line325">325: </a>      <font color="#4169E1">while</font> (num_rhs--) {
+<a name="line326">326: </a>        <font color="#4169E1">if</font> (num_rhs == 1) <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecSet.html">VecSet</a>(x, 0.0));
+<a name="line327">327: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPSolve.html">KSPSolve</a>(ksp, b, x));
+<a name="line328">328: </a>      }
+<a name="line329">329: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPGetIterationNumber.html">KSPGetIterationNumber</a>(ksp, &amp;its));
+<a name="line330">330: </a>      <font color="#4169E1">if</font> (cknorm) { <font color="#B22222">/* Check error for each rhs */</font>
+<a name="line331">331: </a>        <font color="#4169E1">if</font> (trans) {
+<a name="line332">332: </a>          <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(A, x, u));
+<a name="line333">333: </a>        } <font color="#4169E1">else</font> {
+<a name="line334">334: </a>          <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(A, x, u));
+<a name="line335">335: </a>        }
+<a name="line336">336: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(u, -1.0, b));
+<a name="line337">337: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(u, <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;norm));
+<a name="line338">338: </a>        <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"  Number of iterations = %3"</font> PetscInt_FMT <font color="#666666">"\n"</font>, its));
+<a name="line339">339: </a>        <font color="#4169E1">if</font> (!PetscIsNanScalar(norm)) {
+<a name="line340">340: </a>          <font color="#4169E1">if</font> (norm &lt; 1.e-12) {
+<a name="line341">341: </a>            <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"  Residual norm &lt; 1.e-12\n"</font>));
+<a name="line342">342: </a>          } <font color="#4169E1">else</font> {
+<a name="line343">343: </a>            <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"  Residual norm %g\n"</font>, (double)norm));
+<a name="line344">344: </a>          }
+<a name="line345">345: </a>        }
+<a name="line346">346: </a>      }
+<a name="line347">347: </a>    } <font color="#B22222">/* while (num_rhs--) */</font>
+
+<a name="line349">349: </a>    <font color="#B22222">/* - - - - - - - - - - - New Stage - - - - - - - - - - - - -</font>
+<a name="line350">350: </a><font color="#B22222">          Check error, print output, free data structures.</font>
+<a name="line351">351: </a><font color="#B22222">     - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */</font>
+
+<a name="line353">353: </a>    <font color="#B22222">/*</font>
+<a name="line354">354: </a><font color="#B22222">       Check error</font>
+<a name="line355">355: </a><font color="#B22222">    */</font>
+<a name="line356">356: </a>    <font color="#4169E1">if</font> (trans) {
+<a name="line357">357: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMultTranspose.html">MatMultTranspose</a>(A, x, u));
+<a name="line358">358: </a>    } <font color="#4169E1">else</font> {
+<a name="line359">359: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatMult.html">MatMult</a>(A, x, u));
+<a name="line360">360: </a>    }
+<a name="line361">361: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(u, -1.0, b));
+<a name="line362">362: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(u, <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;norm));
+<a name="line363">363: </a>    <font color="#B22222">/*</font>
+<a name="line364">364: </a><font color="#B22222">     Write output (optionally using table for solver details).</font>
+<a name="line365">365: </a><font color="#B22222">      - <a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>() handles output for multiprocessor jobs</font>
+<a name="line366">366: </a><font color="#B22222">        by printing from only one processor in the communicator.</font>
+<a name="line367">367: </a><font color="#B22222">      - <a href="../../../../manualpages/KSP/KSPView.html">KSPView</a>() prints information about the linear solver.</font>
+<a name="line368">368: </a><font color="#B22222">    */</font>
+<a name="line369">369: </a>    <font color="#4169E1">if</font> (table) {
+<a name="line370">370: </a>      char *matrixname = NULL, kspinfo[120];
+
+<a name="line372">372: </a>      <font color="#B22222">/*</font>
+<a name="line373">373: </a><font color="#B22222">       Open a string viewer; then write info to it.</font>
+<a name="line374">374: </a><font color="#B22222">      */</font>
+<a name="line375">375: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerStringOpen.html">PetscViewerStringOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, kspinfo, <font color="#4169E1">sizeof</font>(kspinfo), &amp;viewer));
+<a name="line376">376: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPView.html">KSPView</a>(ksp, viewer));
+<a name="line377">377: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscStrrchr.html">PetscStrrchr</a>(file[PetscPreLoadIt], '/', &amp;matrixname));
+<a name="line378">378: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"%-8.8s %3"</font> PetscInt_FMT <font color="#666666">" %2.0e %s \n"</font>, matrixname, its, (double)norm, kspinfo));
+
+<a name="line380">380: </a>      <font color="#B22222">/*</font>
+<a name="line381">381: </a><font color="#B22222">        Destroy the viewer</font>
+<a name="line382">382: </a><font color="#B22222">      */</font>
+<a name="line383">383: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line384">384: </a>    } <font color="#4169E1">else</font> {
+<a name="line385">385: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Number of iterations = %3"</font> PetscInt_FMT <font color="#666666">"\n"</font>, its));
+<a name="line386">386: </a>      <font color="#4169E1">if</font> (!PetscIsNanScalar(norm)) {
+<a name="line387">387: </a>        <font color="#4169E1">if</font> (norm &lt; 1.e-12 &amp;&amp; !PetscIsNanScalar((<a href="../../../../manualpages/Sys/PetscScalar.html">PetscScalar</a>)norm)) {
+<a name="line388">388: </a>          <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"  Residual norm &lt; 1.e-12\n"</font>));
+<a name="line389">389: </a>        } <font color="#4169E1">else</font> {
+<a name="line390">390: </a>          <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Residual norm %g\n"</font>, (double)norm));
+<a name="line391">391: </a>        }
+<a name="line392">392: </a>      }
+<a name="line393">393: </a>    }
+<a name="line394">394: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetString.html">PetscOptionsGetString</a>(NULL, NULL, <font color="#666666">"-solution"</font>, file[3], <font color="#4169E1">sizeof</font>(file[3]), &amp;flg));
+<a name="line395">395: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line396">396: </a>      <a href="../../../../manualpages/Vec/Vec.html">Vec</a>       xstar;
+<a name="line397">397: </a>      <a href="../../../../manualpages/Sys/PetscReal.html">PetscReal</a> norm;
+
+<a name="line399">399: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, file[3], <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_READ</a>, &amp;viewer));
+<a name="line400">400: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecCreate.html">VecCreate</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, &amp;xstar));
+<a name="line401">401: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecLoad.html">VecLoad</a>(xstar, viewer));
+<a name="line402">402: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecAXPY.html">VecAXPY</a>(xstar, -1.0, x));
+<a name="line403">403: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecNorm.html">VecNorm</a>(xstar, <a href="../../../../manualpages/Vec/NORM_2.html">NORM_2</a>, &amp;norm));
+<a name="line404">404: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"Error norm %g\n"</font>, (double)norm));
+<a name="line405">405: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;xstar));
+<a name="line406">406: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line407">407: </a>    }
+<a name="line408">408: </a>    <font color="#4169E1">if</font> (outputSoln) {
+<a name="line409">409: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerBinaryOpen.html">PetscViewerBinaryOpen</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"solution.petsc"</font>, <a href="../../../../manualpages/Sys/PetscFileMode.html">FILE_MODE_WRITE</a>, &amp;viewer));
+<a name="line410">410: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecView.html">VecView</a>(x, viewer));
+<a name="line411">411: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Viewer/PetscViewerDestroy.html">PetscViewerDestroy</a>(&amp;viewer));
+<a name="line412">412: </a>    }
+
+<a name="line414">414: </a>    flg = <a href="../../../../manualpages/Sys/PetscBool.html">PETSC_FALSE</a>;
+<a name="line415">415: </a>    <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscOptionsGetBool.html">PetscOptionsGetBool</a>(NULL, NULL, <font color="#666666">"-ksp_reason"</font>, &amp;flg, NULL));
+<a name="line416">416: </a>    <font color="#4169E1">if</font> (flg) {
+<a name="line417">417: </a>      <a href="../../../../manualpages/KSP/KSPConvergedReason.html">KSPConvergedReason</a> reason;
+<a name="line418">418: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPGetConvergedReason.html">KSPGetConvergedReason</a>(ksp, &amp;reason));
+<a name="line419">419: </a>      <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscPrintf.html">PetscPrintf</a>(<a href="../../../../manualpages/Sys/PETSC_COMM_WORLD.html">PETSC_COMM_WORLD</a>, <font color="#666666">"<a href="../../../../manualpages/KSP/KSPConvergedReason.html">KSPConvergedReason</a>: %s\n"</font>, KSPConvergedReasons[reason]));
+<a name="line420">420: </a>    }
+
+<a name="line422">422: </a>  } <font color="#B22222">/* while (num_numfac--) */</font>
+
+<a name="line424">424: </a>  <font color="#B22222">/*</font>
+<a name="line425">425: </a><font color="#B22222">     Free work space.  All PETSc objects should be destroyed when they</font>
+<a name="line426">426: </a><font color="#B22222">     are no longer needed.</font>
+<a name="line427">427: </a><font color="#B22222">  */</font>
+<a name="line428">428: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Mat/MatDestroy.html">MatDestroy</a>(&amp;A));
+<a name="line429">429: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;b));
+<a name="line430">430: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;u));
+<a name="line431">431: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Vec/VecDestroy.html">VecDestroy</a>(&amp;x));
+<a name="line432">432: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/KSP/KSPDestroy.html">KSPDestroy</a>(&amp;ksp));
+<a name="line433">433: </a>  <a href="../../../../manualpages/Profiling/PetscPreLoadEnd.html">PetscPreLoadEnd</a>();
+<a name="line434">434: </a>  <font color="#B22222">/* -----------------------------------------------------------</font>
+<a name="line435">435: </a><font color="#B22222">                      End of linear solver loop</font>
+<a name="line436">436: </a><font color="#B22222">     ----------------------------------------------------------- */</font>
+
+<a name="line438">438: </a>  <a href="../../../../manualpages/Sys/PetscCall.html">PetscCall</a>(<a href="../../../../manualpages/Sys/PetscFinalize.html">PetscFinalize</a>());
+<a name="line439">439: </a>  <font color="#4169E1">return</font> 0;
+<a name="line440">440: </a>}
+
+<a name="line442">442: </a><font color="#B22222">/*TEST</font>
+
+<a name="line444">444: </a><font color="#B22222">   build:</font>
+<a name="line445">445: </a><font color="#B22222">      requires: !complex</font>
+
+<a name="line447">447: </a><font color="#B22222">   testset:</font>
+<a name="line448">448: </a><font color="#B22222">      suffix: 1</font>
+<a name="line449">449: </a><font color="#B22222">      nsize: 2</font>
+<a name="line450">450: </a><font color="#B22222">      args: -f0 ${wPETSC_DIR}/share/petsc/datafiles/matrices/spd-real-int@PETSC_INDEX_SIZE@-float@PETSC_SCALAR_SIZE@</font>
+<a name="line451">451: </a><font color="#B22222">      requires: !__float128</font>
+
+<a name="line453">453: </a><font color="#B22222">   testset:</font>
+<a name="line454">454: </a><font color="#B22222">      suffix: 1a</font>
+<a name="line455">455: </a><font color="#B22222">      args: -f0 ${wPETSC_DIR}/share/petsc/datafiles/matrices/spd-real-int@PETSC_INDEX_SIZE@-float@PETSC_SCALAR_SIZE@</font>
+<a name="line456">456: </a><font color="#B22222">      requires: !__float128</font>
+
+<a name="line458">458: </a><font color="#B22222">   testset:</font>
+<a name="line459">459: </a><font color="#B22222">      nsize: 2</font>
+<a name="line460">460: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line461">461: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line462">462: </a><font color="#B22222">      args:  -ksp_type bicg</font>
+<a name="line463">463: </a><font color="#B22222">      test:</font>
+<a name="line464">464: </a><font color="#B22222">         suffix: 2</font>
+
+<a name="line466">466: </a><font color="#B22222">   testset:</font>
+<a name="line467">467: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line468">468: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line469">469: </a><font color="#B22222">      args: -ksp_type bicg</font>
+<a name="line470">470: </a><font color="#B22222">      test:</font>
+<a name="line471">471: </a><font color="#B22222">         suffix: 4</font>
+<a name="line472">472: </a><font color="#B22222">         args: -pc_type lu</font>
+<a name="line473">473: </a><font color="#B22222">      test:</font>
+<a name="line474">474: </a><font color="#B22222">         suffix: 5</font>
+
+<a name="line476">476: </a><font color="#B22222">   testset:</font>
+<a name="line477">477: </a><font color="#B22222">      suffix: 6</font>
+<a name="line478">478: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line479">479: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/fem1</font>
+<a name="line480">480: </a><font color="#B22222">      args: -pc_factor_levels 2 -pc_factor_fill 1.73 -ksp_gmres_cgs_refinement_type refine_always</font>
+
+<a name="line482">482: </a><font color="#B22222">   testset:</font>
+<a name="line483">483: </a><font color="#B22222">      TODO: Matrix row/column sizes are not compatible with block size</font>
+<a name="line484">484: </a><font color="#B22222">      suffix: 7</font>
+<a name="line485">485: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line486">486: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line487">487: </a><font color="#B22222">      args: -viewer_binary_skip_info -mat_type seqbaij</font>
+<a name="line488">488: </a><font color="#B22222">      args: -matload_block_size {{2 3 4 5 6 7 8}separate output}</font>
+<a name="line489">489: </a><font color="#B22222">      args: -ksp_max_it 100 -ksp_gmres_cgs_refinement_type refine_always</font>
+<a name="line490">490: </a><font color="#B22222">      args: -ksp_rtol 1.0e-15 -ksp_monitor_short</font>
+<a name="line491">491: </a><font color="#B22222">      test:</font>
+<a name="line492">492: </a><font color="#B22222">         suffix: a</font>
+<a name="line493">493: </a><font color="#B22222">      test:</font>
+<a name="line494">494: </a><font color="#B22222">         suffix: b</font>
+<a name="line495">495: </a><font color="#B22222">         args: -pc_factor_mat_ordering_type nd</font>
+<a name="line496">496: </a><font color="#B22222">      test:</font>
+<a name="line497">497: </a><font color="#B22222">         suffix: c</font>
+<a name="line498">498: </a><font color="#B22222">         args: -pc_factor_levels 1</font>
+<a name="line499">499: </a><font color="#B22222">      test:</font>
+<a name="line500">500: </a><font color="#B22222">         requires: metis</font>
+<a name="line501">501: </a><font color="#B22222">         suffix: d</font>
+<a name="line502">502: </a><font color="#B22222">         args: -pc_factor_mat_ordering_type metisnd</font>
+
+<a name="line504">504: </a><font color="#B22222">   testset:</font>
+<a name="line505">505: </a><font color="#B22222">      TODO: Matrix row/column sizes are not compatible with block size</font>
+<a name="line506">506: </a><font color="#B22222">      suffix: 7_d</font>
+<a name="line507">507: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line508">508: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line509">509: </a><font color="#B22222">      args: -viewer_binary_skip_info -mat_type seqbaij</font>
+<a name="line510">510: </a><font color="#B22222">      args: -matload_block_size {{2 3 4 5 6 7 8}shared output}</font>
+<a name="line511">511: </a><font color="#B22222">      args: -ksp_type preonly -pc_type lu</font>
+
+<a name="line513">513: </a><font color="#B22222">   testset:</font>
+<a name="line514">514: </a><font color="#B22222">      suffix: 8</font>
+<a name="line515">515: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line516">516: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line517">517: </a><font color="#B22222">      args: -ksp_diagonal_scale -pc_type eisenstat -ksp_monitor_short -ksp_diagonal_scale_fix -ksp_gmres_cgs_refinement_type refine_always -mat_no_inode</font>
+
+<a name="line519">519: </a><font color="#B22222">   testset:</font>
+<a name="line520">520: </a><font color="#B22222">      TODO: Matrix row/column sizes are not compatible with block size</font>
+<a name="line521">521: </a><font color="#B22222">      suffix: 9</font>
+<a name="line522">522: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line523">523: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line524">524: </a><font color="#B22222">      args: -viewer_binary_skip_info  -matload_block_size {{1 2 3 4 5 6 7}separate output} -ksp_max_it 100 -ksp_gmres_cgs_refinement_type refine_always -ksp_rtol 1.0e-15 -ksp_monitor_short</font>
+<a name="line525">525: </a><font color="#B22222">      test:</font>
+<a name="line526">526: </a><font color="#B22222">         suffix: a</font>
+<a name="line527">527: </a><font color="#B22222">         args: -mat_type seqbaij</font>
+<a name="line528">528: </a><font color="#B22222">      test:</font>
+<a name="line529">529: </a><font color="#B22222">         suffix: b</font>
+<a name="line530">530: </a><font color="#B22222">         args: -mat_type seqbaij -trans</font>
+<a name="line531">531: </a><font color="#B22222">      test:</font>
+<a name="line532">532: </a><font color="#B22222">         suffix: c</font>
+<a name="line533">533: </a><font color="#B22222">         nsize: 2</font>
+<a name="line534">534: </a><font color="#B22222">         args: -mat_type mpibaij</font>
+<a name="line535">535: </a><font color="#B22222">      test:</font>
+<a name="line536">536: </a><font color="#B22222">         suffix: d</font>
+<a name="line537">537: </a><font color="#B22222">         nsize: 2</font>
+<a name="line538">538: </a><font color="#B22222">         args: -mat_type mpibaij -trans</font>
+<a name="line539">539: </a><font color="#B22222">      test:</font>
+<a name="line540">540: </a><font color="#B22222">         suffix: e</font>
+<a name="line541">541: </a><font color="#B22222">         nsize: 3</font>
+<a name="line542">542: </a><font color="#B22222">         args: -mat_type mpibaij</font>
+<a name="line543">543: </a><font color="#B22222">      test:</font>
+<a name="line544">544: </a><font color="#B22222">         suffix: f</font>
+<a name="line545">545: </a><font color="#B22222">         nsize: 3</font>
+<a name="line546">546: </a><font color="#B22222">         args: -mat_type mpibaij -trans</font>
+
+<a name="line548">548: </a><font color="#B22222">   testset:</font>
+<a name="line549">549: </a><font color="#B22222">      suffix: 10</font>
+<a name="line550">550: </a><font color="#B22222">      nsize: 2</font>
+<a name="line551">551: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line552">552: </a><font color="#B22222">      args: -ksp_type fgmres -pc_type ksp -f0 ${DATAFILESPATH}/matrices/medium -ksp_fgmres_modifypcksp -ksp_monitor_short</font>
+
+<a name="line554">554: </a><font color="#B22222">   testset:</font>
+<a name="line555">555: </a><font color="#B22222">      suffix: 12</font>
+<a name="line556">556: </a><font color="#B22222">      requires: datafilespath matlab</font>
+<a name="line557">557: </a><font color="#B22222">      args: -pc_type lu -pc_factor_mat_solver_type matlab -f0 ${DATAFILESPATH}/matrices/arco1</font>
+
+<a name="line559">559: </a><font color="#B22222">   testset:</font>
+<a name="line560">560: </a><font color="#B22222">      suffix: 13</font>
+<a name="line561">561: </a><font color="#B22222">      requires: datafilespath lusol</font>
+<a name="line562">562: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/arco1</font>
+<a name="line563">563: </a><font color="#B22222">      args: -mat_type lusol -pc_type lu</font>
+
+<a name="line565">565: </a><font color="#B22222">   testset:</font>
+<a name="line566">566: </a><font color="#B22222">      nsize: 3</font>
+<a name="line567">567: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium</font>
+<a name="line568">568: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line569">569: </a><font color="#B22222">      test:</font>
+<a name="line570">570: </a><font color="#B22222">         suffix: 14</font>
+<a name="line571">571: </a><font color="#B22222">         requires: spai</font>
+<a name="line572">572: </a><font color="#B22222">         args: -pc_type spai</font>
+<a name="line573">573: </a><font color="#B22222">      test:</font>
+<a name="line574">574: </a><font color="#B22222">         suffix: 15</font>
+<a name="line575">575: </a><font color="#B22222">         requires: hypre !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line576">576: </a><font color="#B22222">         args: -pc_type hypre -pc_hypre_type pilut</font>
+<a name="line577">577: </a><font color="#B22222">      test:</font>
+<a name="line578">578: </a><font color="#B22222">         suffix: 16</font>
+<a name="line579">579: </a><font color="#B22222">         requires: hypre !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line580">580: </a><font color="#B22222">         args: -pc_type hypre -pc_hypre_type parasails</font>
+<a name="line581">581: </a><font color="#B22222">      test:</font>
+<a name="line582">582: </a><font color="#B22222">         suffix: 17</font>
+<a name="line583">583: </a><font color="#B22222">         requires: hypre !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line584">584: </a><font color="#B22222">         args: -pc_type hypre -pc_hypre_type boomeramg</font>
+<a name="line585">585: </a><font color="#B22222">      test:</font>
+<a name="line586">586: </a><font color="#B22222">         suffix: 18</font>
+<a name="line587">587: </a><font color="#B22222">         requires: hypre !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line588">588: </a><font color="#B22222">         args: -pc_type hypre -pc_hypre_type euclid</font>
+
+<a name="line590">590: </a><font color="#B22222">   testset:</font>
+<a name="line591">591: </a><font color="#B22222">      suffix: 19</font>
+<a name="line592">592: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line593">593: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/poisson1</font>
+<a name="line594">594: </a><font color="#B22222">      args: -ksp_type cg -pc_type icc</font>
+<a name="line595">595: </a><font color="#B22222">      args: -pc_factor_levels {{0 2 4}separate output}</font>
+<a name="line596">596: </a><font color="#B22222">      test:</font>
+<a name="line597">597: </a><font color="#B22222">      test:</font>
+<a name="line598">598: </a><font color="#B22222">         args: -mat_type seqsbaij</font>
+
+<a name="line600">600: </a><font color="#B22222">   testset:</font>
+<a name="line601">601: </a><font color="#B22222">      suffix: ILU</font>
+<a name="line602">602: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line603">603: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small</font>
+<a name="line604">604: </a><font color="#B22222">      args: -pc_factor_levels 1</font>
+<a name="line605">605: </a><font color="#B22222">      test:</font>
+<a name="line606">606: </a><font color="#B22222">      test:</font>
+<a name="line607">607: </a><font color="#B22222">         # This is tested against regular ILU (used to be denoted ILUBAIJ)</font>
+<a name="line608">608: </a><font color="#B22222">         args: -mat_type baij</font>
+
+<a name="line610">610: </a><font color="#B22222">   testset:</font>
+<a name="line611">611: </a><font color="#B22222">      suffix: aijcusparse</font>
+<a name="line612">612: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) cuda</font>
+<a name="line613">613: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium -ksp_monitor_short -ksp_view -mat_view ascii::ascii_info -mat_type aijcusparse -pc_factor_mat_solver_type cusparse -pc_type ilu -vec_type cuda</font>
+
+<a name="line615">615: </a><font color="#B22222">   testset:</font>
+<a name="line616">616: </a><font color="#B22222">      TODO: No output file. Need to determine if deprecated</font>
+<a name="line617">617: </a><font color="#B22222">      suffix: asm_viennacl</font>
+<a name="line618">618: </a><font color="#B22222">      nsize: 2</font>
+<a name="line619">619: </a><font color="#B22222">      requires: viennacl</font>
+<a name="line620">620: </a><font color="#B22222">      args: -pc_type asm -pc_asm_sub_mat_type aijviennacl -f0 ${wPETSC_DIR}/share/petsc/datafiles/matrices/spd-real-int${PETSC_INDEX_SIZE}-float${PETSC_SCALAR_SIZE}</font>
+
+<a name="line622">622: </a><font color="#B22222">   testset:</font>
+<a name="line623">623: </a><font color="#B22222">      nsize: 2</font>
+<a name="line624">624: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) hypre !defined(PETSC_HAVE_HYPRE_DEVICE)</font>
+<a name="line625">625: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/poisson2.gz -ksp_monitor_short -ksp_rtol 1.E-9 -pc_type hypre -pc_hypre_type boomeramg</font>
+<a name="line626">626: </a><font color="#B22222">      test:</font>
+<a name="line627">627: </a><font color="#B22222">         suffix: boomeramg_euclid</font>
+<a name="line628">628: </a><font color="#B22222">         args: -pc_hypre_boomeramg_smooth_type Euclid -pc_hypre_boomeramg_smooth_num_levels 2 -pc_hypre_boomeramg_eu_level 1 -pc_hypre_boomeramg_eu_droptolerance 0.01</font>
+<a name="line629">629: </a><font color="#B22222">         TODO: Need to determine if deprecated</font>
+<a name="line630">630: </a><font color="#B22222">      test:</font>
+<a name="line631">631: </a><font color="#B22222">         suffix: boomeramg_euclid_bj</font>
+<a name="line632">632: </a><font color="#B22222">         args: -pc_hypre_boomeramg_smooth_type Euclid -pc_hypre_boomeramg_smooth_num_levels 2 -pc_hypre_boomeramg_eu_level 1 -pc_hypre_boomeramg_eu_droptolerance 0.01 -pc_hypre_boomeramg_eu_bj</font>
+<a name="line633">633: </a><font color="#B22222">         TODO: Need to determine if deprecated</font>
+<a name="line634">634: </a><font color="#B22222">      test:</font>
+<a name="line635">635: </a><font color="#B22222">         suffix: boomeramg_parasails</font>
+<a name="line636">636: </a><font color="#B22222">         args: -pc_hypre_boomeramg_smooth_type ParaSails -pc_hypre_boomeramg_smooth_num_levels 2</font>
+<a name="line637">637: </a><font color="#B22222">      test:</font>
+<a name="line638">638: </a><font color="#B22222">         suffix: boomeramg_pilut</font>
+<a name="line639">639: </a><font color="#B22222">         args: -pc_hypre_boomeramg_smooth_type Pilut -pc_hypre_boomeramg_smooth_num_levels 2</font>
+<a name="line640">640: </a><font color="#B22222">      test:</font>
+<a name="line641">641: </a><font color="#B22222">         suffix: boomeramg_schwarz</font>
+<a name="line642">642: </a><font color="#B22222">         args: -pc_hypre_boomeramg_smooth_type Schwarz-smoothers</font>
+
+<a name="line644">644: </a><font color="#B22222">   testset:</font>
+<a name="line645">645: </a><font color="#B22222">      suffix: cg_singlereduction</font>
+<a name="line646">646: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line647">647: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small</font>
+<a name="line648">648: </a><font color="#B22222">      args: -mat_type mpisbaij -ksp_type cg -pc_type eisenstat -ksp_monitor_short -ksp_converged_reason</font>
+<a name="line649">649: </a><font color="#B22222">      test:</font>
+<a name="line650">650: </a><font color="#B22222">      test:</font>
+<a name="line651">651: </a><font color="#B22222">         args: -ksp_cg_single_reduction</font>
+
+<a name="line653">653: </a><font color="#B22222">   testset:</font>
+<a name="line654">654: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line655">655: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/poisson2.gz</font>
+<a name="line656">656: </a><font color="#B22222">      args: -ksp_monitor_short -pc_type icc</font>
+<a name="line657">657: </a><font color="#B22222">      test:</font>
+<a name="line658">658: </a><font color="#B22222">         suffix: cr</font>
+<a name="line659">659: </a><font color="#B22222">         args: -ksp_type cr</font>
+<a name="line660">660: </a><font color="#B22222">      test:</font>
+<a name="line661">661: </a><font color="#B22222">         suffix: lcd</font>
+<a name="line662">662: </a><font color="#B22222">         args: -ksp_type lcd</font>
+
+<a name="line664">664: </a><font color="#B22222">   testset:</font>
+<a name="line665">665: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line666">666: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small</font>
+<a name="line667">667: </a><font color="#B22222">      args: -ksp_monitor_short -ksp_view -mat_view ascii::ascii_info</font>
+<a name="line668">668: </a><font color="#B22222">      test:</font>
+<a name="line669">669: </a><font color="#B22222">         suffix: seqaijcrl</font>
+<a name="line670">670: </a><font color="#B22222">         args: -mat_type seqaijcrl</font>
+<a name="line671">671: </a><font color="#B22222">      test:</font>
+<a name="line672">672: </a><font color="#B22222">         suffix: seqaijperm</font>
+<a name="line673">673: </a><font color="#B22222">         args: -mat_type seqaijperm</font>
+
+<a name="line675">675: </a><font color="#B22222">   testset:</font>
+<a name="line676">676: </a><font color="#B22222">      nsize: 2</font>
+<a name="line677">677: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line678">678: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small</font>
+<a name="line679">679: </a><font color="#B22222">      args: -ksp_monitor_short -ksp_view</font>
+<a name="line680">680: </a><font color="#B22222">      # Different output files</font>
+<a name="line681">681: </a><font color="#B22222">      test:</font>
+<a name="line682">682: </a><font color="#B22222">         suffix: mpiaijcrl</font>
+<a name="line683">683: </a><font color="#B22222">         args: -mat_type mpiaijcrl</font>
+<a name="line684">684: </a><font color="#B22222">      test:</font>
+<a name="line685">685: </a><font color="#B22222">         suffix: mpiaijperm</font>
+<a name="line686">686: </a><font color="#B22222">         args: -mat_type mpiaijperm</font>
+
+<a name="line688">688: </a><font color="#B22222">   testset:</font>
+<a name="line689">689: </a><font color="#B22222">      nsize: 4</font>
+<a name="line690">690: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) !defined(PETSC_HAVE_I_MPI_NUMVERSION)</font>
+<a name="line691">691: </a><font color="#B22222">      args: -ksp_monitor_short -ksp_view</font>
+<a name="line692">692: </a><font color="#B22222">      test:</font>
+<a name="line693">693: </a><font color="#B22222">         suffix: xxt</font>
+<a name="line694">694: </a><font color="#B22222">         args: -f0 ${DATAFILESPATH}/matrices/poisson1 -check_symmetry -ksp_type cg -pc_type tfs</font>
+<a name="line695">695: </a><font color="#B22222">      test:</font>
+<a name="line696">696: </a><font color="#B22222">         suffix: xyt</font>
+<a name="line697">697: </a><font color="#B22222">         args: -f0 ${DATAFILESPATH}/matrices/medium -ksp_type gmres -pc_type tfs</font>
+
+<a name="line699">699: </a><font color="#B22222">   testset:</font>
+<a name="line700">700: </a><font color="#B22222">      # The output file here is the same as mumps</font>
+<a name="line701">701: </a><font color="#B22222">      suffix: mumps_cholesky</font>
+<a name="line702">702: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line703">703: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps</font>
+<a name="line704">704: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type cholesky -pc_factor_mat_solver_type mumps -num_numfac 2 -num_rhs 2</font>
+<a name="line705">705: </a><font color="#B22222">      nsize: {{1 2}}</font>
+<a name="line706">706: </a><font color="#B22222">      test:</font>
+<a name="line707">707: </a><font color="#B22222">         args: -mat_type sbaij -mat_ignore_lower_triangular</font>
+<a name="line708">708: </a><font color="#B22222">      test:</font>
+<a name="line709">709: </a><font color="#B22222">         args: -mat_type aij</font>
+<a name="line710">710: </a><font color="#B22222">      test:</font>
+<a name="line711">711: </a><font color="#B22222">         args: -mat_type aij -matload_spd</font>
+
+<a name="line713">713: </a><font color="#B22222">   testset:</font>
+<a name="line714">714: </a><font color="#B22222">      # The output file here is the same as mumps</font>
+<a name="line715">715: </a><font color="#B22222">      suffix: mumps_lu</font>
+<a name="line716">716: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line717">717: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps</font>
+<a name="line718">718: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps -num_numfac 2 -num_rhs 2</font>
+<a name="line719">719: </a><font color="#B22222">      test:</font>
+<a name="line720">720: </a><font color="#B22222">         args: -mat_type seqaij</font>
+<a name="line721">721: </a><font color="#B22222">      test:</font>
+<a name="line722">722: </a><font color="#B22222">         nsize: 2</font>
+<a name="line723">723: </a><font color="#B22222">         args: -mat_type mpiaij</font>
+<a name="line724">724: </a><font color="#B22222">      test:</font>
+<a name="line725">725: </a><font color="#B22222">         args: -mat_type seqbaij -matload_block_size 2</font>
+<a name="line726">726: </a><font color="#B22222">      test:</font>
+<a name="line727">727: </a><font color="#B22222">         nsize: 2</font>
+<a name="line728">728: </a><font color="#B22222">         args: -mat_type mpibaij -matload_block_size 2</font>
+<a name="line729">729: </a><font color="#B22222">      test:</font>
+<a name="line730">730: </a><font color="#B22222">         args: -mat_type aij -mat_mumps_icntl_7 5</font>
+<a name="line731">731: </a><font color="#B22222">         TODO: Need to determine if deprecated</font>
+
+<a name="line733">733: </a><font color="#B22222">   test:</font>
+<a name="line734">734: </a><font color="#B22222">      suffix: mumps_lu_parmetis</font>
+<a name="line735">735: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line736">736: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps parmetis</font>
+<a name="line737">737: </a><font color="#B22222">      nsize: 2</font>
+<a name="line738">738: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps -num_numfac 2 -num_rhs 2 -mat_type mpiaij -mat_mumps_icntl_28 2 -mat_mumps_icntl_29 2</font>
+
+<a name="line740">740: </a><font color="#B22222">   test:</font>
+<a name="line741">741: </a><font color="#B22222">      suffix: mumps_lu_ptscotch</font>
+<a name="line742">742: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line743">743: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps ptscotch</font>
+<a name="line744">744: </a><font color="#B22222">      nsize: 2</font>
+<a name="line745">745: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps -num_numfac 2 -num_rhs 2 -mat_type mpiaij -mat_mumps_icntl_28 2 -mat_mumps_icntl_29 1</font>
+
+<a name="line747">747: </a><font color="#B22222">   testset:</font>
+<a name="line748">748: </a><font color="#B22222">      # The output file here is the same as mumps</font>
+<a name="line749">749: </a><font color="#B22222">      suffix: mumps_redundant</font>
+<a name="line750">750: </a><font color="#B22222">      output_file: output/ex72_mumps_redundant.out</font>
+<a name="line751">751: </a><font color="#B22222">      nsize: 8</font>
+<a name="line752">752: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps</font>
+<a name="line753">753: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium -ksp_type preonly -pc_type redundant -pc_redundant_number {{8 7 6 5 4 3 2 1}} -redundant_pc_factor_mat_solver_type mumps -num_numfac 2 -num_rhs 2</font>
+
+<a name="line755">755: </a><font color="#B22222">   testset:</font>
+<a name="line756">756: </a><font color="#B22222">      suffix: pastix_cholesky</font>
+<a name="line757">757: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) pastix</font>
+<a name="line758">758: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line759">759: </a><font color="#B22222">      nsize: {{1 2}}</font>
+<a name="line760">760: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_factor_mat_solver_type pastix -num_numfac 2 -num_rhs 2 -pc_type cholesky -mat_type sbaij -mat_ignore_lower_triangular</font>
+
+<a name="line762">762: </a><font color="#B22222">   testset:</font>
+<a name="line763">763: </a><font color="#B22222">      suffix: pastix_lu</font>
+<a name="line764">764: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) pastix</font>
+<a name="line765">765: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type pastix -num_numfac 2 -num_rhs 2</font>
+<a name="line766">766: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line767">767: </a><font color="#B22222">      test:</font>
+<a name="line768">768: </a><font color="#B22222">         args: -mat_type seqaij</font>
+<a name="line769">769: </a><font color="#B22222">      test:</font>
+<a name="line770">770: </a><font color="#B22222">         nsize: 2</font>
+<a name="line771">771: </a><font color="#B22222">         args: -mat_type mpiaij</font>
+
+<a name="line773">773: </a><font color="#B22222">   testset:</font>
+<a name="line774">774: </a><font color="#B22222">      suffix: pastix_redundant</font>
+<a name="line775">775: </a><font color="#B22222">      output_file: output/ex72_mumps_redundant.out</font>
+<a name="line776">776: </a><font color="#B22222">      nsize: 8</font>
+<a name="line777">777: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) pastix</font>
+<a name="line778">778: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium -ksp_type preonly -pc_type redundant -pc_redundant_number {{8 7 6 5 4 3 2 1}} -redundant_pc_factor_mat_solver_type pastix -num_numfac 2 -num_rhs 2</font>
+
+<a name="line780">780: </a><font color="#B22222">   testset:</font>
+<a name="line781">781: </a><font color="#B22222">      suffix: superlu_dist_lu</font>
+<a name="line782">782: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) superlu_dist</font>
+<a name="line783">783: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line784">784: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type superlu_dist -num_numfac 2 -num_rhs 2</font>
+<a name="line785">785: </a><font color="#B22222">      nsize: {{1 2}}</font>
+
+<a name="line787">787: </a><font color="#B22222">   testset:</font>
+<a name="line788">788: </a><font color="#B22222">      suffix: superlu_dist_redundant</font>
+<a name="line789">789: </a><font color="#B22222">      nsize: 8</font>
+<a name="line790">790: </a><font color="#B22222">      output_file: output/ex72_mumps_redundant.out</font>
+<a name="line791">791: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) superlu_dist</font>
+<a name="line792">792: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/medium -ksp_type preonly -pc_type redundant -pc_redundant_number {{8 7 6 5 4 3 2 1}} -redundant_pc_factor_mat_solver_type superlu_dist -num_numfac 2 -num_rhs 2</font>
+
+<a name="line794">794: </a><font color="#B22222">   testset:</font>
+<a name="line795">795: </a><font color="#B22222">      suffix: superlu_lu</font>
+<a name="line796">796: </a><font color="#B22222">      output_file: output/ex72_mumps.out</font>
+<a name="line797">797: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) superlu</font>
+<a name="line798">798: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -pc_factor_mat_solver_type superlu -num_numfac 2 -num_rhs 2</font>
+
+<a name="line800">800: </a><font color="#B22222">   testset:</font>
+<a name="line801">801: </a><font color="#B22222">      suffix: umfpack</font>
+<a name="line802">802: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) suitesparse</font>
+<a name="line803">803: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -ksp_type preonly -pc_type lu -mat_type seqaij -pc_factor_mat_solver_type umfpack -num_numfac 2 -num_rhs 2</font>
+
+<a name="line805">805: </a><font color="#B22222">   testset:</font>
+<a name="line806">806: </a><font color="#B22222">      suffix: zeropivot</font>
+<a name="line807">807: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps</font>
+<a name="line808">808: </a><font color="#B22222">      args: -f0 ${DATAFILESPATH}/matrices/small -test_zeropivot -ksp_converged_reason -ksp_type fgmres -pc_type ksp</font>
+<a name="line809">809: </a><font color="#B22222">      test:</font>
+<a name="line810">810: </a><font color="#B22222">         nsize: 3</font>
+<a name="line811">811: </a><font color="#B22222">         args: -ksp_pc_type bjacobi</font>
+<a name="line812">812: </a><font color="#B22222">      test:</font>
+<a name="line813">813: </a><font color="#B22222">         nsize: 2</font>
+<a name="line814">814: </a><font color="#B22222">         args: -ksp_ksp_type cg -ksp_pc_type bjacobi -ksp_pc_bjacobi_blocks 1</font>
+<a name="line815">815: </a><font color="#B22222">      #test:</font>
+<a name="line816">816: </a><font color="#B22222">         #nsize: 3</font>
+<a name="line817">817: </a><font color="#B22222">         #args: -ksp_ksp_converged_reason -ksp_pc_type bjacobi -ksp_sub_ksp_converged_reason</font>
+<a name="line818">818: </a><font color="#B22222">         #TODO: Need to determine if deprecated</font>
+
+<a name="line820">820: </a><font color="#B22222">   testset:</font>
+<a name="line821">821: </a><font color="#B22222">      requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line822">822: </a><font color="#B22222">      args: -mat_convert_type is -f0 ${DATAFILESPATH}/matrices/medium -ksp_type fgmres</font>
+<a name="line823">823: </a><font color="#B22222">      test:</font>
+<a name="line824">824: </a><font color="#B22222">         suffix: aij_gdsw</font>
+<a name="line825">825: </a><font color="#B22222">         nsize: 4</font>
+<a name="line826">826: </a><font color="#B22222">         args: -mat_convert_type aij -pc_type mg -pc_mg_levels 2 -pc_mg_adapt_interp_coarse_space gdsw -pc_mg_galerkin -mg_levels_pc_type asm</font>
+<a name="line827">827: </a><font color="#B22222">      test:</font>
+<a name="line828">828: </a><font color="#B22222">         output_file: output/ex72_aij_gdsw.out</font>
+<a name="line829">829: </a><font color="#B22222">         suffix: is_gdsw</font>
+<a name="line830">830: </a><font color="#B22222">         nsize: 4</font>
+<a name="line831">831: </a><font color="#B22222">         args: -pc_type mg -pc_mg_levels 2  -pc_mg_adapt_interp_coarse_space gdsw -pc_mg_galerkin -mg_levels_pc_type asm</font>
+<a name="line832">832: </a><font color="#B22222">      test:</font>
+<a name="line833">833: </a><font color="#B22222">         suffix: is_asm</font>
+<a name="line834">834: </a><font color="#B22222">         nsize: {{1 2}separate output}</font>
+<a name="line835">835: </a><font color="#B22222">         args: -pc_type asm</font>
+<a name="line836">836: </a><font color="#B22222">      test:</font>
+<a name="line837">837: </a><font color="#B22222">         suffix: bddc_seq</font>
+<a name="line838">838: </a><font color="#B22222">         nsize: 1</font>
+<a name="line839">839: </a><font color="#B22222">         args: -pc_type bddc</font>
+<a name="line840">840: </a><font color="#B22222">      test:</font>
+<a name="line841">841: </a><font color="#B22222">         suffix: bddc_par</font>
+<a name="line842">842: </a><font color="#B22222">         nsize: 2</font>
+<a name="line843">843: </a><font color="#B22222">         args: -pc_type bddc</font>
+<a name="line844">844: </a><font color="#B22222">      test:</font>
+<a name="line845">845: </a><font color="#B22222">         requires: parmetis</font>
+<a name="line846">846: </a><font color="#B22222">         suffix: bddc_par_nd_parmetis</font>
+<a name="line847">847: </a><font color="#B22222">         filter: sed -e "s/Number of iterations =   [0-9]/Number of iterations = 9/g"</font>
+<a name="line848">848: </a><font color="#B22222">         nsize: 4</font>
+<a name="line849">849: </a><font color="#B22222">         args: -ksp_error_if_not_converged -pc_type bddc -mat_is_disassemble_l2g_type nd -mat_partitioning_type parmetis</font>
+<a name="line850">850: </a><font color="#B22222">      test:</font>
+<a name="line851">851: </a><font color="#B22222">         requires: ptscotch defined(PETSC_HAVE_SCOTCH_PARMETIS_V3_NODEND)</font>
+<a name="line852">852: </a><font color="#B22222">         suffix: bddc_par_nd_ptscotch</font>
+<a name="line853">853: </a><font color="#B22222">         filter: sed -e "s/Number of iterations =   [0-9]/Number of iterations = 9/g"</font>
+<a name="line854">854: </a><font color="#B22222">         nsize: 4</font>
+<a name="line855">855: </a><font color="#B22222">         args: -ksp_error_if_not_converged -pc_type bddc -mat_is_disassemble_l2g_type nd -mat_partitioning_type ptscotch</font>
+
+<a name="line857">857: </a><font color="#B22222">   testset:</font>
+<a name="line858">858: </a><font color="#B22222">      requires: !__float128 hpddm slepc defined(PETSC_HAVE_DYNAMIC_LIBRARIES) defined(PETSC_USE_SHARED_LIBRARIES)</font>
+<a name="line859">859: </a><font color="#B22222">      test:</font>
+<a name="line860">860: </a><font color="#B22222">         suffix: hpddm_mat</font>
+<a name="line861">861: </a><font color="#B22222">         output_file: output/ex72_bddc_seq.out</font>
+<a name="line862">862: </a><font color="#B22222">         filter: sed -e "s/Number of iterations =   2/Number of iterations =   1/g"</font>
+<a name="line863">863: </a><font color="#B22222">         nsize: 2</font>
+<a name="line864">864: </a><font color="#B22222">         args: -f0 ${wPETSC_DIR}/share/petsc/datafiles/matrices/spd-real-int@PETSC_INDEX_SIZE@-float@PETSC_SCALAR_SIZE@ -pc_type hpddm -pc_hpddm_define_subdomains -pc_hpddm_levels_1_sub_pc_type cholesky -pc_hpddm_levels_1_eps_nev 5 -pc_hpddm_levels_1_st_pc_type mat</font>
+<a name="line865">865: </a><font color="#B22222">      test:</font>
+<a name="line866">866: </a><font color="#B22222">         requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES)</font>
+<a name="line867">867: </a><font color="#B22222">         suffix: hpddm_gen_non_hermitian</font>
+<a name="line868">868: </a><font color="#B22222">         output_file: output/ex72_2.out</font>
+<a name="line869">869: </a><font color="#B22222">         nsize: 4</font>
+<a name="line870">870: </a><font color="#B22222">         args: -f0 ${DATAFILESPATH}/matrices/arco1 -pc_type hpddm -pc_hpddm_define_subdomains -pc_hpddm_levels_1_sub_pc_type lu -pc_hpddm_levels_1_eps_nev 10 -pc_hpddm_levels_1_st_share_sub_ksp -pc_hpddm_levels_1_eps_gen_non_hermitian -pc_hpddm_coarse_mat_type baij -pc_hpddm_block_splitting -pc_hpddm_levels_1_eps_threshold 0.7 -pc_hpddm_coarse_pc_type lu -ksp_pc_side right</font>
+<a name="line871">871: </a><font color="#B22222">      test:</font>
+<a name="line872">872: </a><font color="#B22222">         requires: datafilespath double !defined(PETSC_USE_64BIT_INDICES) mumps !defined(PETSCTEST_VALGRIND)</font>
+<a name="line873">873: </a><font color="#B22222">         suffix: hpddm_gen_non_hermitian_baij</font>
+<a name="line874">874: </a><font color="#B22222">         output_file: output/ex72_5.out</font>
+<a name="line875">875: </a><font color="#B22222">         nsize: 4</font>
+<a name="line876">876: </a><font color="#B22222">         timeoutfactor: 2</font>
+<a name="line877">877: </a><font color="#B22222">         args: -f0 ${DATAFILESPATH}/matrices/arco6 -pc_type hpddm -pc_hpddm_define_subdomains -pc_hpddm_levels_1_sub_pc_type lu -pc_hpddm_levels_1_eps_nev 30 -pc_hpddm_levels_1_st_share_sub_ksp -pc_hpddm_levels_1_eps_gen_non_hermitian -pc_hpddm_coarse_mat_type baij -pc_hpddm_block_splitting -pc_hpddm_levels_1_eps_threshold 0.8 -pc_hpddm_coarse_pc_type lu -ksp_pc_side right -mat_type baij -pc_hpddm_levels_1_sub_pc_factor_mat_solver_type mumps -pc_hpddm_levels_1_eps_tol 1.0e-2</font>
+<a name="line878">878: </a><font color="#B22222">TEST*/</font>
+</pre>
+</body>
+
+</html>
